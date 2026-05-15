@@ -1,0 +1,7 @@
+bin/
+obj/
+_tmp_schemas/
+.ctu/
+.codexteamup/
+*.user
+*.suo

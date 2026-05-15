@@ -1,0 +1,480 @@
+using System.Diagnostics;
+using System.Net;
+using System.Net.Sockets;
+using System.Text;
+using System.Text.Json;
+using CodexTeamUp.AgentBus;
+using CodexTeamUp.AppServer;
+using CodexTeamUp.Core;
+using CodexTeamUp.Mcp;
+
+var url = ReadOption(args, "--url")
+    ?? Environment.GetEnvironmentVariable("CTU_SERVICE_URL")
+    ?? "http://127.0.0.1:47319/";
+if (!url.EndsWith("/", StringComparison.Ordinal))
+{
+    url += "/";
+}
+
+var serviceUri = new Uri(url);
+var port = serviceUri.Port;
+var defaultBusRoot = Environment.GetEnvironmentVariable("CTU_AGENTBUS_ROOT")
+    ?? Path.Combine(Environment.CurrentDirectory, ".codexteamup", "agentbus");
+var pipeName = Environment.GetEnvironmentVariable("CODEX_WRAPPER_PIPE_NAME");
+var parentProcessId = ReadIntOption(args, "--parent-pid")
+    ?? ReadIntEnvironment("CTU_PARENT_PROCESS_ID");
+var registry = McpToolRegistry.CreateDefault(defaultBusRoot, new WrapperPipeAppServerClient(pipeName));
+var jsonOptions = new JsonSerializerOptions(JsonFile.Options) { WriteIndented = false };
+
+using var shutdown = new CancellationTokenSource();
+var parentMonitor = parentProcessId is int pid
+    ? MonitorParentProcessAsync(pid, shutdown)
+    : Task.CompletedTask;
+
+var listener = new TcpListener(IPAddress.Loopback, port);
+listener.Start();
+
+Console.WriteLine($"CodexTeamUp.Service listening on http://127.0.0.1:{port}/");
+Console.WriteLine($"Default AgentBus root: {defaultBusRoot}");
+if (parentProcessId is int parentPid)
+{
+    Console.WriteLine($"Parent process monitor: {parentPid}");
+}
+
+try
+{
+    while (!shutdown.IsCancellationRequested)
+    {
+        try
+        {
+            var client = await listener.AcceptTcpClientAsync(shutdown.Token).ConfigureAwait(false);
+            _ = Task.Run(() => HandleClientAsync(client), shutdown.Token);
+        }
+        catch (OperationCanceledException) when (shutdown.IsCancellationRequested)
+        {
+            break;
+        }
+        catch (ObjectDisposedException) when (shutdown.IsCancellationRequested)
+        {
+            break;
+        }
+    }
+}
+finally
+{
+    shutdown.Cancel();
+    listener.Stop();
+    await parentMonitor.ConfigureAwait(false);
+}
+
+async Task HandleClientAsync(TcpClient client)
+{
+    using var _ = client;
+    NetworkStream? stream = null;
+    try
+    {
+        stream = client.GetStream();
+        using var reader = new StreamReader(stream, Encoding.ASCII, detectEncodingFromByteOrderMarks: false, leaveOpen: true);
+
+        var requestLine = await reader.ReadLineAsync().ConfigureAwait(false);
+        if (string.IsNullOrWhiteSpace(requestLine))
+        {
+            return;
+        }
+
+        var parts = requestLine.Split(' ', 3, StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length < 2)
+        {
+            await WriteJsonAsync(stream, 400, new { error = "bad request" }).ConfigureAwait(false);
+            return;
+        }
+
+        var method = parts[0].ToUpperInvariant();
+        var target = parts[1];
+        var headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        string? headerLine;
+        while (!string.IsNullOrEmpty(headerLine = await reader.ReadLineAsync().ConfigureAwait(false)))
+        {
+            var colon = headerLine.IndexOf(':');
+            if (colon > 0)
+            {
+                headers[headerLine[..colon].Trim()] = headerLine[(colon + 1)..].Trim();
+            }
+        }
+
+        var contentLength = headers.TryGetValue("Content-Length", out var rawLength) && int.TryParse(rawLength, out var parsedLength)
+            ? parsedLength
+            : 0;
+        if (contentLength > 0 &&
+            headers.TryGetValue("Expect", out var expect) &&
+            expect.Equals("100-continue", StringComparison.OrdinalIgnoreCase))
+        {
+            await stream.WriteAsync(Encoding.ASCII.GetBytes("HTTP/1.1 100 Continue\r\n\r\n")).ConfigureAwait(false);
+        }
+
+        var body = string.Empty;
+        if (contentLength > 0)
+        {
+            var buffer = new char[contentLength];
+            var read = 0;
+            while (read < contentLength)
+            {
+                var count = await reader.ReadAsync(buffer.AsMemory(read, contentLength - read)).ConfigureAwait(false);
+                if (count == 0)
+                {
+                    break;
+                }
+
+                read += count;
+            }
+
+            body = new string(buffer, 0, read);
+        }
+
+        await HandleRequestAsync(stream, method, target, body).ConfigureAwait(false);
+    }
+    catch (Exception ex)
+    {
+        if (stream is not null)
+        {
+            try
+            {
+                await WriteJsonAsync(stream, 500, new { error = SafeText.Redact(ex.Message) }).ConfigureAwait(false);
+            }
+            catch
+            {
+            }
+        }
+    }
+}
+
+async Task HandleRequestAsync(NetworkStream stream, string method, string target, string body)
+{
+    var targetUri = new Uri($"http://127.0.0.1{target}");
+    var path = targetUri.AbsolutePath.Trim('/');
+    var query = ParseQuery(targetUri.Query);
+
+    if (method == "OPTIONS")
+    {
+        await WriteRawAsync(stream, 204, "text/plain; charset=utf-8", []).ConfigureAwait(false);
+        return;
+    }
+
+    if (method == "GET" && path == "health")
+    {
+        await WriteJsonAsync(stream, 200, new
+        {
+            status = "ok",
+            url = $"http://127.0.0.1:{port}/",
+            mcpUrl = $"http://127.0.0.1:{port}/mcp",
+            defaultBusRoot,
+            tools = McpToolRegistry.KnownToolNames
+        }).ConfigureAwait(false);
+        return;
+    }
+
+    if (method == "GET" && path == "mcp")
+    {
+        await WriteJsonAsync(stream, 200, new
+        {
+            status = "ok",
+            protocol = "mcp-json-rpc",
+            endpoint = $"http://127.0.0.1:{port}/mcp"
+        }).ConfigureAwait(false);
+        return;
+    }
+
+    if (method == "GET" && (path.Length == 0 || path == "dashboard"))
+    {
+        var bus = new AgentBusStore(query.TryGetValue("busRoot", out var busRoot) ? busRoot : defaultBusRoot);
+        await WriteHtmlAsync(stream, AgentBusDashboard.Render(bus)).ConfigureAwait(false);
+        return;
+    }
+
+    if (method == "GET" && path == "api/agents")
+    {
+        var bus = new AgentBusStore(query.TryGetValue("busRoot", out var busRoot) ? busRoot : defaultBusRoot);
+        await WriteJsonAsync(stream, 200, new { agents = bus.ListAgents() }).ConfigureAwait(false);
+        return;
+    }
+
+    if (method == "GET" && path == "api/snapshot")
+    {
+        var bus = new AgentBusStore(query.TryGetValue("busRoot", out var busRoot) ? busRoot : defaultBusRoot);
+        await WriteJsonAsync(stream, 200, AgentBusDashboard.CreateSnapshot(bus)).ConfigureAwait(false);
+        return;
+    }
+
+    if (method == "GET" && path == "api/tasks")
+    {
+        var bus = new AgentBusStore(query.TryGetValue("busRoot", out var busRoot) ? busRoot : defaultBusRoot);
+        await WriteJsonAsync(stream, 200, new { tasks = bus.ListTasks() }).ConfigureAwait(false);
+        return;
+    }
+
+    if (method == "GET" && path == "api/results")
+    {
+        var bus = new AgentBusStore(query.TryGetValue("busRoot", out var busRoot) ? busRoot : defaultBusRoot);
+        await WriteJsonAsync(stream, 200, new { results = bus.ListResults() }).ConfigureAwait(false);
+        return;
+    }
+
+    if (method == "GET" && path == "api/events")
+    {
+        var bus = new AgentBusStore(query.TryGetValue("busRoot", out var busRoot) ? busRoot : defaultBusRoot);
+        await WriteJsonAsync(stream, 200, new { events = bus.ListEvents(500) }).ConfigureAwait(false);
+        return;
+    }
+
+    if (method == "POST" && path.StartsWith("mcp/tools/", StringComparison.OrdinalIgnoreCase))
+    {
+        var tool = Uri.UnescapeDataString(path["mcp/tools/".Length..]);
+        var arguments = string.IsNullOrWhiteSpace(body)
+            ? JsonSerializer.Deserialize<JsonElement>("{}")
+            : JsonSerializer.Deserialize<JsonElement>(body, JsonFile.Options);
+        var result = await registry.InvokeAsync(tool, arguments).ConfigureAwait(false);
+        await WriteJsonAsync(stream, 200, result).ConfigureAwait(false);
+        return;
+    }
+
+    if (method == "POST" && path == "mcp")
+    {
+        var response = await HandleMcpJsonRpcAsync(body).ConfigureAwait(false);
+        if (response is null)
+        {
+            await WriteRawAsync(stream, 202, "application/json; charset=utf-8", []).ConfigureAwait(false);
+        }
+        else
+        {
+            await WriteJsonAsync(stream, 200, response).ConfigureAwait(false);
+        }
+
+        return;
+    }
+
+    await WriteJsonAsync(stream, 404, new { error = "not found", path }).ConfigureAwait(false);
+}
+
+async Task<object?> HandleMcpJsonRpcAsync(string body)
+{
+    using var doc = JsonDocument.Parse(string.IsNullOrWhiteSpace(body) ? "{}" : body);
+    var root = doc.RootElement;
+    var hasId = root.TryGetProperty("id", out var idElement);
+    var id = hasId ? idElement.Clone() : default;
+    var method = root.TryGetProperty("method", out var methodElement)
+        ? methodElement.GetString()
+        : null;
+
+    if (method is "notifications/initialized")
+    {
+        return null;
+    }
+
+    return method switch
+    {
+        "initialize" => JsonRpcResult(id, new
+        {
+            protocolVersion = "2025-06-18",
+            capabilities = new
+            {
+                tools = new
+                {
+                    listChanged = false
+                }
+            },
+            serverInfo = new
+            {
+                name = "CodexTeamUp",
+                version = "0.1.0"
+            }
+        }),
+        "tools/list" => JsonRpcResult(id, new
+        {
+            tools = registry.ToolNames.Select(name => new
+            {
+                name,
+                description = McpToolMetadata.ToolDescription(name),
+                inputSchema = McpToolMetadata.ToolInputSchema(name),
+                annotations = McpToolMetadata.ToolAnnotations(name)
+            }).ToArray()
+        }),
+        "tools/call" => await HandleMcpToolCallAsync(id, root).ConfigureAwait(false),
+        _ => JsonRpcError(id, -32601, $"Unknown method: {method}")
+    };
+}
+
+async Task<object> HandleMcpToolCallAsync(JsonElement id, JsonElement root)
+{
+    var parameters = root.TryGetProperty("params", out var paramsElement)
+        ? paramsElement
+        : throw new ArgumentException("Missing params.");
+    var name = paramsElement.GetProperty("name").GetString()
+        ?? throw new ArgumentException("Missing tool name.");
+    var arguments = paramsElement.TryGetProperty("arguments", out var argsElement)
+        ? argsElement
+        : JsonSerializer.Deserialize<JsonElement>("{}");
+
+    try
+    {
+        var result = await registry.InvokeAsync(name, arguments).ConfigureAwait(false);
+        var text = JsonSerializer.Serialize(result, new JsonSerializerOptions(JsonFile.Options) { WriteIndented = true });
+        return JsonRpcResult(id, new
+        {
+            content = new[]
+            {
+                new
+                {
+                    type = "text",
+                    text
+                }
+            },
+            isError = false
+        });
+    }
+    catch (Exception ex)
+    {
+        return JsonRpcResult(id, new
+        {
+            content = new[]
+            {
+                new
+                {
+                    type = "text",
+                    text = SafeText.Redact(ex.Message)
+                }
+            },
+            isError = true
+        });
+    }
+}
+
+static object JsonRpcResult(JsonElement id, object result)
+{
+    return new
+    {
+        jsonrpc = "2.0",
+        id,
+        result
+    };
+}
+
+static object JsonRpcError(JsonElement id, int code, string message)
+{
+    return new
+    {
+        jsonrpc = "2.0",
+        id,
+        error = new
+        {
+            code,
+            message
+        }
+    };
+}
+
+async Task WriteJsonAsync(NetworkStream stream, int statusCode, object value)
+{
+    var bytes = JsonSerializer.SerializeToUtf8Bytes(value, jsonOptions);
+    await WriteRawAsync(stream, statusCode, "application/json; charset=utf-8", bytes).ConfigureAwait(false);
+}
+
+async Task WriteHtmlAsync(NetworkStream stream, string html)
+{
+    await WriteRawAsync(stream, 200, "text/html; charset=utf-8", Encoding.UTF8.GetBytes(html)).ConfigureAwait(false);
+}
+
+async Task WriteRawAsync(NetworkStream stream, int statusCode, string contentType, byte[] bytes)
+{
+    var reason = statusCode switch
+    {
+        200 => "OK",
+        204 => "No Content",
+        202 => "Accepted",
+        400 => "Bad Request",
+        404 => "Not Found",
+        500 => "Internal Server Error",
+        _ => "OK"
+    };
+    var header = Encoding.ASCII.GetBytes(
+        $"HTTP/1.1 {statusCode} {reason}\r\n" +
+        $"Content-Type: {contentType}\r\n" +
+        "Access-Control-Allow-Origin: *\r\n" +
+        "Access-Control-Allow-Headers: content-type\r\n" +
+        "Access-Control-Allow-Methods: GET,POST,OPTIONS\r\n" +
+        $"Content-Length: {bytes.Length}\r\n" +
+        "Connection: close\r\n\r\n");
+    await stream.WriteAsync(header).ConfigureAwait(false);
+    if (bytes.Length > 0)
+    {
+        await stream.WriteAsync(bytes).ConfigureAwait(false);
+    }
+}
+
+static Dictionary<string, string> ParseQuery(string query)
+{
+    var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+    var raw = query.TrimStart('?');
+    if (string.IsNullOrWhiteSpace(raw))
+    {
+        return result;
+    }
+
+    foreach (var part in raw.Split('&', StringSplitOptions.RemoveEmptyEntries))
+    {
+        var equals = part.IndexOf('=');
+        var key = equals >= 0 ? part[..equals] : part;
+        var value = equals >= 0 ? part[(equals + 1)..] : "";
+        result[WebUtility.UrlDecode(key)] = WebUtility.UrlDecode(value);
+    }
+
+    return result;
+}
+
+static string? ReadOption(string[] args, string name)
+{
+    for (var i = 0; i < args.Length - 1; i++)
+    {
+        if (string.Equals(args[i], name, StringComparison.OrdinalIgnoreCase))
+        {
+            return args[i + 1];
+        }
+    }
+
+    return null;
+}
+
+static int? ReadIntOption(string[] args, string name)
+{
+    var raw = ReadOption(args, name);
+    return int.TryParse(raw, out var value) && value > 0 ? value : null;
+}
+
+static int? ReadIntEnvironment(string name)
+{
+    var raw = Environment.GetEnvironmentVariable(name);
+    return int.TryParse(raw, out var value) && value > 0 ? value : null;
+}
+
+static async Task MonitorParentProcessAsync(int parentProcessId, CancellationTokenSource shutdown)
+{
+    try
+    {
+        using var parent = Process.GetProcessById(parentProcessId);
+        await parent.WaitForExitAsync(shutdown.Token).ConfigureAwait(false);
+    }
+    catch (ArgumentException)
+    {
+    }
+    catch (InvalidOperationException)
+    {
+    }
+    catch (OperationCanceledException)
+    {
+        return;
+    }
+
+    if (!shutdown.IsCancellationRequested)
+    {
+        await shutdown.CancelAsync().ConfigureAwait(false);
+    }
+}

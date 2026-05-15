@@ -1,0 +1,30 @@
+name: Docs or setup feedback
+description: Report unclear onboarding, README, sample, or setup instructions.
+title: "[Docs]: "
+labels: ["documentation"]
+body:
+  - type: textarea
+    id: location
+    attributes:
+      label: Where is the issue?
+      description: Link or name the README/docs/sample section.
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What was confusing or missing?
+    validations:
+      required: true
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: Suggested improvement
+  - type: checkboxes
+    id: first-run
+    attributes:
+      label: First-run context
+      options:
+        - label: I was trying the clone/build/start workflow for the first time.
+        - label: I was reading the Hello World sample.
+        - label: I was reading the architecture or MCP docs.

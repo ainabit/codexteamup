@@ -1,0 +1,14 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/CodexTeamUp.AgentBus/CodexTeamUp.AgentBus.csproj" />
+    <Project Path="src/CodexTeamUp.AppServer/CodexTeamUp.AppServer.csproj" />
+    <Project Path="src/CodexTeamUp.Cli/CodexTeamUp.Cli.csproj" />
+    <Project Path="src/CodexTeamUp.CodexWrapper/CodexTeamUp.CodexWrapper.csproj" />
+    <Project Path="src/CodexTeamUp.Core/CodexTeamUp.Core.csproj" />
+    <Project Path="src/CodexTeamUp.Mcp/CodexTeamUp.Mcp.csproj" />
+    <Project Path="src/CodexTeamUp.Service/CodexTeamUp.Service.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/CodexTeamUp.Tests/CodexTeamUp.Tests.csproj" />
+  </Folder>
+</Solution>

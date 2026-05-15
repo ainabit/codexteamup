@@ -1,0 +1,35 @@
+name: Feature request
+description: Suggest a CodexTeamUp workflow or capability.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or workflow
+      description: What are you trying to do with visible Codex Desktop agents?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: What should CTU do?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Constraints
+      description: Note OS, Codex Desktop behavior, MCP/tooling assumptions, or compatibility concerns.
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope check
+      options:
+        - label: This request is about CodexTeamUp, not general Codex Desktop support.
+          required: true

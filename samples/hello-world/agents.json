@@ -1,0 +1,59 @@
+{
+  "version": 1,
+  "agents": [
+    {
+      "id": "ctu/architect",
+      "role": "Sample architect and team coordinator",
+      "displayName": "ctu/architect",
+      "allowedPaths": [
+        "AGENTS.md",
+        "agents.json",
+        "docs/",
+        "app/"
+      ],
+      "instructionFiles": [
+        "AGENTS.md",
+        "docs/agents/architect.md"
+      ],
+      "speed": "standard",
+      "reasoningEffort": "medium",
+      "status": "planned"
+    },
+    {
+      "id": "ctu/designer",
+      "role": "Visual direction and UX review for the Hello World page",
+      "displayName": "ctu/designer",
+      "allowedPaths": [
+        "docs/",
+        "app/"
+      ],
+      "instructionFiles": [
+        "AGENTS.md",
+        "docs/agents/designer.md"
+      ],
+      "returnTo": "ctu/architect",
+      "speed": "standard",
+      "model": "gpt-5.5",
+      "reasoningEffort": "high",
+      "status": "planned"
+    },
+    {
+      "id": "ctu/developer",
+      "role": "Static HTML implementation for the Hello World page",
+      "displayName": "ctu/developer",
+      "allowedPaths": [
+        "app/",
+        "docs/"
+      ],
+      "instructionFiles": [
+        "AGENTS.md",
+        "docs/agents/developer.md"
+      ],
+      "returnTo": "ctu/architect",
+      "speed": "standard",
+      "model": "gpt-5.3-codex-spark",
+      "reasoningEffort": "medium",
+      "status": "planned"
+    }
+  ]
+}

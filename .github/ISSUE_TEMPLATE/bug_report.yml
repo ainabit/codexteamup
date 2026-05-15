@@ -1,0 +1,63 @@
+name: Bug report
+description: Report a reproducible CodexTeamUp problem.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a problem. CodexTeamUp is a source-only PoC, so precise local context matters.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What failed?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+      description: List the exact steps or commands.
+      placeholder: |
+        1. Clone repository
+        2. Run ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+  - type: input
+    id: dotnet
+    attributes:
+      label: .NET SDK version
+  - type: textarea
+    id: checks
+    attributes:
+      label: Checks run
+      description: Include output from build/test/startup checks when useful. Remove secrets and private paths.
+      placeholder: |
+        dotnet build
+        dotnet run --project tests\CodexTeamUp.Tests
+        Invoke-RestMethod http://127.0.0.1:47319/health
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy check
+      options:
+        - label: I removed secrets, tokens, private project names, and personal local paths from this report.
+          required: true
