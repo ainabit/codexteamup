@@ -8,6 +8,8 @@ The core idea is not one chat pretending to have many roles, and not one foregro
 
 This repository is intentionally early. It is a PoC, it is source-only, and it is 100% vibe-coded with active human guidance, review, and product direction from me. I am publishing the current state because this space moves quickly; tomorrow Codex Desktop itself may provide this capability, or a better framework may make this repository obsolete.
 
+The current state is mainly for technical users, agent builders, and AI-affine people who are already looking for this kind of local Codex Desktop workflow and are comfortable adapting rough source-level tooling. It does not claim to replace larger agent frameworks, hosted platforms, or future native Codex features. This is a fast, practical snapshot of a fast-moving idea.
+
 I am opening the project conservatively. This is my first GitHub project, so I want feedback, bug reports, feature ideas, and collaboration to happen in a controlled way through Issues, Discussions, and reviewed pull requests. If you want to contribute, that is welcome, but please expect a careful maintainer-led process rather than open write access.
 
 I am also aware that other agent frameworks and orchestration tools may already solve similar problems. This project exists because I wanted this workflow specifically inside the Codex Desktop app, with visible live chats that I can enter, steer, and inspect like a real team.
