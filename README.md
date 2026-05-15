@@ -12,6 +12,8 @@ I am opening the project conservatively. This is my first GitHub project, so I w
 
 I am also aware that other agent frameworks and orchestration tools may already solve similar problems. This project exists because I wanted this workflow specifically inside the Codex Desktop app, with visible live chats that I can enter, steer, and inspect like a real team.
 
+This is not a tool for the sake of having another tool. I built it to make my own work easier, and I hope it can do the same for others who like working with Codex Desktop. I had a lot of fun building the current PoC from May 14 to May 15, 2026, and I am now even more curious what other tools and projects I can build with this kind of visible local AI team.
+
 ## Visual Walkthrough
 
 The screenshots below show the [Hello World Team Sample](samples/hello-world/README.md). The sample is intentionally tiny: one architect agent creates a small visible team, asks a designer for direction, delegates implementation to a developer, reviews the result, and leaves an AgentBus trace that can be inspected in the dashboard.
