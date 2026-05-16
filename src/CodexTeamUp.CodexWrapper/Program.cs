@@ -132,6 +132,7 @@ static async Task RunAppServerProxyAsync(Process process, WrapperLogger logger, 
 
     var pipeServer = RunBridgePipeServerAsync(
         pipeName,
+        process.Id,
         process.StandardInput.BaseStream,
         childWriteLock,
         pending,
@@ -151,6 +152,7 @@ static async Task RunAppServerProxyAsync(Process process, WrapperLogger logger, 
 
 static async Task RunBridgePipeServerAsync(
     string pipeName,
+    int childPid,
     Stream childStdin,
     SemaphoreSlim childWriteLock,
     ConcurrentDictionary<string, PendingBridgeRequest> pending,
@@ -169,7 +171,7 @@ static async Task RunBridgePipeServerAsync(
         try
         {
             await pipe.WaitForConnectionAsync(cancellationToken).ConfigureAwait(false);
-            await HandleBridgePipeClientAsync(pipe, childStdin, childWriteLock, pending, logger, cancellationToken).ConfigureAwait(false);
+            await HandleBridgePipeClientAsync(pipe, childPid, childStdin, childWriteLock, pending, logger, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
@@ -184,6 +186,7 @@ static async Task RunBridgePipeServerAsync(
 
 static async Task HandleBridgePipeClientAsync(
     Stream pipe,
+    int childPid,
     Stream childStdin,
     SemaphoreSlim childWriteLock,
     ConcurrentDictionary<string, PendingBridgeRequest> pending,
@@ -222,6 +225,8 @@ static async Task HandleBridgePipeClientAsync(
             {
                 status = "ok",
                 pipeName = ResolvePipeName(),
+                wrapperPid = Environment.ProcessId,
+                childPid,
                 pending = pending.Count
             }
         }, WrapperJson.Options)).ConfigureAwait(false);
@@ -352,11 +357,18 @@ static string TryRewriteDesktopRequest(string line, WrapperLogger logger)
 
 static string TryRewriteAppServerNotification(string line, WrapperLogger logger)
 {
-    return WrapperProtocol.StampTurnStartedAt(line, StampTurnStartedAt(), DateTimeOffset.UtcNow.ToUnixTimeSeconds, () =>
+    var stamped = WrapperProtocol.StampTurnStartedAt(line, StampTurnStartedAt(), DateTimeOffset.UtcNow.ToUnixTimeSeconds, () =>
         logger.Write("rpc-rewrite", new
         {
             method = "turn/started",
             rewrite = "startedAt=now"
+        }));
+
+    return WrapperProtocol.RewriteGitDirectiveCwdWindowsPaths(stamped, enabled: true, () =>
+        logger.Write("rpc-rewrite", new
+        {
+            method = "message",
+            rewrite = "git-directive-cwd-slashes"
         }));
 }
 

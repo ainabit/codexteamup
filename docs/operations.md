@@ -12,6 +12,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\start-codexteamup.ps1
 
 That is the normal and preferred start path. It starts the backend service, registers the HTTP MCP URL, and launches Codex Desktop through the wrapper.
 
+If Codex Desktop, the Codex CLI app-server, or a CTU wrapper is already running, the startup script lists those processes and asks whether to stop them before launching. Answer `y` for a clean CTU start. Use `-KillExistingCodex` to make that cleanup non-interactive, or `-AllowExistingDesktop` only for diagnostics where you intentionally accept that an existing Desktop instance may ignore the wrapper environment.
+
 The startup script discovers the installed Codex Desktop package at runtime instead of pinning a specific WindowsApps version. It also discovers a runnable Codex CLI separately from the Desktop executable. CLI candidates are checked with `--version` before use, and protected WindowsApps resource paths are skipped if they cannot be executed directly.
 
 If auto-discovery fails, pass explicit paths to the normal startup script:

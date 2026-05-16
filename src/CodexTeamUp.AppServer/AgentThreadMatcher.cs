@@ -15,7 +15,7 @@ public static class AgentThreadMatcher
     {
         var candidates = threads
             .Where(thread => string.IsNullOrWhiteSpace(cwd)
-                || string.Equals(thread.Cwd, cwd, StringComparison.OrdinalIgnoreCase))
+                || PathEquals(thread.Cwd, cwd))
             .ToList();
 
         if (candidates.Count == 0)
@@ -90,6 +90,21 @@ public static class AgentThreadMatcher
             .Where(ch => char.IsLetterOrDigit(ch))
             .ToArray();
         return new string(chars);
+    }
+
+    private static bool PathEquals(string? left, string? right)
+    {
+        if (string.IsNullOrWhiteSpace(left) || string.IsNullOrWhiteSpace(right))
+        {
+            return false;
+        }
+
+        return string.Equals(NormalizePath(left), NormalizePath(right), StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string NormalizePath(string value)
+    {
+        return value.Replace('\\', '/').TrimEnd('/');
     }
 
     private static string StripNumericPrefix(string value)

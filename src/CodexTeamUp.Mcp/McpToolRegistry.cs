@@ -85,6 +85,7 @@ public sealed class McpToolRegistry
             {
                 Id = Required(args, "id"),
                 Role = Optional(args, "role") ?? Required(args, "id"),
+                DisplayName = Optional(args, "displayName") ?? Optional(args, "chatName"),
                 ThreadId = Optional(args, "threadId"),
                 Cwd = Optional(args, "cwd"),
                 AllowedPaths = Csv(args, "allowedPaths"),
@@ -607,12 +608,19 @@ public sealed class McpToolRegistry
 
         if (!string.IsNullOrWhiteSpace(threadId) && !ThreadExists(threads, threadId, cwd))
         {
+            bus.RecordEvent(new AgentBusEvent
+            {
+                Timestamp = DateTimeOffset.Now,
+                Type = "agent.unbound",
+                To = spec.Id,
+                Message = $"Previously registered thread {threadId} is not visible for this project."
+            });
             threadId = null;
         }
 
         if (string.IsNullOrWhiteSpace(threadId) && threads.Count > 0)
         {
-            threadId = AgentThreadMatcher.MatchAgents([spec.Id], threads, cwd).FirstOrDefault()?.ThreadId;
+            threadId = MatchSpecThread(spec, threads, cwd);
         }
 
         AppServerCallResult? created = null;
@@ -631,10 +639,29 @@ public sealed class McpToolRegistry
 
         if (string.IsNullOrWhiteSpace(threadId))
         {
-            throw new InvalidOperationException($"Agent {spec.Id} has no visible thread and createMissing=false.");
+            var missing = bus.RegisterAgent(new AgentDefinition
+            {
+                Id = spec.Id,
+                Role = spec.Role,
+                DisplayName = spec.DisplayName,
+                Cwd = cwd,
+                AllowedPaths = spec.AllowedPaths,
+                InstructionFiles = spec.InstructionFiles,
+                ReturnTo = spec.ReturnTo ?? (IsArchitect(spec.Id) ? null : DefaultArchitectFor(spec.Id)),
+                Model = RuntimeSettings(spec.Model, spec.ReasoningEffort, spec.Speed, existing)?.Model,
+                ReasoningEffort = RuntimeSettings(spec.Model, spec.ReasoningEffort, spec.Speed, existing)?.ReasoningEffort,
+                Speed = NormalizeSpeed(spec.Speed) ?? NormalizeSpeed(existing?.Speed) ?? DefaultSpeed,
+                Status = "missing-thread"
+            });
+            bus.RecordEvent(new AgentBusEvent
+            {
+                Timestamp = DateTimeOffset.Now,
+                Type = "agent.missing_thread",
+                To = spec.Id,
+                Message = "No visible thread was bound and createMissing=false."
+            });
+            return missing;
         }
-
-        await EnsureThreadNameAsync(appServer, threadId, spec.DisplayName, cancellationToken).ConfigureAwait(false);
 
         var agent = bus.RegisterAgent(new AgentDefinition
         {
@@ -663,7 +690,7 @@ public sealed class McpToolRegistry
         if (prime)
         {
             var prompt = BuildAgentPrimePrompt(agent, spec.InitialPrompt);
-            var wake = await appServer.SendTurnAsync(threadId, prompt, cwd, RuntimeSettings(agent), cancellationToken).ConfigureAwait(false);
+            var wake = await SendPrimeTurnAsync(appServer, threadId, prompt, cwd, RuntimeSettings(agent), created is not null, cancellationToken).ConfigureAwait(false);
             bus.RecordEvent(new AgentBusEvent
             {
                 Timestamp = DateTimeOffset.Now,
@@ -673,17 +700,87 @@ public sealed class McpToolRegistry
             });
         }
 
+        var nameResult = await TryEnsureThreadNameAsync(appServer, threadId, spec.DisplayName, cancellationToken).ConfigureAwait(false);
+        if (!nameResult.Succeeded)
+        {
+            bus.RecordEvent(new AgentBusEvent
+            {
+                Timestamp = DateTimeOffset.Now,
+                Type = "agent.name_skipped",
+                To = spec.Id,
+                Message = SafeText.Preview(nameResult.Error, 240)
+            });
+        }
+
         return agent;
+    }
+
+    private static async Task<AppServerCallResult> SendPrimeTurnAsync(
+        IAppServerClient appServer,
+        string threadId,
+        string message,
+        string? cwd,
+        AppServerAgentSettings? settings,
+        bool newlyCreated,
+        CancellationToken cancellationToken)
+    {
+        if (!newlyCreated)
+        {
+            return await appServer.SendTurnAsync(threadId, message, cwd, settings, cancellationToken).ConfigureAwait(false);
+        }
+
+        var parameters = new Dictionary<string, object?>
+        {
+            ["threadId"] = threadId,
+            ["input"] = new[] { new { type = "text", text = message } },
+            ["approvalPolicy"] = "on-request"
+        };
+
+        if (!string.IsNullOrWhiteSpace(cwd))
+        {
+            parameters["cwd"] = cwd;
+        }
+
+        AddRuntimeSettings(parameters, settings);
+        return await appServer.CallAsync("turn/start", parameters, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static void AddRuntimeSettings(Dictionary<string, object?> parameters, AppServerAgentSettings? settings)
+    {
+        if (!string.IsNullOrWhiteSpace(settings?.Model))
+        {
+            parameters["model"] = settings.Model;
+        }
+
+        if (!string.IsNullOrWhiteSpace(settings?.ReasoningEffort))
+        {
+            parameters["effort"] = settings.ReasoningEffort;
+        }
     }
 
     private static bool ThreadExists(IReadOnlyList<CodexThreadRecord> threads, string threadId, string cwd)
     {
         return threads.Any(thread =>
             string.Equals(thread.Id, threadId, StringComparison.Ordinal) &&
-            (string.IsNullOrWhiteSpace(thread.Cwd) || string.Equals(thread.Cwd, cwd, StringComparison.OrdinalIgnoreCase)));
+            (string.IsNullOrWhiteSpace(thread.Cwd) || PathEquals(thread.Cwd, cwd)));
     }
 
-    private static async Task EnsureThreadNameAsync(
+    private static string? MatchSpecThread(TeamAgentSpec spec, IReadOnlyList<CodexThreadRecord> threads, string cwd)
+    {
+        var aliases = new[] { spec.Id, spec.DisplayName }
+            .Where(alias => !string.IsNullOrWhiteSpace(alias))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        var best = AgentThreadMatcher.MatchAgents(aliases, threads, cwd)
+            .Where(binding => !string.IsNullOrWhiteSpace(binding.ThreadId))
+            .OrderByDescending(binding => binding.Confidence)
+            .FirstOrDefault();
+
+        return best?.ThreadId;
+    }
+
+    private static async Task<AppServerCallResult> TryEnsureThreadNameAsync(
         IAppServerClient appServer,
         string threadId,
         string displayName,
@@ -691,15 +788,19 @@ public sealed class McpToolRegistry
     {
         if (string.IsNullOrWhiteSpace(displayName))
         {
-            return;
+            return new AppServerCallResult(true, "{}", null);
         }
 
         var nameResult = await appServer.CallAsync("thread/name/set", new { threadId, name = displayName }, cancellationToken)
             .ConfigureAwait(false);
-        if (!nameResult.Succeeded)
+        if (nameResult.Succeeded)
         {
-            throw new InvalidOperationException($"Could not name visible Codex thread {threadId} as {displayName}: {nameResult.Error}");
+            return nameResult;
         }
+
+        _ = await appServer.ResumeThreadAsync(threadId, cancellationToken).ConfigureAwait(false);
+        return await appServer.CallAsync("thread/name/set", new { threadId, name = displayName }, cancellationToken)
+            .ConfigureAwait(false);
     }
 
     private static string BuildAgentPrimePrompt(AgentDefinition agent, string? initialPrompt)
@@ -1169,6 +1270,21 @@ public sealed class McpToolRegistry
     private static string? BlankToNull(string? value)
     {
         return string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+    }
+
+    private static bool PathEquals(string? left, string? right)
+    {
+        if (string.IsNullOrWhiteSpace(left) || string.IsNullOrWhiteSpace(right))
+        {
+            return false;
+        }
+
+        return string.Equals(NormalizePath(left), NormalizePath(right), StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string NormalizePath(string value)
+    {
+        return value.Replace('\\', '/').TrimEnd('/');
     }
 
     private static bool Bool(JsonElement args, string name)
