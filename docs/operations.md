@@ -12,7 +12,15 @@ powershell -ExecutionPolicy Bypass -File .\scripts\start-codexteamup.ps1
 
 That is the normal and preferred start path. It starts the backend service, registers the HTTP MCP URL, and launches Codex Desktop through the wrapper.
 
-The startup script discovers the installed Codex Desktop package at runtime instead of pinning a specific WindowsApps version. If auto-discovery fails, pass `-DesktopExe` to `scripts/start-codex-desktop-with-cli-wrapper.ps1` or set `CODEX_DESKTOP_EXE`/`CTU_CODEX_DESKTOP_EXE` to the current `Codex.exe` path.
+The startup script discovers the installed Codex Desktop package at runtime instead of pinning a specific WindowsApps version. It also discovers a runnable Codex CLI separately from the Desktop executable. CLI candidates are checked with `--version` before use, and protected WindowsApps resource paths are skipped if they cannot be executed directly.
+
+If auto-discovery fails, pass explicit paths to the normal startup script:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\start-codexteamup.ps1 -DesktopExe "C:\Path\To\Codex.exe" -RealCodexExe "C:\Path\To\codex.exe"
+```
+
+For lower-level diagnostics, the same values can be passed to `scripts/start-codex-desktop-with-cli-wrapper.ps1`, or set through `CODEX_DESKTOP_EXE`/`CTU_CODEX_DESKTOP_EXE` for Desktop and `CODEX_REAL_CLI_EXE`/`CTU_REAL_CODEX_EXE` for the CLI.
 
 The startup path enables chronological UI mitigations by default. The wrapper sets `CODEX_WRAPPER_FORCE_TURNS_ASC=1` so Desktop `thread/turns/list` requests without an explicit `sortDirection` are rewritten to `asc`. It also sets `CODEX_WRAPPER_STAMP_TURN_STARTED_AT=1` so live `turn/started` notifications with `startedAt=null` get a current timestamp before they reach Desktop. The second mitigation affects only live UI sorting; persisted thread history remains authoritative.
 

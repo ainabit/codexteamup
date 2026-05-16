@@ -52,6 +52,21 @@ function Add-CandidatePath {
     }
 }
 
+function Test-CodexCliCandidate {
+    param([string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return $false
+    }
+
+    try {
+        $output = & $Path --version 2>$null
+        return $LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace(($output | Select-Object -First 1))
+    } catch {
+        return $false
+    }
+}
+
 function Resolve-CodexDesktopExe {
     param([string]$Path)
 
@@ -108,19 +123,24 @@ function Resolve-RealCodexExe {
 
     $candidates = [System.Collections.Generic.List[string]]::new()
 
-    if (-not [string]::IsNullOrWhiteSpace($DesktopPath)) {
-        $desktopDirectory = Split-Path -Parent $DesktopPath
-        Add-CandidatePath -Candidates $candidates -Path (Join-Path $desktopDirectory "resources\codex.exe")
-    }
-
     Add-CandidatePath -Candidates $candidates -Path ([Environment]::GetEnvironmentVariable("CODEX_REAL_CLI_EXE", "Process"))
     Add-CandidatePath -Candidates $candidates -Path ([Environment]::GetEnvironmentVariable("CTU_REAL_CODEX_EXE", "Process"))
     Add-CandidatePath -Candidates $candidates -Path (Join-Path $env:LOCALAPPDATA "OpenAI\Codex\bin\codex.exe")
     Add-CandidatePath -Candidates $candidates -Path (Join-Path $env:LOCALAPPDATA "Microsoft\WindowsApps\codex.exe")
 
+    if (-not [string]::IsNullOrWhiteSpace($DesktopPath)) {
+        $desktopDirectory = Split-Path -Parent $DesktopPath
+        Add-CandidatePath -Candidates $candidates -Path (Join-Path $desktopDirectory "resources\codex.exe")
+    }
+
+    $skipped = [System.Collections.Generic.List[string]]::new()
     foreach ($candidate in $candidates) {
-        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+        if (Test-CodexCliCandidate -Path $candidate) {
             return (Resolve-Path -LiteralPath $candidate).Path
+        }
+
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            $skipped.Add($candidate)
         }
     }
 
@@ -129,7 +149,12 @@ function Resolve-RealCodexExe {
     } else {
         ""
     }
-    throw "Real Codex CLI not found. Pass -RealCodexExe or set CODEX_REAL_CLI_EXE/CTU_REAL_CODEX_EXE.$searched"
+    $skippedText = if ($skipped.Count -gt 0) {
+        "`nFound but not executable as a CLI:`n  " + (($skipped | ForEach-Object { $_ }) -join "`n  ")
+    } else {
+        ""
+    }
+    throw "Real Codex CLI not found. Pass -RealCodexExe or set CODEX_REAL_CLI_EXE/CTU_REAL_CODEX_EXE.$searched$skippedText"
 }
 
 function Set-TemporaryProcessEnvironment {

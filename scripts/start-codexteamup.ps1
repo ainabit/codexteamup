@@ -1,6 +1,8 @@
 param(
     [string]$Workspace = "",
     [string]$ServiceUrl = "http://127.0.0.1:47319/",
+    [string]$DesktopExe = "",
+    [string]$RealCodexExe = "",
     [switch]$ForceTurnsAscending,
     [switch]$NoForceTurnsAscending,
     [switch]$NoStampTurnStartedAt,
@@ -269,6 +271,14 @@ $startArgs = @{
 
 if (-not [string]::IsNullOrWhiteSpace($Workspace)) {
     $startArgs.Workspace = $Workspace
+}
+
+if (-not [string]::IsNullOrWhiteSpace($DesktopExe)) {
+    $startArgs.DesktopExe = $DesktopExe
+}
+
+if (-not [string]::IsNullOrWhiteSpace($RealCodexExe)) {
+    $startArgs.RealCodexExe = $RealCodexExe
 }
 
 if ($ForceTurnsAscending) {

@@ -158,6 +158,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\start-codexteamup.ps1
 
 The startup script publishes local tools, refreshes and starts the backend service, registers the CTU MCP entry for Codex, and launches Codex Desktop through the wrapper.
 
+The script discovers the installed Codex Desktop app and a runnable Codex CLI at startup. It prefers the per-user CLI under `%LOCALAPPDATA%\OpenAI\Codex\bin\codex.exe` and verifies CLI candidates with `--version` before using them, so protected WindowsApps resource paths are skipped when they cannot be executed directly.
+
 ## Local Endpoints
 
 - Service and dashboard root: `http://127.0.0.1:47319/`
@@ -191,6 +193,12 @@ powershell -ExecutionPolicy Bypass -File .\scripts\start-codexteamup.ps1
 ```
 
 That is the normal startup path. It starts the local backend service, exposes the MCP endpoint at `http://127.0.0.1:47319/mcp`, and launches Codex Desktop through the CTU wrapper.
+
+If auto-discovery fails on a local installation, pass explicit paths:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\start-codexteamup.ps1 -DesktopExe "C:\Path\To\Codex.exe" -RealCodexExe "C:\Path\To\codex.exe"
+```
 
 To return to normal Codex Desktop behavior, close Desktop and start it normally without the wrapper script.
 
