@@ -32,6 +32,7 @@ var tests = new (string Name, Func<Task> Body)[]
     ("MCP team send message waits for result", () => Task.Run(McpTeamSendMessageWaitsForResult)),
     ("MCP registry recreates stale ctu agent threads", () => Task.Run(McpRegistryRecreatesStaleCtuAgentThreads)),
     ("MCP registry notifies result through service path", () => Task.Run(McpRegistryNotifiesResultThroughServicePath)),
+    ("MCP registry defers result notify while target active", () => Task.Run(McpRegistryDefersResultNotifyWhileTargetActive)),
     ("Agent thread matcher binds named team threads", () => Task.Run(AgentThreadMatcherBindsNamedTeamThreads)),
     ("AgentBus dashboard creates snapshot", () => Task.Run(AgentBusDashboardCreatesSnapshot)),
     ("AgentBus dashboard renders communication", () => Task.Run(AgentBusDashboardRendersCommunication))
@@ -665,7 +666,7 @@ static void McpRegistryNotifiesResultThroughServicePath()
     bus.ClaimTask(task.Id, "ctu/bar");
     var busResult = bus.WriteResult(task.Id, "Pong", "completed", "ctu/bar", "ctu/foo", null, [], []);
 
-    var appServer = new FakeAppServerClient("""{"data":[{"id":"thread-foo","name":"ctu/foo","cwd":"ROOT","status":{"type":"active"}}]}"""
+    var appServer = new FakeAppServerClient("""{"data":[{"id":"thread-foo","name":"ctu/foo","cwd":"ROOT","status":{"type":"idle"}}]}"""
         .Replace("ROOT", JsonEscaped(root), StringComparison.Ordinal));
     var registry = McpToolRegistry.CreateDefault(busRoot, appServer);
     var args = JsonSerializer.Deserialize<JsonElement>($$"""
@@ -682,7 +683,54 @@ static void McpRegistryNotifiesResultThroughServicePath()
     var notifyEvent = bus.ListEvents().Single(evt => evt.Type == "result.notified" && evt.ResultId == busResult.Id);
     True(notifyEvent.Message?.Contains("latencyMs=", StringComparison.Ordinal) == true);
     True(notifyEvent.Message?.Contains("turnId=turn-fake", StringComparison.Ordinal) == true);
-    True(notifyEvent.Message?.Contains("targetStatus=active", StringComparison.Ordinal) == true);
+    True(notifyEvent.Message?.Contains("targetStatus=idle", StringComparison.Ordinal) == true);
+}
+
+static void McpRegistryDefersResultNotifyWhileTargetActive()
+{
+    var root = NewTestDirectory();
+    var busRoot = Path.Combine(root, ".codexteamup", "agentbus");
+    var bus = new AgentBusStore(busRoot);
+    bus.Initialize();
+    bus.RegisterAgent(new AgentDefinition
+    {
+        Id = "ctu/foo",
+        Role = "Foo",
+        ThreadId = "thread-foo",
+        Cwd = root,
+        Status = "active"
+    });
+    bus.RegisterAgent(new AgentDefinition
+    {
+        Id = "ctu/bar",
+        Role = "Bar",
+        ThreadId = "thread-bar",
+        Cwd = root,
+        ReturnTo = "ctu/foo",
+        Status = "active"
+    });
+
+    var task = bus.CreateTask("ctu/foo", "ctu/bar", "Ping", "Please answer.", "demo", root, [], "ctu/foo");
+    bus.ClaimTask(task.Id, "ctu/bar");
+    var busResult = bus.WriteResult(task.Id, "Pong", "completed", "ctu/bar", "ctu/foo", null, [], []);
+
+    var appServer = new FakeAppServerClient("""{"data":[{"id":"thread-foo","name":"ctu/foo","cwd":"ROOT","status":{"type":"active"}}]}"""
+        .Replace("ROOT", JsonEscaped(root), StringComparison.Ordinal));
+    var registry = McpToolRegistry.CreateDefault(busRoot, appServer);
+    var args = JsonSerializer.Deserialize<JsonElement>($$"""
+    {
+      "busRoot": {{JsonSerializer.Serialize(busRoot)}},
+      "resultId": {{JsonSerializer.Serialize(busResult.Id)}}
+    }
+    """);
+
+    var response = registry.InvokeAsync("bridge_notify_result", args).GetAwaiter().GetResult();
+    Equal(0, appServer.SentTurns.Count);
+    var deferredEvent = bus.ListEvents().Single(evt => evt.Type == "result.notify_deferred" && evt.ResultId == busResult.Id);
+    True(deferredEvent.Message?.Contains("turn/start deferred", StringComparison.Ordinal) == true);
+    True(deferredEvent.Message?.Contains("targetStatus=active", StringComparison.Ordinal) == true);
+    using var doc = JsonDocument.Parse(JsonSerializer.Serialize(response, JsonFile.Options));
+    True(doc.RootElement.GetProperty("wakeup").GetProperty("deferred").GetBoolean());
 }
 
 static void AgentThreadMatcherBindsNamedTeamThreads()

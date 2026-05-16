@@ -12,6 +12,8 @@ namespace CodexTeamUp.Mcp;
 public sealed class McpToolRegistry
 {
     private const string DefaultSpeed = "standard";
+    private static readonly TimeSpan WakeupReadyTimeout = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan WakeupReadyPollInterval = TimeSpan.FromMilliseconds(200);
 
     /// <summary>All tool names exposed by CodexTeamUp.</summary>
     public static readonly IReadOnlyList<string> KnownToolNames =
@@ -185,8 +187,18 @@ public sealed class McpToolRegistry
             var agent = await EnsureAgentBoundAsync(bus, appServer, task.To, task.Cwd, ct).ConfigureAwait(false);
 
             var message = BuildTaskWakeMessage(task.Id, task.To, DefaultArchitectFor(task.To));
-            var result = await appServer.SendTurnAsync(agent.ThreadId!, message, task.Cwd, RuntimeSettings(agent), ct).ConfigureAwait(false);
-            return new { result.Succeeded, result.ResultJson, result.Error };
+            var wakeup = await SendTurnWhenReadyAsync(appServer, agent.ThreadId!, message, task.Cwd, RuntimeSettings(agent), ct).ConfigureAwait(false);
+            bus.RecordEvent(new AgentBusEvent
+            {
+                Timestamp = DateTimeOffset.Now,
+                Type = wakeup.Deferred ? "task.dispatch_deferred" : wakeup.Result.Succeeded ? "task.dispatched" : "task.dispatch_failed",
+                TaskId = task.Id,
+                From = task.From,
+                To = task.To,
+                Message = WakeupEventMessage(wakeup),
+                Payload = WakeupEventPayload(agent.ThreadId!, wakeup)
+            });
+            return new { wakeup.Result.Succeeded, wakeup.Result.ResultJson, wakeup.Result.Error, wakeup.Deferred, wakeup.InitialStatus, wakeup.FinalStatus };
         });
 
         registry.Register("bridge_notify_result", async (args, ct) =>
@@ -212,18 +224,14 @@ public sealed class McpToolRegistry
             var message =
                 $"CodexTeamUp result arrived: {busResult.Id}.\n" +
                 $"Please read .codexteamup/agentbus/results/{busResult.Id}.json and review the result, scope, and next steps.";
-            var targetStatus = await TryReadThreadStatusAsync(appServer, targetThreadId, cwd, ct).ConfigureAwait(false);
             var notifyStartedAt = DateTimeOffset.Now;
-            var stopwatch = Stopwatch.StartNew();
             var targetSettings = !string.IsNullOrWhiteSpace(targetAgent)
                 ? RuntimeSettings(bus.FindAgent(targetAgent))
                 : null;
-            var result = await appServer.SendTurnAsync(targetThreadId, message, cwd, targetSettings, ct).ConfigureAwait(false);
-            stopwatch.Stop();
+            var wakeup = await SendTurnWhenReadyAsync(appServer, targetThreadId, message, cwd, targetSettings, ct).ConfigureAwait(false);
+            var result = wakeup.Result;
             var turnId = TryExtractTurnId(result.ResultJson);
-            var notifyMessage = result.Succeeded
-                ? $"turn/start sent; latencyMs={stopwatch.ElapsedMilliseconds}; turnId={turnId ?? "unknown"}; targetStatus={targetStatus ?? "unknown"}"
-                : $"turn/start failed; latencyMs={stopwatch.ElapsedMilliseconds}; targetStatus={targetStatus ?? "unknown"}; error={SafeText.Preview(result.Error, 180)}";
+            var notifyMessage = WakeupEventMessage(wakeup, turnId);
             if (result.Succeeded)
             {
                 bus.RecordEvent(new AgentBusEvent
@@ -237,11 +245,36 @@ public sealed class McpToolRegistry
                     Payload = new
                     {
                         targetThreadId,
-                        targetStatus,
+                        targetStatus = wakeup.FinalStatus,
+                        initialStatus = wakeup.InitialStatus,
                         turnId,
                         notifyStartedAt,
                         notifyCompletedAt = DateTimeOffset.Now,
-                        notifyLatencyMs = stopwatch.ElapsedMilliseconds
+                        notifyLatencyMs = wakeup.ElapsedMs,
+                        waitedMs = wakeup.WaitedMs
+                    }
+                });
+            }
+            else if (wakeup.Deferred)
+            {
+                bus.RecordEvent(new AgentBusEvent
+                {
+                    Timestamp = DateTimeOffset.Now,
+                    Type = "result.notify_deferred",
+                    ResultId = busResult.Id,
+                    From = busResult.From,
+                    To = targetAgent,
+                    Message = notifyMessage,
+                    Payload = new
+                    {
+                        targetThreadId,
+                        targetStatus = wakeup.FinalStatus,
+                        initialStatus = wakeup.InitialStatus,
+                        notifyStartedAt,
+                        notifyCompletedAt = DateTimeOffset.Now,
+                        notifyLatencyMs = wakeup.ElapsedMs,
+                        waitedMs = wakeup.WaitedMs,
+                        result.Error
                     }
                 });
             }
@@ -258,10 +291,12 @@ public sealed class McpToolRegistry
                     Payload = new
                     {
                         targetThreadId,
-                        targetStatus,
+                        targetStatus = wakeup.FinalStatus,
+                        initialStatus = wakeup.InitialStatus,
                         notifyStartedAt,
                         notifyCompletedAt = DateTimeOffset.Now,
-                        notifyLatencyMs = stopwatch.ElapsedMilliseconds,
+                        notifyLatencyMs = wakeup.ElapsedMs,
+                        waitedMs = wakeup.WaitedMs,
                         result.Error
                     }
                 });
@@ -270,8 +305,8 @@ public sealed class McpToolRegistry
             return new
             {
                 result = busResult,
-                target = new { agent = targetAgent, threadId = targetThreadId, status = targetStatus },
-                wakeup = new { result.Succeeded, result.ResultJson, result.Error, turnId, notifyLatencyMs = stopwatch.ElapsedMilliseconds }
+                target = new { agent = targetAgent, threadId = targetThreadId, status = wakeup.FinalStatus, initialStatus = wakeup.InitialStatus },
+                wakeup = new { result.Succeeded, result.ResultJson, result.Error, turnId, wakeup.Deferred, notifyLatencyMs = wakeup.ElapsedMs, wakeup.WaitedMs }
             };
         });
 
@@ -390,15 +425,17 @@ public sealed class McpToolRegistry
             var agent = await EnsureAgentBoundAsync(bus, appServer, to, cwd, ct).ConfigureAwait(false);
 
             var wake = BuildTaskWakeMessage(task.Id, to, Optional(args, "returnTo") ?? from);
-            var result = await appServer.SendTurnAsync(agent.ThreadId!, wake, cwd, RuntimeSettings(agent), ct).ConfigureAwait(false);
+            var wakeup = await SendTurnWhenReadyAsync(appServer, agent.ThreadId!, wake, cwd, RuntimeSettings(agent), ct).ConfigureAwait(false);
+            var result = wakeup.Result;
             bus.RecordEvent(new AgentBusEvent
             {
                 Timestamp = DateTimeOffset.Now,
-                Type = "team.message.sent",
+                Type = wakeup.Deferred ? "team.message.deferred" : result.Succeeded ? "team.message.sent" : "team.message.failed",
                 TaskId = task.Id,
                 From = from,
                 To = to,
-                Message = title
+                Message = wakeup.Deferred ? $"{title}; {WakeupEventMessage(wakeup)}" : title,
+                Payload = WakeupEventPayload(agent.ThreadId!, wakeup)
             });
 
             AgentBusResult? waitedResult = null;
@@ -428,7 +465,7 @@ public sealed class McpToolRegistry
                 ? new { completed = waitedResult is not null, waitedMs, result = waitedResult }
                 : null;
 
-            return new { task, wakeup = new { result.Succeeded, result.ResultJson, result.Error }, wait };
+            return new { task, wakeup = new { result.Succeeded, result.ResultJson, result.Error, wakeup.Deferred, wakeup.InitialStatus, wakeup.FinalStatus }, wait };
         });
 
         registry.Register("team_dashboard_export", (args, _) =>
@@ -873,6 +910,93 @@ public sealed class McpToolRegistry
             return null;
         }
     }
+
+    private static async Task<WakeupSendResult> SendTurnWhenReadyAsync(
+        IAppServerClient appServer,
+        string threadId,
+        string message,
+        string? cwd,
+        AppServerAgentSettings? settings,
+        CancellationToken cancellationToken)
+    {
+        var stopwatch = Stopwatch.StartNew();
+        var initialStatus = await TryReadThreadStatusAsync(appServer, threadId, cwd, cancellationToken).ConfigureAwait(false);
+        var finalStatus = initialStatus;
+        var waitedMs = 0L;
+
+        while (IsBusyThreadStatus(finalStatus) && stopwatch.Elapsed < WakeupReadyTimeout)
+        {
+            await Task.Delay(WakeupReadyPollInterval, cancellationToken).ConfigureAwait(false);
+            waitedMs = stopwatch.ElapsedMilliseconds;
+            finalStatus = await TryReadThreadStatusAsync(appServer, threadId, cwd, cancellationToken).ConfigureAwait(false);
+        }
+
+        if (IsBusyThreadStatus(finalStatus))
+        {
+            stopwatch.Stop();
+            return new WakeupSendResult(
+                new AppServerCallResult(false, null, $"Target thread {threadId} is still busy ({finalStatus}); wakeup deferred."),
+                initialStatus,
+                finalStatus,
+                Deferred: true,
+                waitedMs,
+                stopwatch.ElapsedMilliseconds);
+        }
+
+        var result = await appServer.SendTurnAsync(threadId, message, cwd, settings, cancellationToken).ConfigureAwait(false);
+        stopwatch.Stop();
+        return new WakeupSendResult(result, initialStatus, finalStatus, Deferred: false, waitedMs, stopwatch.ElapsedMilliseconds);
+    }
+
+    private static bool IsBusyThreadStatus(string? status)
+    {
+        if (string.IsNullOrWhiteSpace(status))
+        {
+            return false;
+        }
+
+        var normalized = status.Trim().ToLowerInvariant();
+        return normalized.Contains("active", StringComparison.Ordinal)
+            || normalized.Contains("running", StringComparison.Ordinal)
+            || normalized.Contains("inprogress", StringComparison.Ordinal)
+            || normalized.Contains("in_progress", StringComparison.Ordinal)
+            || normalized.Contains("busy", StringComparison.Ordinal);
+    }
+
+    private static string WakeupEventMessage(WakeupSendResult wakeup, string? turnId = null)
+    {
+        if (wakeup.Deferred)
+        {
+            return $"turn/start deferred; latencyMs={wakeup.ElapsedMs}; waitedMs={wakeup.WaitedMs}; targetStatus={wakeup.FinalStatus ?? "unknown"}; error={SafeText.Preview(wakeup.Result.Error, 180)}";
+        }
+
+        return wakeup.Result.Succeeded
+            ? $"turn/start sent; latencyMs={wakeup.ElapsedMs}; waitedMs={wakeup.WaitedMs}; turnId={turnId ?? TryExtractTurnId(wakeup.Result.ResultJson) ?? "unknown"}; targetStatus={wakeup.FinalStatus ?? "unknown"}"
+            : $"turn/start failed; latencyMs={wakeup.ElapsedMs}; waitedMs={wakeup.WaitedMs}; targetStatus={wakeup.FinalStatus ?? "unknown"}; error={SafeText.Preview(wakeup.Result.Error, 180)}";
+    }
+
+    private static object WakeupEventPayload(string threadId, WakeupSendResult wakeup)
+    {
+        return new
+        {
+            targetThreadId = threadId,
+            initialStatus = wakeup.InitialStatus,
+            targetStatus = wakeup.FinalStatus,
+            wakeup.Deferred,
+            wakeup.WaitedMs,
+            wakeup.ElapsedMs,
+            wakeup.Result.ResultJson,
+            wakeup.Result.Error
+        };
+    }
+
+    private sealed record WakeupSendResult(
+        AppServerCallResult Result,
+        string? InitialStatus,
+        string? FinalStatus,
+        bool Deferred,
+        long WaitedMs,
+        long ElapsedMs);
 
     private static string Required(JsonElement args, string name)
     {
