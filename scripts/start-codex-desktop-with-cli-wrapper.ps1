@@ -1,8 +1,8 @@
 param(
     [string]$Workspace = "",
     [string]$Configuration = "Release",
-    [string]$RealCodexExe = "$env:LOCALAPPDATA\OpenAI\Codex\bin\codex.exe",
-    [string]$DesktopExe = "C:\Program Files\WindowsApps\OpenAI.Codex_26.506.3741.0_x64__2p2nqsd0c76g0\app\Codex.exe",
+    [string]$RealCodexExe = "",
+    [string]$DesktopExe = "",
     [string]$WrapperExe = "",
     [string]$PipeName = "codexteamup-appserver",
     [string]$CtuServiceUrl = "",
@@ -34,6 +34,102 @@ function Resolve-File {
     }
 
     return (Resolve-Path -LiteralPath $expanded).Path
+}
+
+function Add-CandidatePath {
+    param(
+        [System.Collections.Generic.List[string]]$Candidates,
+        [string]$Path
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return
+    }
+
+    $expanded = [Environment]::ExpandEnvironmentVariables($Path)
+    if (-not [string]::IsNullOrWhiteSpace($expanded) -and -not $Candidates.Contains($expanded)) {
+        $Candidates.Add($expanded)
+    }
+}
+
+function Resolve-CodexDesktopExe {
+    param([string]$Path)
+
+    if (-not [string]::IsNullOrWhiteSpace($Path)) {
+        return Resolve-File -Path $Path -Name "Codex Desktop"
+    }
+
+    $candidates = [System.Collections.Generic.List[string]]::new()
+    Add-CandidatePath -Candidates $candidates -Path ([Environment]::GetEnvironmentVariable("CODEX_DESKTOP_EXE", "Process"))
+    Add-CandidatePath -Candidates $candidates -Path ([Environment]::GetEnvironmentVariable("CTU_CODEX_DESKTOP_EXE", "Process"))
+
+    if (Get-Command Get-AppxPackage -ErrorAction SilentlyContinue) {
+        $packages = @(Get-AppxPackage -Name "OpenAI.Codex" -ErrorAction SilentlyContinue |
+            Sort-Object -Property @{ Expression = { [version]$_.Version }; Descending = $true })
+        foreach ($package in $packages) {
+            Add-CandidatePath -Candidates $candidates -Path (Join-Path $package.InstallLocation "app\Codex.exe")
+        }
+    }
+
+    $windowsApps = Join-Path $env:ProgramFiles "WindowsApps"
+    if (Test-Path -LiteralPath $windowsApps -PathType Container) {
+        $packages = @(Get-ChildItem -LiteralPath $windowsApps -Directory -Filter "OpenAI.Codex_*__2p2nqsd0c76g0" -ErrorAction SilentlyContinue |
+            Sort-Object -Property LastWriteTime, Name -Descending)
+        foreach ($package in $packages) {
+            Add-CandidatePath -Candidates $candidates -Path (Join-Path $package.FullName "app\Codex.exe")
+        }
+    }
+
+    Add-CandidatePath -Candidates $candidates -Path (Join-Path $env:LOCALAPPDATA "Microsoft\WindowsApps\Codex.exe")
+
+    foreach ($candidate in $candidates) {
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            return (Resolve-Path -LiteralPath $candidate).Path
+        }
+    }
+
+    $searched = if ($candidates.Count -gt 0) {
+        "`nSearched:`n  " + (($candidates | ForEach-Object { $_ }) -join "`n  ")
+    } else {
+        ""
+    }
+    throw "Codex Desktop not found. Pass -DesktopExe or set CODEX_DESKTOP_EXE/CTU_CODEX_DESKTOP_EXE to the current Codex.exe path.$searched"
+}
+
+function Resolve-RealCodexExe {
+    param(
+        [string]$Path,
+        [string]$DesktopPath
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($Path)) {
+        return Resolve-File -Path $Path -Name "Real Codex CLI"
+    }
+
+    $candidates = [System.Collections.Generic.List[string]]::new()
+
+    if (-not [string]::IsNullOrWhiteSpace($DesktopPath)) {
+        $desktopDirectory = Split-Path -Parent $DesktopPath
+        Add-CandidatePath -Candidates $candidates -Path (Join-Path $desktopDirectory "resources\codex.exe")
+    }
+
+    Add-CandidatePath -Candidates $candidates -Path ([Environment]::GetEnvironmentVariable("CODEX_REAL_CLI_EXE", "Process"))
+    Add-CandidatePath -Candidates $candidates -Path ([Environment]::GetEnvironmentVariable("CTU_REAL_CODEX_EXE", "Process"))
+    Add-CandidatePath -Candidates $candidates -Path (Join-Path $env:LOCALAPPDATA "OpenAI\Codex\bin\codex.exe")
+    Add-CandidatePath -Candidates $candidates -Path (Join-Path $env:LOCALAPPDATA "Microsoft\WindowsApps\codex.exe")
+
+    foreach ($candidate in $candidates) {
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            return (Resolve-Path -LiteralPath $candidate).Path
+        }
+    }
+
+    $searched = if ($candidates.Count -gt 0) {
+        "`nSearched:`n  " + (($candidates | ForEach-Object { $_ }) -join "`n  ")
+    } else {
+        ""
+    }
+    throw "Real Codex CLI not found. Pass -RealCodexExe or set CODEX_REAL_CLI_EXE/CTU_REAL_CODEX_EXE.$searched"
 }
 
 function Set-TemporaryProcessEnvironment {
@@ -78,8 +174,8 @@ $workspacePath = if ([string]::IsNullOrWhiteSpace($Workspace)) {
 New-Item -ItemType Directory -Force -Path $logRoot | Out-Null
 
 Write-Section "Inputs"
-$realCodexPath = Resolve-File -Path $RealCodexExe -Name "Real Codex CLI"
-$desktopPath = Resolve-File -Path $DesktopExe -Name "Codex Desktop"
+$desktopPath = Resolve-CodexDesktopExe -Path $DesktopExe
+$realCodexPath = Resolve-RealCodexExe -Path $RealCodexExe -DesktopPath $desktopPath
 Write-Host "workspace=$(if ([string]::IsNullOrWhiteSpace($workspacePath)) { '<desktop-default>' } else { $workspacePath })"
 Write-Host "wrapperProject=$wrapperProject"
 Write-Host "wrapperExe=$wrapperExe"
