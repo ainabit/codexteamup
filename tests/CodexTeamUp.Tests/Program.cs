@@ -3,6 +3,7 @@ using CodexTeamUp.AppServer;
 using CodexTeamUp.CodexWrapper;
 using CodexTeamUp.Core;
 using CodexTeamUp.Mcp;
+using CodexTeamUp.Service;
 using System.IO.Pipes;
 using System.Text;
 using System.Text.Json;
@@ -17,6 +18,8 @@ var tests = new (string Name, Func<Task> Body)[]
     ("Schema service extracts interesting methods", () => Task.Run(SchemaServiceExtractsMethods)),
     ("Wrapper protocol rewrites turn list sorting", () => Task.Run(WrapperProtocolRewritesTurnListSorting)),
     ("Wrapper protocol stamps live turn started notifications", () => Task.Run(WrapperProtocolStampsLiveTurnStartedNotifications)),
+    ("Wrapper protocol normalizes git directive cwd paths", () => Task.Run(WrapperProtocolNormalizesGitDirectiveCwdPaths)),
+    ("HTTP request reader preserves UTF-8 body", HttpRequestReaderPreservesUtf8Body),
     ("Wrapper protocol identifies bridge responses", () => Task.Run(WrapperProtocolIdentifiesBridgeResponses)),
     ("Wrapper pipe client parses JSON-RPC result", WrapperPipeClientParsesResult),
     ("Wrapper pipe send turn resumes without historical turns", WrapperPipeSendTurnResumesWithoutHistoricalTurns),
@@ -31,6 +34,9 @@ var tests = new (string Name, Func<Task> Body)[]
     ("MCP registry waits for AgentBus result", () => Task.Run(McpRegistryWaitsForAgentBusResult)),
     ("MCP team send message waits for result", () => Task.Run(McpTeamSendMessageWaitsForResult)),
     ("MCP registry recreates stale ctu agent threads", () => Task.Run(McpRegistryRecreatesStaleCtuAgentThreads)),
+    ("MCP registry creates agents when naming is delayed", () => Task.Run(McpRegistryCreatesAgentsWhenNamingIsDelayed)),
+    ("MCP registry primes newly-created agents directly", () => Task.Run(McpRegistryPrimesNewlyCreatedAgentsDirectly)),
+    ("MCP registry binds roles by display name", () => Task.Run(McpRegistryBindsRolesByDisplayName)),
     ("MCP registry notifies result through service path", () => Task.Run(McpRegistryNotifiesResultThroughServicePath)),
     ("MCP registry defers result notify while target active", () => Task.Run(McpRegistryDefersResultNotifyWhileTargetActive)),
     ("MCP registry reads target status when list is notLoaded", () => Task.Run(McpRegistryReadsTargetStatusWhenListIsNotLoaded)),
@@ -208,6 +214,46 @@ static void WrapperProtocolStampsLiveTurnStartedNotifications()
         unixTimeProvider: () => 1778829000);
     True(unchanged.Contains("\"startedAt\":1778828000", StringComparison.Ordinal));
     True(!unchanged.Contains("\"startedAt\":1778829000", StringComparison.Ordinal));
+}
+
+static void WrapperProtocolNormalizesGitDirectiveCwdPaths()
+{
+    var line = """
+        {"method":"turn/completed","params":{"turn":{"items":[{"type":"message","content":[{"type":"output_text","text":"Done\n\n::git-stage{cwd=\"X:\\repo\\codexteamup\"}\n::git-push{cwd=\"X:\\repo\\codexteamup\" branch=\"codex/fix\"}"}]}]}}}
+        """;
+
+    var rewritten = WrapperProtocol.RewriteGitDirectiveCwdWindowsPaths(line, enabled: true);
+    using var rewrittenDoc = JsonDocument.Parse(rewritten);
+    var text = rewrittenDoc.RootElement
+        .GetProperty("params")
+        .GetProperty("turn")
+        .GetProperty("items")[0]
+        .GetProperty("content")[0]
+        .GetProperty("text")
+        .GetString();
+    True(text?.Contains("::git-stage{cwd=\"X:/repo/codexteamup\"}", StringComparison.Ordinal) == true);
+    True(text?.Contains("::git-push{cwd=\"X:/repo/codexteamup\" branch=\"codex/fix\"}", StringComparison.Ordinal) == true);
+    True(text?.Contains("cwd=\"X:\\repo", StringComparison.Ordinal) == false);
+
+    var unchanged = WrapperProtocol.RewriteGitDirectiveCwdWindowsPaths(
+        "{\"method\":\"event\",\"params\":{\"message\":\"plain cwd=\\\"X:\\\\repo\\\\codexteamup\\\"\"}}",
+        enabled: true);
+    using var unchangedDoc = JsonDocument.Parse(unchanged);
+    var message = unchangedDoc.RootElement.GetProperty("params").GetProperty("message").GetString();
+    True(message?.Contains("cwd=\"X:\\repo", StringComparison.Ordinal) == true);
+}
+
+static async Task HttpRequestReaderPreservesUtf8Body()
+{
+    var body = "{\"prompt\":\"Bitte pruefe: äöü ÄÖÜ ß\"}";
+    var bytes = Encoding.UTF8.GetBytes(
+        $"POST /mcp/tools/team_send_message HTTP/1.1\r\nContent-Length: {Encoding.UTF8.GetByteCount(body)}\r\n\r\n{body}");
+    await using var stream = new MemoryStream(bytes);
+
+    Equal("POST /mcp/tools/team_send_message HTTP/1.1", await HttpRequestReader.ReadAsciiLineAsync(stream).ConfigureAwait(false));
+    Equal($"Content-Length: {Encoding.UTF8.GetByteCount(body)}", await HttpRequestReader.ReadAsciiLineAsync(stream).ConfigureAwait(false));
+    Equal(string.Empty, await HttpRequestReader.ReadAsciiLineAsync(stream).ConfigureAwait(false));
+    Equal(body, await HttpRequestReader.ReadUtf8BodyAsync(stream, Encoding.UTF8.GetByteCount(body)).ConfigureAwait(false));
 }
 
 static void WrapperProtocolIdentifiesBridgeResponses()
@@ -639,6 +685,87 @@ static void McpRegistryRecreatesStaleCtuAgentThreads()
     Equal("ctu/foo", appServer.NamedThreads.Single().Name);
 }
 
+static void McpRegistryCreatesAgentsWhenNamingIsDelayed()
+{
+    var root = NewTestDirectory();
+    var busRoot = Path.Combine(root, ".codexteamup", "agentbus");
+    var appServer = new FakeAppServerClient("""{"data":[]}""", failNameSet: true);
+    var registry = McpToolRegistry.CreateDefault(busRoot, appServer);
+    var agentsJson = JsonSerializer.Serialize(new[] { new { id = "ctu/wrapper", role = "Wrapper", displayName = "Wrapper Chat" } });
+    var args = JsonSerializer.Deserialize<JsonElement>($$"""
+    {
+      "cwd": {{JsonSerializer.Serialize(root.Replace('\\', '/'))}},
+      "busRoot": {{JsonSerializer.Serialize(busRoot)}},
+      "agentsJson": {{JsonSerializer.Serialize(agentsJson)}},
+      "createMissing": "true",
+      "prime": "false"
+    }
+    """);
+
+    _ = registry.InvokeAsync("team_ensure_agents", args).GetAwaiter().GetResult();
+    var agent = new AgentBusStore(busRoot).FindAgent("ctu/wrapper");
+    Equal("created-thread", agent?.ThreadId);
+    Equal("Wrapper Chat", agent?.DisplayName);
+    Equal("active", agent?.Status);
+}
+
+static void McpRegistryPrimesNewlyCreatedAgentsDirectly()
+{
+    var root = NewTestDirectory();
+    var busRoot = Path.Combine(root, ".codexteamup", "agentbus");
+    var appServer = new FakeAppServerClient("""{"data":[]}""");
+    var registry = McpToolRegistry.CreateDefault(busRoot, appServer);
+    var agentsJson = JsonSerializer.Serialize(new[] { new { id = "ctu/wrapper", role = "Wrapper" } });
+    var args = JsonSerializer.Deserialize<JsonElement>($$"""
+    {
+      "cwd": {{JsonSerializer.Serialize(root)}},
+      "busRoot": {{JsonSerializer.Serialize(busRoot)}},
+      "agentsJson": {{JsonSerializer.Serialize(agentsJson)}},
+      "createMissing": "true",
+      "prime": "true"
+    }
+    """);
+
+    _ = registry.InvokeAsync("team_ensure_agents", args).GetAwaiter().GetResult();
+    Equal("created-thread", appServer.SentTurns.Single().ThreadId);
+    True(appServer.SentTurns.Single().Message.Contains("You are ctu/wrapper", StringComparison.Ordinal));
+}
+
+static void McpRegistryBindsRolesByDisplayName()
+{
+    var root = NewTestDirectory();
+    var slashRoot = root.Replace('\\', '/');
+    var appServer = new FakeAppServerClient($$"""
+        {"data":[{"id":"thread-service","name":"Service Implementation Chat","cwd":{{JsonSerializer.Serialize(root)}},"status":"idle"}]}
+        """);
+    var busRoot = Path.Combine(root, ".codexteamup", "agentbus");
+    var registry = McpToolRegistry.CreateDefault(busRoot, appServer);
+    var agentsJson = JsonSerializer.Serialize(new[]
+    {
+        new
+        {
+            id = "ctu/service",
+            role = "Service maintainer",
+            displayName = "Service Implementation Chat"
+        }
+    });
+    var args = JsonSerializer.Deserialize<JsonElement>($$"""
+    {
+      "cwd": {{JsonSerializer.Serialize(slashRoot)}},
+      "busRoot": {{JsonSerializer.Serialize(busRoot)}},
+      "agentsJson": {{JsonSerializer.Serialize(agentsJson)}},
+      "createMissing": "false",
+      "prime": "false"
+    }
+    """);
+
+    _ = registry.InvokeAsync("team_ensure_agents", args).GetAwaiter().GetResult();
+    var agent = new AgentBusStore(busRoot).FindAgent("ctu/service");
+    Equal("thread-service", agent?.ThreadId);
+    Equal("Service Implementation Chat", agent?.DisplayName);
+    Equal("active", agent?.Status);
+}
+
 static void McpRegistryNotifiesResultThroughServicePath()
 {
     var root = NewTestDirectory();
@@ -913,7 +1040,8 @@ static void Equal<T>(T expected, T actual)
 sealed class FakeAppServerClient(
     string threadListJson,
     Action<string, string, string?>? onSendTurn = null,
-    string? readThreadJson = null) : IAppServerClient
+    string? readThreadJson = null,
+    bool failNameSet = false) : IAppServerClient
 {
     public List<(string ThreadId, string Message, string? Cwd, AppServerAgentSettings? Settings)> SentTurns { get; } = [];
     public List<(string ThreadId, string Name)> NamedThreads { get; } = [];
@@ -925,8 +1053,29 @@ sealed class FakeAppServerClient(
 
     public Task<AppServerCallResult> CallAsync(string method, object? parameters, CancellationToken cancellationToken = default)
     {
+        if (string.Equals(method, "turn/start", StringComparison.Ordinal) && parameters is not null)
+        {
+            var json = JsonSerializer.Serialize(parameters);
+            using var doc = JsonDocument.Parse(json);
+            var input = doc.RootElement.GetProperty("input")[0].GetProperty("text").GetString()!;
+            var cwd = doc.RootElement.TryGetProperty("cwd", out var cwdElement)
+                ? cwdElement.GetString()
+                : null;
+            SentTurns.Add((
+                doc.RootElement.GetProperty("threadId").GetString()!,
+                input,
+                cwd,
+                null));
+            return Task.FromResult(new AppServerCallResult(true, """{"turn":{"id":"turn-fake","status":"inProgress"}}""", null));
+        }
+
         if (string.Equals(method, "thread/name/set", StringComparison.Ordinal) && parameters is not null)
         {
+            if (failNameSet)
+            {
+                return Task.FromResult(new AppServerCallResult(false, null, "thread not found: created-thread"));
+            }
+
             var json = JsonSerializer.Serialize(parameters);
             using var doc = JsonDocument.Parse(json);
             NamedThreads.Add((

@@ -3,12 +3,14 @@ param(
     [string]$ServiceUrl = "http://127.0.0.1:47319/",
     [string]$DesktopExe = "",
     [string]$RealCodexExe = "",
+    [string]$PipeName = "",
     [switch]$ForceTurnsAscending,
     [switch]$NoForceTurnsAscending,
     [switch]$NoStampTurnStartedAt,
     [switch]$NoPublish,
     [switch]$NoLaunch,
     [switch]$AllowExistingDesktop,
+    [switch]$KillExistingCodex,
     [switch]$RestartService,
     [switch]$NoService,
     [switch]$NoConfigureMcp
@@ -22,6 +24,12 @@ $desktopStart = Join-Path $repoRoot "scripts\start-codex-desktop-with-cli-wrappe
 $wrapperExe = Join-Path $repoRoot ".ctu\tools\wrapper\CodexTeamUp.CodexWrapper.exe"
 $serviceExe = Join-Path $repoRoot ".ctu\tools\service\CodexTeamUp.Service.exe"
 $serviceLogRoot = Join-Path $repoRoot ".ctu\service"
+
+if ([string]::IsNullOrWhiteSpace($PipeName)) {
+    $PipeName = "codexteamup-appserver-$([Guid]::NewGuid().ToString("N").Substring(0, 12))"
+} else {
+    $PipeName = $PipeName.Trim()
+}
 
 function Stop-ServiceListener {
     param([string]$Url)
@@ -176,7 +184,8 @@ approval_mode = "approve"
 
 function Start-CodexTeamUpService {
     param(
-        [int]$ParentProcessId
+        [int]$ParentProcessId,
+        [string]$PipeName
     )
 
     New-Item -ItemType Directory -Force -Path $serviceLogRoot | Out-Null
@@ -198,7 +207,7 @@ function Start-CodexTeamUpService {
     }
 
     if (-not $serviceRunning) {
-        Write-Host "Starting CodexTeamUp service at $ServiceUrl (watching pid=$ParentProcessId)"
+        Write-Host "Starting CodexTeamUp service at $ServiceUrl (watching pid=$ParentProcessId, pipe=$PipeName)"
         $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
         $stdoutLog = Join-Path $serviceLogRoot "service-$stamp.out.log"
         $stderrLog = Join-Path $serviceLogRoot "service-$stamp.err.log"
@@ -206,7 +215,7 @@ function Start-CodexTeamUpService {
         $previousPipeName = [Environment]::GetEnvironmentVariable("CODEX_WRAPPER_PIPE_NAME", "Process")
         try {
             Set-Item -LiteralPath "Env:CTU_SERVICE_URL" -Value $ServiceUrl
-            Set-Item -LiteralPath "Env:CODEX_WRAPPER_PIPE_NAME" -Value "codexteamup-appserver"
+            Set-Item -LiteralPath "Env:CODEX_WRAPPER_PIPE_NAME" -Value $PipeName
             Start-Process `
                 -FilePath $serviceExe `
                 -ArgumentList @("--url", $ServiceUrl, "--parent-pid", "$ParentProcessId") `
@@ -236,9 +245,52 @@ function Start-CodexTeamUpService {
             Write-Host "Service stderr log: $stderrLog"
             throw "CodexTeamUp service did not become healthy at $healthUrl."
         }
-    } else {
+} else {
         Write-Host "CodexTeamUp service already running at $ServiceUrl"
     }
+}
+
+function Stop-ExistingCodexIfNeeded {
+    if ($NoLaunch -or $AllowExistingDesktop) {
+        return
+    }
+
+    $processNames = @("Codex", "codex", "CodexTeamUp.CodexWrapper")
+    $existing = @(Get-Process -ErrorAction SilentlyContinue |
+        Where-Object { $processNames -contains $_.ProcessName } |
+        Sort-Object ProcessName, Id)
+
+    if ($existing.Count -eq 0) {
+        return
+    }
+
+    Write-Host ""
+    Write-Host "Codex Desktop or CTU wrapper processes are already running:"
+    $existing | Select-Object Id, ProcessName, Path, MainWindowTitle | Format-Table -AutoSize
+    Write-Host ""
+    Write-Host "A normal existing Codex Desktop instance can ignore the CTU wrapper environment."
+    Write-Host "For a clean CTU start, close these processes first."
+
+    $shouldStop = $KillExistingCodex
+    if (-not $shouldStop) {
+        $answer = Read-Host "Stop existing Codex/CTU wrapper processes now? [y/N]"
+        $shouldStop = $answer -match '^(y|yes|j|ja)$'
+    }
+
+    if (-not $shouldStop) {
+        throw "Codex is already running. Close it first, rerun with -AllowExistingDesktop, or answer y to stop it."
+    }
+
+    foreach ($process in $existing) {
+        try {
+            Write-Host "Stopping $($process.ProcessName) pid=$($process.Id)"
+            Stop-Process -Id $process.Id -Force -ErrorAction Stop
+        } catch {
+            Write-Warning "Could not stop $($process.ProcessName) pid=$($process.Id): $($_.Exception.Message)"
+        }
+    }
+
+    Start-Sleep -Seconds 2
 }
 
 if ($RestartService -or ((-not $NoService) -and (-not $NoPublish))) {
@@ -265,8 +317,11 @@ if (-not (Test-Path -LiteralPath $wrapperExe -PathType Leaf)) {
     throw "Wrapper not found: $wrapperExe. Close Codex Desktop, then run scripts\publish-ctu.ps1 or dotnet build -c Release."
 }
 
+Stop-ExistingCodexIfNeeded
+
 $startArgs = @{
     WrapperExe = $wrapperExe
+    PipeName = $PipeName
 }
 
 if (-not [string]::IsNullOrWhiteSpace($Workspace)) {
@@ -311,7 +366,7 @@ if (-not $NoService) {
     if ($desktopProcess -and $desktopProcess.Id) {
         $serviceParentPid = $desktopProcess.Id
     }
-    Start-CodexTeamUpService -ParentProcessId $serviceParentPid
+    Start-CodexTeamUpService -ParentProcessId $serviceParentPid -PipeName $PipeName
 }
 
 Write-Host ""
@@ -319,4 +374,5 @@ Write-Host "CodexTeamUp agent backend:"
 Write-Host "  Service URL: $ServiceUrl"
 Write-Host "  Dashboard:   $($ServiceUrl.TrimEnd('/'))/"
 Write-Host "  MCP URL:     $($ServiceUrl.TrimEnd('/'))/mcp"
+Write-Host "  Pipe name:   $PipeName"
 Write-Host "  Agent tools: Codex Desktop uses the registered HTTP MCP endpoint."

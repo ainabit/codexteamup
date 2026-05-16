@@ -7,6 +7,7 @@ using CodexTeamUp.AgentBus;
 using CodexTeamUp.AppServer;
 using CodexTeamUp.Core;
 using CodexTeamUp.Mcp;
+using CodexTeamUp.Service;
 
 var url = ReadOption(args, "--url")
     ?? Environment.GetEnvironmentVariable("CTU_SERVICE_URL")
@@ -74,9 +75,7 @@ async Task HandleClientAsync(TcpClient client)
     try
     {
         stream = client.GetStream();
-        using var reader = new StreamReader(stream, Encoding.ASCII, detectEncodingFromByteOrderMarks: false, leaveOpen: true);
-
-        var requestLine = await reader.ReadLineAsync().ConfigureAwait(false);
+        var requestLine = await HttpRequestReader.ReadAsciiLineAsync(stream).ConfigureAwait(false);
         if (string.IsNullOrWhiteSpace(requestLine))
         {
             return;
@@ -93,7 +92,7 @@ async Task HandleClientAsync(TcpClient client)
         var target = parts[1];
         var headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         string? headerLine;
-        while (!string.IsNullOrEmpty(headerLine = await reader.ReadLineAsync().ConfigureAwait(false)))
+        while (!string.IsNullOrEmpty(headerLine = await HttpRequestReader.ReadAsciiLineAsync(stream).ConfigureAwait(false)))
         {
             var colon = headerLine.IndexOf(':');
             if (colon > 0)
@@ -112,24 +111,7 @@ async Task HandleClientAsync(TcpClient client)
             await stream.WriteAsync(Encoding.ASCII.GetBytes("HTTP/1.1 100 Continue\r\n\r\n")).ConfigureAwait(false);
         }
 
-        var body = string.Empty;
-        if (contentLength > 0)
-        {
-            var buffer = new char[contentLength];
-            var read = 0;
-            while (read < contentLength)
-            {
-                var count = await reader.ReadAsync(buffer.AsMemory(read, contentLength - read)).ConfigureAwait(false);
-                if (count == 0)
-                {
-                    break;
-                }
-
-                read += count;
-            }
-
-            body = new string(buffer, 0, read);
-        }
+        var body = await HttpRequestReader.ReadUtf8BodyAsync(stream, contentLength).ConfigureAwait(false);
 
         await HandleRequestAsync(stream, method, target, body).ConfigureAwait(false);
     }

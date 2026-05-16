@@ -6,6 +6,7 @@
     <ProjectReference Include="..\..\src\CodexTeamUp.AppServer\CodexTeamUp.AppServer.csproj" />
     <ProjectReference Include="..\..\src\CodexTeamUp.CodexWrapper\CodexTeamUp.CodexWrapper.csproj" />
     <ProjectReference Include="..\..\src\CodexTeamUp.Mcp\CodexTeamUp.Mcp.csproj" />
+    <ProjectReference Include="..\..\src\CodexTeamUp.Service\CodexTeamUp.Service.csproj" />
   </ItemGroup>
 
   <PropertyGroup>

@@ -62,22 +62,7 @@ public sealed class WrapperPipeAppServerClient : IAppServerClient
 
         AddRuntimeSettings(parameters, settings);
 
-        var result = await CallAsync("thread/start", parameters, cancellationToken).ConfigureAwait(false);
-
-        if (!result.Succeeded || string.IsNullOrWhiteSpace(name) || string.IsNullOrWhiteSpace(result.ResultJson))
-        {
-            return result;
-        }
-
-        var threadId = TryExtractThreadId(result.ResultJson);
-        if (string.IsNullOrWhiteSpace(threadId))
-        {
-            return result;
-        }
-
-        var nameResult = await CallAsync("thread/name/set", new { threadId, name }, cancellationToken)
-            .ConfigureAwait(false);
-        return nameResult.Succeeded ? result : nameResult;
+        return await CallAsync("thread/start", parameters, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<AppServerCallResult> ResumeThreadAsync(string threadId, CancellationToken cancellationToken = default)

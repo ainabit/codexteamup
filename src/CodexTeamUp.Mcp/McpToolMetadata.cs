@@ -91,8 +91,12 @@ public static class McpToolMetadata
             {
                 ["id"] = StringSchema(),
                 ["role"] = StringSchema(),
+                ["displayName"] = StringSchema(),
+                ["chatName"] = StringSchema(),
                 ["threadId"] = StringSchema(),
                 ["cwd"] = StringSchema(),
+                ["allowedPaths"] = StringSchema(),
+                ["instructionFiles"] = StringSchema(),
                 ["returnTo"] = StringSchema(),
                 ["model"] = StringSchema(),
                 ["reasoningEffort"] = StringSchema(),
