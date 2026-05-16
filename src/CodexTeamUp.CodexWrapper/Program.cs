@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.IO.Pipes;
 using System.Text;
@@ -44,7 +45,7 @@ try
         cancellation.Cancel();
     };
 
-    var process = StartRealCodex(realCodex, args);
+    var process = StartRealCodexWithFallback(realCodex, args, logger);
     logger.Write("child-started", new { childPid = process.Id });
 
     if (IsAppServerInvocation(args))
@@ -449,6 +450,24 @@ static async Task IgnoreCancellation(Task task)
     }
 }
 
+static Process StartRealCodexWithFallback(string realCodex, string[] args, WrapperLogger logger)
+{
+    try
+    {
+        return StartRealCodex(realCodex, args);
+    }
+    catch (Win32Exception ex) when (ex.NativeErrorCode == 5 && TryResolveProtectedWindowsAppsFallback(realCodex, out var fallback))
+    {
+        logger.Write("real-codex-fallback", new
+        {
+            failedPath = realCodex,
+            fallbackPath = fallback,
+            reason = "access-denied"
+        });
+        return StartRealCodex(fallback, args);
+    }
+}
+
 static Process StartRealCodex(string realCodex, string[] args)
 {
     var startInfo = new ProcessStartInfo
@@ -470,6 +489,27 @@ static Process StartRealCodex(string realCodex, string[] args)
     startInfo.Environment["CODEX_WRAPPER_DELEGATED"] = "1";
 
     return Process.Start(startInfo) ?? throw new InvalidOperationException("Failed to start real Codex process.");
+}
+
+static bool TryResolveProtectedWindowsAppsFallback(string realCodex, out string fallback)
+{
+    fallback = string.Empty;
+    if (!realCodex.Contains($"{Path.DirectorySeparatorChar}WindowsApps{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase)
+        && !realCodex.Contains($"{Path.AltDirectorySeparatorChar}WindowsApps{Path.AltDirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase))
+    {
+        return false;
+    }
+
+    var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+    var candidate = Path.Combine(localAppData, "OpenAI", "Codex", "bin", "codex.exe");
+    if (!File.Exists(candidate)
+        || string.Equals(Path.GetFullPath(candidate), Path.GetFullPath(realCodex), StringComparison.OrdinalIgnoreCase))
+    {
+        return false;
+    }
+
+    fallback = candidate;
+    return true;
 }
 
 static string ResolveRealCodexPath()
