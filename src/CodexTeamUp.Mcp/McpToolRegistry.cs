@@ -893,19 +893,90 @@ public sealed class McpToolRegistry
         string? cwd,
         CancellationToken cancellationToken)
     {
+        string? listStatus = null;
         try
         {
             var list = await appServer.ListThreadsAsync(cwd, 100, cancellationToken).ConfigureAwait(false);
-            if (!list.Succeeded || string.IsNullOrWhiteSpace(list.ResultJson))
+            if (list.Succeeded && !string.IsNullOrWhiteSpace(list.ResultJson))
+            {
+                listStatus = AppServerThreadMapper.ParseListResult(list.ResultJson)
+                    .FirstOrDefault(thread => string.Equals(thread.Id, threadId, StringComparison.Ordinal))?
+                    .Status;
+
+                if (!IsUncertainThreadStatus(listStatus))
+                {
+                    return listStatus;
+                }
+            }
+        }
+        catch (Exception)
+        {
+        }
+
+        try
+        {
+            var read = await appServer.ReadThreadAsync(threadId, includeTurns: true, cancellationToken).ConfigureAwait(false);
+            if (!read.Succeeded || string.IsNullOrWhiteSpace(read.ResultJson))
+            {
+                return listStatus;
+            }
+
+            var readStatus = AppServerThreadMapper.ParseReadResult(read.ResultJson)?.Thread.Status;
+            if (!IsUncertainThreadStatus(readStatus))
+            {
+                return readStatus;
+            }
+
+            return TryFindBusyTurnStatus(read.ResultJson) ?? readStatus ?? listStatus;
+        }
+        catch (Exception)
+        {
+            return listStatus;
+        }
+    }
+
+    private static bool IsUncertainThreadStatus(string? status)
+    {
+        if (string.IsNullOrWhiteSpace(status))
+        {
+            return true;
+        }
+
+        var normalized = status.Trim().ToLowerInvariant();
+        return normalized is "notloaded" or "not_loaded" or "unknown";
+    }
+
+    private static string? TryFindBusyTurnStatus(string json)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            var thread = root.TryGetProperty("thread", out var threadElement) ? threadElement : root;
+            if (!thread.TryGetProperty("turns", out var turns) || turns.ValueKind != JsonValueKind.Array)
             {
                 return null;
             }
 
-            return AppServerThreadMapper.ParseListResult(list.ResultJson)
-                .FirstOrDefault(thread => string.Equals(thread.Id, threadId, StringComparison.Ordinal))?
-                .Status;
+            string? lastStatus = null;
+            foreach (var turn in turns.EnumerateArray())
+            {
+                var status = JsonString(turn, "status");
+                if (string.IsNullOrWhiteSpace(status))
+                {
+                    continue;
+                }
+
+                lastStatus = status;
+                if (IsBusyThreadStatus(status))
+                {
+                    return status;
+                }
+            }
+
+            return lastStatus;
         }
-        catch (Exception)
+        catch (JsonException)
         {
             return null;
         }

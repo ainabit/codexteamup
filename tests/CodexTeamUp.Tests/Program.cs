@@ -33,6 +33,7 @@ var tests = new (string Name, Func<Task> Body)[]
     ("MCP registry recreates stale ctu agent threads", () => Task.Run(McpRegistryRecreatesStaleCtuAgentThreads)),
     ("MCP registry notifies result through service path", () => Task.Run(McpRegistryNotifiesResultThroughServicePath)),
     ("MCP registry defers result notify while target active", () => Task.Run(McpRegistryDefersResultNotifyWhileTargetActive)),
+    ("MCP registry reads target status when list is notLoaded", () => Task.Run(McpRegistryReadsTargetStatusWhenListIsNotLoaded)),
     ("Agent thread matcher binds named team threads", () => Task.Run(AgentThreadMatcherBindsNamedTeamThreads)),
     ("AgentBus dashboard creates snapshot", () => Task.Run(AgentBusDashboardCreatesSnapshot)),
     ("AgentBus dashboard renders communication", () => Task.Run(AgentBusDashboardRendersCommunication))
@@ -733,6 +734,54 @@ static void McpRegistryDefersResultNotifyWhileTargetActive()
     True(doc.RootElement.GetProperty("wakeup").GetProperty("deferred").GetBoolean());
 }
 
+static void McpRegistryReadsTargetStatusWhenListIsNotLoaded()
+{
+    var root = NewTestDirectory();
+    var busRoot = Path.Combine(root, ".codexteamup", "agentbus");
+    var bus = new AgentBusStore(busRoot);
+    bus.Initialize();
+    bus.RegisterAgent(new AgentDefinition
+    {
+        Id = "ctu/foo",
+        Role = "Foo",
+        ThreadId = "thread-foo",
+        Cwd = root,
+        Status = "active"
+    });
+    bus.RegisterAgent(new AgentDefinition
+    {
+        Id = "ctu/bar",
+        Role = "Bar",
+        ThreadId = "thread-bar",
+        Cwd = root,
+        ReturnTo = "ctu/foo",
+        Status = "active"
+    });
+
+    var task = bus.CreateTask("ctu/foo", "ctu/bar", "Ping", "Please answer.", "demo", root, [], "ctu/foo");
+    bus.ClaimTask(task.Id, "ctu/bar");
+    var busResult = bus.WriteResult(task.Id, "Pong", "completed", "ctu/bar", "ctu/foo", null, [], []);
+
+    var appServer = new FakeAppServerClient(
+        """{"data":[{"id":"thread-foo","name":"ctu/foo","cwd":"ROOT","status":{"type":"notLoaded"}}]}"""
+            .Replace("ROOT", JsonEscaped(root), StringComparison.Ordinal),
+        readThreadJson: """{"thread":{"id":"thread-foo","status":{"type":"active"},"turns":[]}}""");
+    var registry = McpToolRegistry.CreateDefault(busRoot, appServer);
+    var args = JsonSerializer.Deserialize<JsonElement>($$"""
+    {
+      "busRoot": {{JsonSerializer.Serialize(busRoot)}},
+      "resultId": {{JsonSerializer.Serialize(busResult.Id)}}
+    }
+    """);
+
+    var response = registry.InvokeAsync("bridge_notify_result", args).GetAwaiter().GetResult();
+    Equal(0, appServer.SentTurns.Count);
+    var deferredEvent = bus.ListEvents().Single(evt => evt.Type == "result.notify_deferred" && evt.ResultId == busResult.Id);
+    True(deferredEvent.Message?.Contains("targetStatus=active", StringComparison.Ordinal) == true);
+    using var doc = JsonDocument.Parse(JsonSerializer.Serialize(response, JsonFile.Options));
+    True(doc.RootElement.GetProperty("target").GetProperty("initialStatus").GetString() == "active");
+}
+
 static void AgentThreadMatcherBindsNamedTeamThreads()
 {
     var cwd = Path.Combine(NewTestDirectory(), "project");
@@ -861,7 +910,10 @@ static void Equal<T>(T expected, T actual)
     }
 }
 
-sealed class FakeAppServerClient(string threadListJson, Action<string, string, string?>? onSendTurn = null) : IAppServerClient
+sealed class FakeAppServerClient(
+    string threadListJson,
+    Action<string, string, string?>? onSendTurn = null,
+    string? readThreadJson = null) : IAppServerClient
 {
     public List<(string ThreadId, string Message, string? Cwd, AppServerAgentSettings? Settings)> SentTurns { get; } = [];
     public List<(string ThreadId, string Name)> NamedThreads { get; } = [];
@@ -892,7 +944,7 @@ sealed class FakeAppServerClient(string threadListJson, Action<string, string, s
 
     public Task<AppServerCallResult> ReadThreadAsync(string threadId, bool includeTurns, CancellationToken cancellationToken = default)
     {
-        return Task.FromResult(new AppServerCallResult(true, "{}", null));
+        return Task.FromResult(new AppServerCallResult(true, readThreadJson ?? "{}", null));
     }
 
     public Task<AppServerCallResult> StartThreadAsync(
