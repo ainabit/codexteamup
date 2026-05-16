@@ -17,9 +17,10 @@ Before opening a PR:
 
 1. Keep the change small and explain the user-facing workflow it improves.
 2. Avoid unrelated refactors.
-3. Keep public docs in English.
-4. Do not commit local runtime state, `.codexteamup`, `.ctu`, logs, generated binaries, local paths, or private project references.
-5. Run:
+3. Prefix PR titles for fixes with `fix:` and new features with `feat:`.
+4. Keep public docs in English.
+5. Do not commit local runtime state, `.codexteamup`, `.ctu`, logs, generated binaries, local paths, or private project references.
+6. Run:
 
 ```powershell
 dotnet build
