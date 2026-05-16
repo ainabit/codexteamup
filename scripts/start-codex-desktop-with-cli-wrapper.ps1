@@ -118,7 +118,12 @@ function Resolve-RealCodexExe {
     )
 
     if (-not [string]::IsNullOrWhiteSpace($Path)) {
-        return Resolve-File -Path $Path -Name "Real Codex CLI"
+        $resolved = Resolve-File -Path $Path -Name "Real Codex CLI"
+        if (Test-CodexCliCandidate -Path $resolved) {
+            return $resolved
+        }
+
+        throw "Real Codex CLI is not runnable: $resolved. Pass the per-user CLI path, usually `"$env:LOCALAPPDATA\OpenAI\Codex\bin\codex.exe`", not the protected WindowsApps app resource."
     }
 
     $candidates = [System.Collections.Generic.List[string]]::new()
