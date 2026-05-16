@@ -1,7 +1,7 @@
 param(
     [string]$Workspace = "",
     [string]$Configuration = "Release",
-    [string]$RealCodexExe = "$env:LOCALAPPDATA\OpenAI\Codex\bin\codex.exe",
+    [string]$RealCodexExe = "",
     [string]$DesktopExe = "",
     [string]$WrapperExe = "",
     [string]$PipeName = "codexteamup-appserver",
@@ -96,6 +96,42 @@ function Resolve-CodexDesktopExe {
     throw "Codex Desktop not found. Pass -DesktopExe or set CODEX_DESKTOP_EXE/CTU_CODEX_DESKTOP_EXE to the current Codex.exe path.$searched"
 }
 
+function Resolve-RealCodexExe {
+    param(
+        [string]$Path,
+        [string]$DesktopPath
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($Path)) {
+        return Resolve-File -Path $Path -Name "Real Codex CLI"
+    }
+
+    $candidates = [System.Collections.Generic.List[string]]::new()
+
+    if (-not [string]::IsNullOrWhiteSpace($DesktopPath)) {
+        $desktopDirectory = Split-Path -Parent $DesktopPath
+        Add-CandidatePath -Candidates $candidates -Path (Join-Path $desktopDirectory "resources\codex.exe")
+    }
+
+    Add-CandidatePath -Candidates $candidates -Path ([Environment]::GetEnvironmentVariable("CODEX_REAL_CLI_EXE", "Process"))
+    Add-CandidatePath -Candidates $candidates -Path ([Environment]::GetEnvironmentVariable("CTU_REAL_CODEX_EXE", "Process"))
+    Add-CandidatePath -Candidates $candidates -Path (Join-Path $env:LOCALAPPDATA "OpenAI\Codex\bin\codex.exe")
+    Add-CandidatePath -Candidates $candidates -Path (Join-Path $env:LOCALAPPDATA "Microsoft\WindowsApps\codex.exe")
+
+    foreach ($candidate in $candidates) {
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            return (Resolve-Path -LiteralPath $candidate).Path
+        }
+    }
+
+    $searched = if ($candidates.Count -gt 0) {
+        "`nSearched:`n  " + (($candidates | ForEach-Object { $_ }) -join "`n  ")
+    } else {
+        ""
+    }
+    throw "Real Codex CLI not found. Pass -RealCodexExe or set CODEX_REAL_CLI_EXE/CTU_REAL_CODEX_EXE.$searched"
+}
+
 function Set-TemporaryProcessEnvironment {
     param(
         [hashtable]$Values,
@@ -138,8 +174,8 @@ $workspacePath = if ([string]::IsNullOrWhiteSpace($Workspace)) {
 New-Item -ItemType Directory -Force -Path $logRoot | Out-Null
 
 Write-Section "Inputs"
-$realCodexPath = Resolve-File -Path $RealCodexExe -Name "Real Codex CLI"
 $desktopPath = Resolve-CodexDesktopExe -Path $DesktopExe
+$realCodexPath = Resolve-RealCodexExe -Path $RealCodexExe -DesktopPath $desktopPath
 Write-Host "workspace=$(if ([string]::IsNullOrWhiteSpace($workspacePath)) { '<desktop-default>' } else { $workspacePath })"
 Write-Host "wrapperProject=$wrapperProject"
 Write-Host "wrapperExe=$wrapperExe"

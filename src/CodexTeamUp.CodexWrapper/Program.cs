@@ -582,10 +582,10 @@ static class WrapperJson
 sealed class WrapperLogger
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
-    private readonly string logFile;
+    private readonly string? logFile;
     private readonly object gate = new();
 
-    private WrapperLogger(string logFile)
+    private WrapperLogger(string? logFile)
     {
         this.logFile = logFile;
     }
@@ -597,12 +597,24 @@ sealed class WrapperLogger
             ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex", "codexteamup-wrapper")
             : Environment.ExpandEnvironmentVariables(configuredDir.Trim());
 
-        Directory.CreateDirectory(logDir);
-        return new WrapperLogger(Path.Combine(logDir, $"codex-wrapper-{invocationId}.jsonl"));
+        try
+        {
+            Directory.CreateDirectory(logDir);
+            return new WrapperLogger(Path.Combine(logDir, $"codex-wrapper-{invocationId}.jsonl"));
+        }
+        catch
+        {
+            return new WrapperLogger(null);
+        }
     }
 
     public void Write(string type, object payload)
     {
+        if (string.IsNullOrWhiteSpace(logFile))
+        {
+            return;
+        }
+
         var entry = new
         {
             timestamp = DateTimeOffset.UtcNow,
@@ -613,7 +625,14 @@ sealed class WrapperLogger
         var line = JsonSerializer.Serialize(entry, JsonOptions);
         lock (gate)
         {
-            File.AppendAllText(logFile, line + Environment.NewLine, Encoding.UTF8);
+            try
+            {
+                File.AppendAllText(logFile, line + Environment.NewLine, Encoding.UTF8);
+            }
+            catch
+            {
+                // Logging is diagnostic only; never let it break the wrapped Codex app-server.
+            }
         }
     }
 }
