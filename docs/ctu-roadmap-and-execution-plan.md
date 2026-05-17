@@ -17,7 +17,7 @@
    - Add lightweight operator actions from dashboard where safe.
 
 2. Acceptance workspace and clone/fetch/start/mcp/live smoke hardening
-   - Create `codexteamup.acceptance` workspace profile/directory.
+   - Create `codexteamup.acceptance` as a real separate clone/check-out used only for outside-user acceptance.
    - Add deterministic acceptance scripts and evidence outputs for:
      - fresh clone/fetch flow,
      - wrapper and service startup path via `scripts/start-codexteamup.ps1`,
@@ -52,6 +52,14 @@
 - Defer multi-project bus exploration until reliability and acceptance confidence are established.
 - Gate GitHub/release hygiene changes to a stable release train (before merge freeze / after runtime changes stabilized).
 
+## Initial decomposition (suggested)
+- P0: Dashboard communication-first view + stuck-work surfacing (architect + web).
+- P1: Acceptance workspace + deterministic clone/fetch/start/MCP coverage (architect + tester + backend).
+- P2: Controller/runtime observability + stale thread policy clarity surfaced in UI (backend + reviewer).
+- P3: Visual thread-name verification and screenshot capture hooks in reporting (web + tester).
+- P4: Release/governance hardening with security review and checklist updates (architect + security).
+- P5: Multi-project bus exploration with security boundary prototype and read-path MVP (architect + backend).
+
 ## Suggested staffing by role (`ctu/*`)
 - `ctu/architect`: scope decisions, sequencing, acceptance criteria ownership.
 - `ctu/web`: dashboard UX, stuck-work visualization, drill-down surfaces, screenshot evidence outputs.
@@ -68,6 +76,5 @@
 - Release hygiene can stall without clear role ownership and explicit signoff criteria.
 
 ## Open questions
-- Should acceptance workspace live in-repo (`codexteamup.acceptance`) or as a versioned sibling directory by default?
 - What is the minimum “stuck-work SLA” threshold (minutes/timeout) for operator escalation in dashboard?
 - Should multi-project bus initially be “read-only bridge” only, or allow write with per-route allow-lists?

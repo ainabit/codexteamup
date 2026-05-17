@@ -9,6 +9,8 @@ param(
     [string]$ArtifactsPath = "",
     [switch]$UseTestWorkspace,
     [string]$TestWorkspace = "",
+    [switch]$UseAcceptanceWorkspace,
+    [string]$AcceptanceWorkspace = "",
     [int]$TimeoutSeconds = 900,
     [int]$ToolTimeoutSeconds = 10,
     [switch]$Restore,
@@ -19,6 +21,10 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+if ($UseTestWorkspace -and $UseAcceptanceWorkspace) {
+    throw "Use either -UseTestWorkspace or -UseAcceptanceWorkspace, not both."
+}
 
 if ($PSVersionTable.PSEdition -ne "Core") {
     $pwsh = (Get-Command pwsh -ErrorAction SilentlyContinue).Source
@@ -33,6 +39,8 @@ if ($PSVersionTable.PSEdition -ne "Core") {
         if (-not [string]::IsNullOrWhiteSpace($ArtifactsPath)) { $forward += @("-ArtifactsPath", $ArtifactsPath) }
         if ($UseTestWorkspace) { $forward += "-UseTestWorkspace" }
         if (-not [string]::IsNullOrWhiteSpace($TestWorkspace)) { $forward += @("-TestWorkspace", $TestWorkspace) }
+        if ($UseAcceptanceWorkspace) { $forward += "-UseAcceptanceWorkspace" }
+        if (-not [string]::IsNullOrWhiteSpace($AcceptanceWorkspace)) { $forward += @("-AcceptanceWorkspace", $AcceptanceWorkspace) }
         $forward += @("-TimeoutSeconds", $TimeoutSeconds)
         $forward += @("-ToolTimeoutSeconds", $ToolTimeoutSeconds)
         if ($Restore) { $forward += "-Restore" }
@@ -50,8 +58,16 @@ if ([string]::IsNullOrWhiteSpace($TestWorkspace)) {
     $TestWorkspace = Join-Path (Split-Path -Parent $repoRoot) ((Split-Path -Leaf $repoRoot) + ".test")
 }
 
+if ([string]::IsNullOrWhiteSpace($AcceptanceWorkspace)) {
+    $AcceptanceWorkspace = Join-Path (Split-Path -Parent $repoRoot) ((Split-Path -Leaf $repoRoot) + ".acceptance")
+}
+
 if ($UseTestWorkspace -and [string]::IsNullOrWhiteSpace($Workspace)) {
     $Workspace = $TestWorkspace
+}
+
+if ($UseAcceptanceWorkspace -and [string]::IsNullOrWhiteSpace($Workspace)) {
+    $Workspace = $AcceptanceWorkspace
 }
 
 if ([string]::IsNullOrWhiteSpace($Workspace)) {
@@ -60,6 +76,7 @@ if ([string]::IsNullOrWhiteSpace($Workspace)) {
 
 $Workspace = [System.IO.Path]::GetFullPath($Workspace).Replace('\', '/')
 $TestWorkspace = [System.IO.Path]::GetFullPath($TestWorkspace).Replace('\', '/')
+$AcceptanceWorkspace = [System.IO.Path]::GetFullPath($AcceptanceWorkspace).Replace('\', '/')
 if ([string]::IsNullOrWhiteSpace($ArtifactsPath)) {
     $ArtifactsPath = Join-Path ([System.IO.Path]::GetTempPath()) ("ctu-safety-artifacts-" + [guid]::NewGuid().ToString("N"))
 }
@@ -115,6 +132,7 @@ function Initialize-TestWorkspace {
     $nativePath = $Path.Replace('/', [System.IO.Path]::DirectorySeparatorChar)
     New-Item -ItemType Directory -Force -Path $nativePath | Out-Null
     New-Item -ItemType Directory -Force -Path (Join-Path $nativePath ".codexteamup") | Out-Null
+    New-Item -ItemType Directory -Force -Path (Join-Path $nativePath ".codexteamup\agentbus") | Out-Null
     New-Item -ItemType Directory -Force -Path (Join-Path $nativePath "docs") | Out-Null
 
     $agentsPath = Join-Path $nativePath "AGENTS.md"
@@ -144,8 +162,49 @@ The source scripts stay in the main `codexteamup` repository. This workspace kee
     }
 }
 
+function Initialize-AcceptanceWorkspace {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $nativePath = $Path.Replace('/', [System.IO.Path]::DirectorySeparatorChar)
+    New-Item -ItemType Directory -Force -Path $nativePath | Out-Null
+    New-Item -ItemType Directory -Force -Path (Join-Path $nativePath ".codexteamup") | Out-Null
+    New-Item -ItemType Directory -Force -Path (Join-Path $nativePath ".codexteamup\agentbus") | Out-Null
+    New-Item -ItemType Directory -Force -Path (Join-Path $nativePath "docs") | Out-Null
+
+    $agentsPath = Join-Path $nativePath "AGENTS.md"
+    if (-not (Test-Path -LiteralPath $agentsPath)) {
+        @'
+# CodexTeamUp Acceptance Workspace
+
+This workspace is for fresh-clone and clean-checkout acceptance runs.
+
+Use it to verify that CTU startup, MCP registration, dashboard loading, and the minimal live smoke path work without relying on the main development workspace state.
+
+Keep Git app directive `cwd` values in forward-slash form, for example `S:/_work/_development/codexteamup.acceptance`.
+'@ | Set-Content -LiteralPath $agentsPath -Encoding UTF8
+    }
+
+    $readmePath = Join-Path $nativePath "README.md"
+    if (-not (Test-Path -LiteralPath $readmePath)) {
+        @'
+# codexteamup.acceptance
+
+Generated workspace for fresh-clone and clean-checkout acceptance runs.
+
+The source scripts stay in the main `codexteamup` repository. This workspace keeps acceptance AgentBus state isolated from day-to-day coordination and from `codexteamup.test`.
+'@ | Set-Content -LiteralPath $readmePath -Encoding UTF8
+    }
+}
+
 if (($Live -or $LiveAll) -and ($UseTestWorkspace -or $Workspace.EndsWith(".test", [StringComparison]::OrdinalIgnoreCase))) {
     Initialize-TestWorkspace -Path $Workspace
+}
+
+if ($UseAcceptanceWorkspace -or $Workspace.EndsWith(".acceptance", [StringComparison]::OrdinalIgnoreCase)) {
+    Initialize-AcceptanceWorkspace -Path $Workspace
 }
 
 Write-Host "CodexTeamUp safety net"

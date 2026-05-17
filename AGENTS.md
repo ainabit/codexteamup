@@ -189,6 +189,14 @@ powershell -ExecutionPolicy Bypass -File .\scripts\test-codexteamup.ps1 -UseTest
 
 Use `-UseTestWorkspace -LiveAll` before merging broad orchestration or wrapper changes. The default test workspace is the sibling directory `codexteamup.test`. Live smoke agents use the `ctu-test/<run-id>/...` prefix and should be cleaned up by the runner unless manual inspection is needed.
 
+For a clean-checkout onboarding proof after CTU Desktop startup, use:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\test-fresh-clone-acceptance.ps1
+```
+
+Run that inside a real fresh acceptance clone, for example `S:/_work/_development/codexteamup.acceptance`. It verifies service, MCP, dashboard snapshot, the deterministic suite, and the minimal live `basic` scenario.
+
 Controller-style live smoke tests may assume the test workspace has one manually created initial controller chat named `ctu-test/architect`. That controller is the in-Desktop starting point for run-scoped worker creation and coordination inside `codexteamup.test`; the runner should bind that existing chat and enqueue one controller task instead of inventing a new controlling role.
 
 After changing CTU service, wrapper, or MCP tool registration code, restart Codex Desktop through `scripts/start-codexteamup.ps1` before live smoke tests. Otherwise the running service may not expose the new tool surface.
