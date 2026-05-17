@@ -14,7 +14,8 @@ param(
     [switch]$KillExistingCodex,
     [switch]$RestartService,
     [switch]$NoService,
-    [switch]$NoConfigureMcp
+    [switch]$NoConfigureMcp,
+    [switch]$RestartSupervisorMode
 )
 
 $ErrorActionPreference = "Stop"
@@ -74,6 +75,14 @@ function Get-ProcessMetadata {
     }
 
     return $map
+}
+
+function Write-SupervisedPhase {
+    param([string]$Phase)
+
+    if ($RestartSupervisorMode) {
+        Write-Host "startup:$Phase"
+    }
 }
 
 function Get-ProcessPathSafe {
@@ -234,6 +243,10 @@ function Stop-CodexTeamUpProcessesForFreshStart {
         $remaining | Select-Object Id, Name, ParentProcessId, ParentName, Reason, Path | Format-Table -AutoSize
         throw "Could not stop all existing CTU/Desktop processes. Fresh start was not guaranteed."
     }
+}
+
+if ($RestartSupervisorMode -and -not $ForceStopExisting) {
+    $ForceStopExisting = $true
 }
 
 if ([string]::IsNullOrWhiteSpace($PipeName)) {
@@ -529,19 +542,26 @@ function Ensure-ControllerRuntime {
 }
 
 if (-not $NoLaunch -or -not $NoService -or $RestartService) {
+    Write-SupervisedPhase "cleanup.begin"
     Stop-CodexTeamUpProcessesForFreshStart
+    Write-SupervisedPhase "cleanup.done"
 }
 
 if ($RestartService -or ((-not $NoService) -and (-not $NoPublish))) {
+    Write-SupervisedPhase "service-listener.stop"
     Stop-ServiceListener -Url $ServiceUrl
 }
 
 if (-not $NoPublish) {
+    Write-SupervisedPhase "publish.begin"
     & $publish
+    Write-SupervisedPhase "publish.done"
 }
 
 if (-not $NoConfigureMcp) {
+    Write-SupervisedPhase "mcp-registration.begin"
     Set-CodexTeamUpMcpRegistration -Url $ServiceUrl
+    Write-SupervisedPhase "mcp-registration.done"
 }
 
 if (-not (Test-Path -LiteralPath $wrapperExe -PathType Leaf)) {
@@ -552,6 +572,7 @@ if (-not (Test-Path -LiteralPath $serviceExe -PathType Leaf)) {
     $serviceExe = Join-Path $repoRoot "src\CodexTeamUp.Service\bin\Release\net10.0\CodexTeamUp.Service.exe"
 }
 
+Write-SupervisedPhase "controller-runtime.ensure"
 Ensure-ControllerRuntime
 
 if (-not (Test-Path -LiteralPath $wrapperExe -PathType Leaf)) {
@@ -611,10 +632,16 @@ if (-not $NoService) {
     if ($desktopProcess -and $desktopProcess.Id) {
         $serviceParentPid = $desktopProcess.Id
     }
+    Write-SupervisedPhase "service.start.begin"
     Start-CodexTeamUpService -ParentProcessId $serviceParentPid -PipeName $PipeName
+    Write-SupervisedPhase "service.start.done"
 }
 
 Write-Host ""
+if ($RestartSupervisorMode) {
+    Write-Host "startup:ready"
+    return
+}
 Write-Host "CodexTeamUp agent backend:"
 Write-Host "  Service URL: $ServiceUrl"
 Write-Host "  Dashboard:   $($ServiceUrl.TrimEnd('/'))/"
