@@ -223,6 +223,14 @@ dotnet build
 dotnet run --project tests\CodexTeamUp.Tests
 ```
 
+For the smallest fresh-checkout proof path after startup, run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\test-fresh-clone-acceptance.ps1
+```
+
+Run that inside a real fresh clone, for example the separate acceptance checkout `S:/_work/_development/codexteamup.acceptance`. See [docs/fresh-clone-acceptance.md](docs/fresh-clone-acceptance.md).
+
 Useful post-start checks:
 
 ```powershell

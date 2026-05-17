@@ -43,6 +43,14 @@ dotnet run --project src\CodexTeamUp.Cli -- threads list --source wrapper --limi
 
 The local dashboard is available at `http://127.0.0.1:47319/`.
 
+For a single-command acceptance path after Desktop is running through CTU, use:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\test-fresh-clone-acceptance.ps1
+```
+
+Run that inside a real fresh acceptance clone, for example `S:/_work/_development/codexteamup.acceptance`. It runs health, MCP, dashboard, deterministic, and minimal live smoke checks. See [fresh-clone-acceptance.md](fresh-clone-acceptance.md).
+
 ## PoC Boundaries
 
 - No binary release or installer path
