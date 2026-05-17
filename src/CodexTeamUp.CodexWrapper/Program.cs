@@ -159,7 +159,7 @@ static async Task RunBridgePipeServerAsync(
 {
     while (!cancellationToken.IsCancellationRequested)
     {
-        await using var pipe = new NamedPipeServerStream(
+        var pipe = new NamedPipeServerStream(
             pipeName,
             PipeDirection.InOut,
             NamedPipeServerStream.MaxAllowedServerInstances,
@@ -169,14 +169,30 @@ static async Task RunBridgePipeServerAsync(
         try
         {
             await pipe.WaitForConnectionAsync(cancellationToken).ConfigureAwait(false);
-            await HandleBridgePipeClientAsync(pipe, childStdin, childWriteLock, pending, logger, cancellationToken).ConfigureAwait(false);
+            _ = Task.Run(async () =>
+            {
+                await using var connectedPipe = pipe;
+                try
+                {
+                    await HandleBridgePipeClientAsync(pipe, childStdin, childWriteLock, pending, logger, cancellationToken).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                }
+                catch (Exception ex)
+                {
+                    logger.Write("pipe-client-error", new { type = ex.GetType().FullName, ex.Message });
+                }
+            }, CancellationToken.None);
         }
         catch (OperationCanceledException)
         {
+            await pipe.DisposeAsync().ConfigureAwait(false);
             break;
         }
         catch (Exception ex)
         {
+            await pipe.DisposeAsync().ConfigureAwait(false);
             logger.Write("pipe-error", new { type = ex.GetType().FullName, ex.Message });
         }
     }

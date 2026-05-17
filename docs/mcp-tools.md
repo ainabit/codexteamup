@@ -49,7 +49,14 @@ The server supports:
 - `agentbus_wait_result`
 - `codex_thread_list`
 - `codex_thread_read`
+- `codex_thread_archive`
 - `codex_turn_start`
+- `codex_appserver_adapter_status`
+- `codex_appserver_adapter_reload`
+- `codex_controller_status`
+- `codex_controller_reload`
+- `codex_controller_policy_status`
+- `codex_controller_policy_reload`
 - `bridge_dispatch_task`
 - `bridge_notify_result`
 - `team_create_agent`
@@ -64,9 +71,13 @@ The server supports:
 - Worker thread: claim a task, do the work, write a result, and notify the return thread
 - Reviewer thread: inspect results and create follow-up tasks
 
-Use `team_send_message` without `waitResult` for asynchronous delegation. The caller creates a task, wakes the target thread, and continues. The worker later writes a result and calls `bridge_notify_result`.
+Use `team_send_message` for asynchronous delegation. By default it only creates the durable AgentBus task and returns an accepted/enqueued response. Wake the target thread separately with `bridge_dispatch_task`. The worker later writes a result and calls `bridge_notify_result`.
 
-Use `team_send_message` with `waitResult=true` for low-latency request and response. The tool waits until the AgentBus result file appears and returns that result in the same tool call. `agentbus_wait_result` is the lower-level variant when a task already exists.
+Use `team_send_message` with `waitResult=true` only for quick acknowledgements or very short answers. It is capped to short waits so visible threads stay reactive, and it is only meaningful with `dispatchMode=inline` or after a separate dispatch path. For longer work, enqueue the task, call `bridge_dispatch_task`, and poll with `agentbus_wait_result` in short chunks. `agentbus_wait_result` is the lower-level variant when a task already exists.
+
+`team_send_message` supports `dispatchMode=inline` for compatibility and diagnostics. Inline dispatch also caps the Desktop wakeup attempt itself. The optional `wakeupTimeoutSeconds` argument is clamped to 1-10 seconds. If Desktop does not answer in time, the tool returns a deferred/uncertain wakeup status while keeping the AgentBus task as the durable handoff.
+
+All CTU coordination should follow ACK/NACK semantics: a direct call should quickly report whether work was accepted, deferred, or failed to enqueue. Completion is a separate AgentBus result. Avoid one long blocking tool call when a loop of short polls gives the same evidence and keeps the thread responsive.
 
 Any registered `ctu/*` agent can use these paths. Communication is not architect-only. For example, `ctu/dashboard` can ask `ctu/ux` directly and set `returnTo` to `ctu/dashboard`. If `returnTo` is omitted, `team_send_message` uses the sender as the return target.
 
@@ -113,3 +124,11 @@ MCP is the normal path for Codex agents. Scripts remain for bootstrap and recove
 Daily architect and worker coordination should use MCP tools. Agent threads should not call `ctu.ps1` or PowerShell for normal task and result communication.
 
 The named pipe is not an MCP or agent interface. It is only an internal transport from `CodexTeamUp.Service` to the Desktop wrapper.
+
+## App-Server Adapter Reload
+
+Desktop-specific lifecycle behavior is behind a reloadable app-server adapter. Use `codex_appserver_adapter_status` to inspect the active adapter and `codex_appserver_adapter_reload` to load a replacement plugin DLL without restarting Codex Desktop. Passing an empty plugin path switches back to the built-in wrapper-pipe adapter. See `docs/appserver-adapter-plugins.md`.
+
+## Controller Policy Reload
+
+Volatile orchestration lives behind a reloadable controller runtime. Use `codex_controller_status` to inspect the active controller and `codex_controller_reload` to reload the controller or its policy. The policy-only aliases `codex_controller_policy_status` and `codex_controller_policy_reload` remain available for settings such as queue-first dispatch, wakeup timeout caps, inline wait caps, thread naming before prime, and prime prompt title fallback. See `docs/controller-policy-runtime.md`.

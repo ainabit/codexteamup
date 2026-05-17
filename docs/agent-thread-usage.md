@@ -44,14 +44,14 @@ You can hand `docs/sample-architect-prompt.md` to `ctu/architect` as a starting 
 ## Architect Workflow Through MCP
 
 1. Use `team_discover_agents` for `ctu/architect,ctu/web,ctu/backend,ctu/designer`.
-2. Use `team_send_message` for direct questions or lightweight delegation.
-3. Use `agentbus_create_task` plus `bridge_dispatch_task` for larger work packages.
+2. Use `team_send_message` to enqueue lightweight delegation as a durable task.
+3. Use `bridge_dispatch_task` to wake the target thread as a separate best-effort step.
 4. Use `team_dashboard_export` for monitoring.
 5. After a result arrives, review it or create a follow-up task.
 
-If a target agent is not registered yet, `team_send_message` tries to find the visible Codex thread from the agent name automatically.
+If a target agent is not registered yet, `bridge_dispatch_task` tries to find the visible Codex thread from the agent name automatically when it wakes the queued task.
 
-For low-latency questions, `team_send_message` can be called with `waitResult=true` and a suitable `timeoutSeconds`. That waits for the result file in AgentBus and returns it directly. Without `waitResult`, the call remains asynchronous and the sender is woken later through `bridge_notify_result`.
+For low-latency diagnostics, `team_send_message` can be called with `dispatchMode=inline` and `waitResult=true`, but it is only for quick acknowledgement or very short answers. Normal coordination should be queue-first: enqueue the task, dispatch it, keep the visible thread responsive, and poll `agentbus_wait_result` in short chunks or wait for `bridge_notify_result`.
 
 Any registered `ctu/*` agent can use this pattern, not only `ctu/architect`. A worker can ask another worker directly, for example `ctu/dashboard` to `ctu/ux`, and set `returnTo` to itself.
 

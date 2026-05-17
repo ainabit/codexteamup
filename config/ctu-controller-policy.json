@@ -1,0 +1,7 @@
+{
+  "teamSendMessageDefaultDispatchMode": "enqueue",
+  "wakeupTimeoutSeconds": 8,
+  "waitResultTimeoutCapSeconds": 10,
+  "ensureThreadNameBeforePrime": true,
+  "primePromptStartsWithAgentId": true
+}

@@ -12,6 +12,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\start-codexteamup.ps1
 
 That is the normal and preferred start path. It starts the backend service, registers the HTTP MCP URL, and launches Codex Desktop through the wrapper.
 
+The script treats a normal start as a fresh restart. It detects existing Codex Desktop, CTU service, CTU wrapper, and repo-local CTU test/helper processes, shows them in the console, and asks before stopping them. If a process cannot be stopped, the script aborts instead of continuing with a half-old session. For unattended recovery starts, pass `-ForceStopExisting` to stop those existing processes without the prompt.
+
 The startup script discovers the installed Codex Desktop package at runtime instead of pinning a specific WindowsApps version. It also discovers a runnable Codex CLI separately from the Desktop executable. CLI candidates are checked with `--version` before use, and protected WindowsApps resource paths are skipped if they cannot be executed directly.
 
 If auto-discovery fails, pass explicit paths to the normal startup script:
@@ -55,6 +57,17 @@ If the wrapper build output is locked, close Codex Desktop and rebuild. The long
 If a task is stuck in `claimed`, inspect `.codexteamup/agentbus/events.jsonl`, the task file, and the target thread. Move it manually only after ownership is clear.
 
 ## Logging
+
+Service runtime logs default to:
+
+```text
+<repo>\.codexteamup\logs
+```
+
+Key files:
+
+- `api-adapter-YYYYMMDD.jsonl`
+- `controller-YYYYMMDD.jsonl`
 
 Wrapper logs default to:
 

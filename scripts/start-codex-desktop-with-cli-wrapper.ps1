@@ -299,6 +299,11 @@ if ($StampTurnStartedAt) {
     $desktopEnv.CODEX_WRAPPER_STAMP_TURN_STARTED_AT = "1"
 }
 
+$wrapperRequestTimeout = [Environment]::GetEnvironmentVariable("CODEX_WRAPPER_REQUEST_TIMEOUT_MS", "Process")
+if (-not [string]::IsNullOrWhiteSpace($wrapperRequestTimeout)) {
+    $desktopEnv.CODEX_WRAPPER_REQUEST_TIMEOUT_MS = $wrapperRequestTimeout
+}
+
 $desktop = Set-TemporaryProcessEnvironment -Values $desktopEnv -Body {
     $startInfo = @{
         FilePath = $desktopPath

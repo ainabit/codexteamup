@@ -94,6 +94,52 @@ Project structure should follow the application and the project goals, not the C
 - PowerShell: bootstrap, publish, and recovery only
 - UI: local HTTP dashboard for communication, content, runtimes, and status
 
+## Desktop Adapter Boundary
+
+Treat the Codex Desktop app-server as an unstable edge dependency. Keep AgentBus, MCP tool contracts, team orchestration, and agent bindings as the stable core. Put Desktop-specific lifecycle behavior behind the app-server adapter boundary.
+
+The service uses a reloadable `IAppServerClient` facade. The default adapter is the built-in wrapper-pipe implementation, but adapter plugins can be loaded at runtime with `codex_appserver_adapter_reload` or `POST /api/appserver-adapter/reload`. Use `codex_appserver_adapter_status` or `GET /api/appserver-adapter` to inspect which adapter is active.
+
+Adapter plugins are for fast fixes to Desktop-specific behavior such as thread readiness polling, missing-rollout retries, app-server timeout policy, and unsafe Desktop calls. If a plugin reload fails, the currently active adapter must remain active. See `docs/appserver-adapter-plugins.md`.
+
+## Runtime Layers And Logging
+
+Keep CTU split into two runtime layers:
+
+- Fixed API adapter layer: MCP/HTTP service boundaries and the `IAppServerClient` app-server adapter. This layer owns transport, JSON-RPC, redaction, timeout plumbing, and defensive try/catch logging. It should change only for new hard API surface or transport contracts.
+- Hot-reloadable controller logic layer: flow policy for agent/thread orchestration, including enqueue vs inline dispatch, wakeup timeout caps, wait caps, naming before prime, retry timing, and prompt fallback behavior. This layer must be reloadable at runtime where practical, for example through `codex_controller_reload`, `POST /api/controller/reload`, `codex_controller_policy_reload`, or `POST /api/controller-policy/reload`.
+
+Do not put volatile Desktop timing and orchestration policy into the fixed API adapter layer. Prefer controller policy/script/plugin changes that can be reloaded without killing the CTU service.
+
+The service writes project-local JSONL and human `.log` files under `.codexteamup/logs` by default:
+
+- `api-adapter-YYYYMMDD.jsonl` for hard app-server/API adapter calls and failures.
+- `api-adapter-YYYYMMDD.log` for human-readable hard app-server/API adapter diagnostics.
+- `controller-YYYYMMDD.jsonl` for MCP/controller tool calls, policy reloads, and orchestration failures.
+- `controller-YYYYMMDD.log` for human-readable controller diagnostics.
+
+Logging is diagnostic only. Logging failures must never break CTU. Logs must redact obvious secrets and avoid dumping full prompts when a short preview, task id, result id, thread id, or error message is enough.
+
+Visible Codex Desktop threads should be named with their agent id/display name. Always call the thread naming path before the first prime turn when a thread is created or rebound. The first line of the prime prompt should also be the exact agent id as a fallback for Desktop title generation.
+
+`docs/ctu-runtime-architecture.md` is the binding architecture reference. Read it before changing CTU runtime, MCP, app-server adapter, controller, AgentBus, logging, or orchestration code. New runtime changes must preserve its layer split: MCP and app-server adapters stay thin; workflow lives in the hot-reloadable controller runtime; AgentBus remains durable truth.
+
+## Reactivity And ACK/NACK
+
+CodexTeamUp coordination must keep every visible thread reactive. Do not design agent-to-agent calls that block a thread for minutes.
+
+Use a short ACK/NACK pattern:
+
+- direct MCP/HTTP calls should return within about 10 seconds whenever possible;
+- a call should acknowledge that a task/message was accepted, deferred, or failed to enqueue;
+- long work must continue asynchronously through AgentBus task/result files;
+- prefer queue-first communication: create AgentBus tasks first, then dispatch/wake threads as a separate best-effort step;
+- callers that need completion should poll or call `agentbus_wait_result` in short chunks instead of holding one long tool call;
+- `team_send_message` defaults to enqueue-only. Use `bridge_dispatch_task` to wake the target thread, or `dispatchMode=inline` only for narrow compatibility/debug cases;
+- `team_send_message` with `waitResult=true` is only for quick acknowledgements or very short answers and should not be used as a cross-agent RPC primitive. Longer work should use asynchronous enqueue, explicit dispatch, and result polling.
+
+Live tests and adapters should prefer short per-call timeouts and explicit polling. A Desktop app-server timeout is not by itself proof that an agent did not receive work; AgentBus events/results are the durable truth.
+
 ## Operating Model
 
 The normal way to start Codex Desktop with CodexTeamUp enabled is:
@@ -102,7 +148,55 @@ The normal way to start Codex Desktop with CodexTeamUp enabled is:
 powershell -ExecutionPolicy Bypass -File .\scripts\start-codexteamup.ps1
 ```
 
+The startup script is responsible for a fresh CTU Desktop session. It detects existing Codex Desktop, CTU service, CTU wrapper, and repo-local CTU test/helper processes, asks before stopping them, and aborts if it cannot prove they were stopped. Use `-ForceStopExisting` only when an unattended recovery start should stop those existing processes without prompting.
+
 If Codex Desktop is started normally, inter-thread communication is not active. If Desktop is started through the script, CodexTeamUp is active for that Desktop session. Each project still chooses its own workspace through `cwd`.
+
+## Test Safety Net
+
+Before a PR, run the deterministic safety net:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\test-codexteamup.ps1
+```
+
+The script restores and builds into an isolated temp artifact directory so repo-local `bin/obj` locks do not break routine test runs.
+
+For coverage evidence, run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\test-codexteamup.ps1 -Coverage
+```
+
+Coverage uses the repo-local .NET tool manifest and `coverlet.console`. The default line threshold is 80 percent. If the current baseline is below that threshold, add focused tests rather than lowering the architecture target.
+
+For changes to CTU service, wrapper, MCP tools, AgentBus, thread binding, wakeups, runtime settings, or agent orchestration, also run at least the relevant live Codex Desktop smoke test:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\test-codexteamup.ps1 -UseTestWorkspace -Live -LiveScenario basic
+powershell -ExecutionPolicy Bypass -File .\scripts\test-codexteamup.ps1 -UseTestWorkspace -Live -LiveScenario peer
+powershell -ExecutionPolicy Bypass -File .\scripts\test-codexteamup.ps1 -UseTestWorkspace -Live -LiveScenario replacement
+```
+
+Use `-UseTestWorkspace -LiveAll` before merging broad orchestration or wrapper changes. The default test workspace is the sibling directory `codexteamup.test`. Live smoke agents use the `ctu-test/<run-id>/...` prefix and should be cleaned up by the runner unless manual inspection is needed.
+
+After changing CTU service, wrapper, or MCP tool registration code, restart Codex Desktop through `scripts/start-codexteamup.ps1` before live smoke tests. Otherwise the running service may not expose the new tool surface.
+
+When the user asks for the CTU tests or smoke tests, notify `ctu/tester` through CodexTeamUp and ask it to run or coordinate the smallest relevant test set:
+
+- normal fixes: deterministic safety net
+- service, wrapper, MCP, AgentBus, wakeup, runtime, or binding changes: deterministic safety net plus `basic`, `peer`, or `replacement`
+- broad orchestration changes: deterministic safety net plus `-LiveAll`
+
+The tester should report exact commands, pass/fail status, run id for live tests, cleanup status, and any blockers.
+
+## Codex Desktop Git Directives
+
+Codex Desktop currently has a renderer issue when a Git app directive contains a Windows path with backslashes in its `cwd` value. Such responses can trigger the Desktop Oops screen when old thread history is loaded.
+
+Always use forward-slash paths in Git app directives, for example `S:/_work/_development/codexteamup`. Do not quote or reproduce the broken backslash form as a raw app directive in final answers, documentation, or agent instructions.
+
+The CTU wrapper can sanitize newly generated answers, but historical session history remains a separate problem and may still need cleanup or avoidance.
 
 ## Non-Goals
 
