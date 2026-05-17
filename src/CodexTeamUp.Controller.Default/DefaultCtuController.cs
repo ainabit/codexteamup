@@ -854,7 +854,7 @@ public sealed class DefaultCtuController : ICtuController
             throw new FileNotFoundException($"Restart supervisor script not found at {supervisorPath}.");
         }
 
-        var command = $"-NoExit -ExecutionPolicy Bypass -File {QuotePowerShellPath(supervisorPath)} -OperationPath {QuotePowerShellPath(operationPath)}";
+        var command = $"-NoExit -ExecutionPolicy Bypass -File {QuoteProcessArgument(supervisorPath)} -OperationPath {QuoteProcessArgument(operationPath)}";
         var process = new Process
         {
             StartInfo = new ProcessStartInfo
@@ -881,9 +881,9 @@ public sealed class DefaultCtuController : ICtuController
         return Path.Combine(sourceCwd, "scripts", "restart-supervisor.ps1");
     }
 
-    private static string QuotePowerShellPath(string value)
+    private static string QuoteProcessArgument(string value)
     {
-        return $"'{value.Replace("'", "''")}'";
+        return $"\"{value.Replace("\"", "\\\"")}\"";
     }
 
     private static string NewOperationId(string prefix)
