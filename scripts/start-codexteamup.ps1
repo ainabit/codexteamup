@@ -4,6 +4,7 @@ param(
     [string]$DesktopExe = "",
     [string]$RealCodexExe = "",
     [string]$PipeName = "",
+    [int]$PreservePid = 0,
     [switch]$ForceTurnsAscending,
     [switch]$NoForceTurnsAscending,
     [switch]$NoStampTurnStartedAt,
@@ -124,10 +125,11 @@ function Add-ProcessCandidate {
         [System.Collections.Generic.List[object]]$Candidates,
         $Process,
         [string]$Reason,
-        [hashtable]$ProcessMetadata
+        [hashtable]$ProcessMetadata,
+        [int]$PreservePid = 0
     )
 
-    if ($null -eq $Process -or $Process.Id -eq $PID) {
+    if ($null -eq $Process -or $Process.Id -eq $PID -or ($PreservePid -gt 0 -and $Process.Id -eq $PreservePid)) {
         return
     }
 
@@ -157,19 +159,19 @@ function Get-CodexTeamUpProcessCandidates {
 
     if (-not $NoLaunch -and -not $AllowExistingDesktop) {
         foreach ($process in @(Get-Process -Name "Codex", "codex" -ErrorAction SilentlyContinue)) {
-            Add-ProcessCandidate -Candidates $candidates -Process $process -Reason "Codex Desktop must be relaunched with the current wrapper environment." -ProcessMetadata $processMetadata
+            Add-ProcessCandidate -Candidates $candidates -Process $process -Reason "Codex Desktop must be relaunched with the current wrapper environment." -ProcessMetadata $processMetadata -PreservePid $PreservePid
         }
     }
 
     if (-not $NoService -or $RestartService) {
         foreach ($process in @(Get-Process -Name "CodexTeamUp.Service" -ErrorAction SilentlyContinue)) {
-            Add-ProcessCandidate -Candidates $candidates -Process $process -Reason "Existing CodexTeamUp service must be replaced." -ProcessMetadata $processMetadata
+            Add-ProcessCandidate -Candidates $candidates -Process $process -Reason "Existing CodexTeamUp service must be replaced." -ProcessMetadata $processMetadata -PreservePid $PreservePid
         }
     }
 
     if (-not $NoLaunch) {
         foreach ($process in @(Get-Process -Name "CodexTeamUp.CodexWrapper" -ErrorAction SilentlyContinue)) {
-            Add-ProcessCandidate -Candidates $candidates -Process $process -Reason "Existing CodexTeamUp wrapper must be replaced." -ProcessMetadata $processMetadata
+            Add-ProcessCandidate -Candidates $candidates -Process $process -Reason "Existing CodexTeamUp wrapper must be replaced." -ProcessMetadata $processMetadata -PreservePid $PreservePid
         }
     }
 
@@ -190,11 +192,13 @@ function Get-CodexTeamUpProcessCandidates {
             continue
         }
 
-        if ((Test-ContainsIgnoreCase -Text $normalizedCommand -Value "scripts/test-codexteamup.ps1") -or
+        if ((Test-ContainsIgnoreCase -Text $normalizedCommand -Value "scripts/start-codexteamup.ps1") -or
+            (Test-ContainsIgnoreCase -Text $normalizedCommand -Value "scripts/restart-supervisor.ps1") -or
+            (Test-ContainsIgnoreCase -Text $normalizedCommand -Value "scripts/test-codexteamup.ps1") -or
             (Test-ContainsIgnoreCase -Text $normalizedCommand -Value "scripts/test-live-multi-agent-orchestration.ps1") -or
             ((-not $NoService -or $RestartService) -and (Test-ContainsIgnoreCase -Text $normalizedCommand -Value "CodexTeamUp.Service")) -or
             ((-not $NoLaunch) -and (Test-ContainsIgnoreCase -Text $normalizedCommand -Value "CodexTeamUp.CodexWrapper"))) {
-            Add-ProcessCandidate -Candidates $candidates -Process $process -Reason "CTU-related helper/test process from this repository is still running." -ProcessMetadata $processMetadata
+            Add-ProcessCandidate -Candidates $candidates -Process $process -Reason "CTU-related helper/test process from this repository is still running." -ProcessMetadata $processMetadata -PreservePid $PreservePid
         }
     }
 

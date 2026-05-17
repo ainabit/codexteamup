@@ -546,7 +546,7 @@ internal static class Cli
             operationStore.Write(runningOperation);
 
             var startupScriptPath = Path.Combine(runningOperation.TargetCwd, "scripts", "start-codexteamup.ps1");
-            var startupStartArgs = $"-ExecutionPolicy Bypass -File \"{startupScriptPath}\" -RestartSupervisorMode -ForceStopExisting";
+            var startupStartArgs = $"-ExecutionPolicy Bypass -File \"{startupScriptPath}\" -RestartSupervisorMode -ForceStopExisting -PreservePid {Environment.ProcessId}";
             var startupPid = StartVisibleProcess("pwsh", startupStartArgs, runningOperation.TargetCwd);
             runningOperation = operationStore.UpdateStatus(
                 runningOperation,
@@ -625,7 +625,7 @@ internal static class Cli
                 var fallbackScriptPath = Path.Combine(fallbackCwd, "scripts", "start-codexteamup.ps1");
                 StartVisibleProcess(
                     "pwsh",
-                    $"-ExecutionPolicy Bypass -File \"{fallbackScriptPath}\" -RestartSupervisorMode -ForceStopExisting",
+                    $"-ExecutionPolicy Bypass -File \"{fallbackScriptPath}\" -RestartSupervisorMode -ForceStopExisting -PreservePid {Environment.ProcessId}",
                     fallbackCwd);
 
                 runningOperation = operationStore.UpdateStatus(runningOperation, RestartOperationStatus.RolledBack);

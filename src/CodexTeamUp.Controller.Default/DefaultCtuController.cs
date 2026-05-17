@@ -848,19 +848,19 @@ public sealed class DefaultCtuController : ICtuController
 
     private static Process LaunchRestartHelper(string sourceCwd, string operationPath)
     {
-        var exePath = ResolveRestartHelperExecutable(sourceCwd);
-        if (!File.Exists(exePath))
+        var supervisorPath = ResolveRestartSupervisorScript(sourceCwd);
+        if (!File.Exists(supervisorPath))
         {
-            throw new FileNotFoundException($"CodexTeamUp.Cli executable not found at {exePath}.");
+            throw new FileNotFoundException($"Restart supervisor script not found at {supervisorPath}.");
         }
 
-        var command = $"& {QuotePowerShellPath(exePath)} restart execute --operation-path {QuotePowerShellPath(operationPath)}";
+        var command = $"-NoExit -ExecutionPolicy Bypass -File {QuotePowerShellPath(supervisorPath)} -OperationPath {QuotePowerShellPath(operationPath)}";
         var process = new Process
         {
             StartInfo = new ProcessStartInfo
             {
                 FileName = "pwsh",
-                Arguments = $"-NoExit -ExecutionPolicy Bypass -Command \"{command}\"",
+                Arguments = command,
                 WorkingDirectory = sourceCwd,
                 UseShellExecute = true,
                 WindowStyle = ProcessWindowStyle.Normal,
@@ -876,15 +876,9 @@ public sealed class DefaultCtuController : ICtuController
         return process;
     }
 
-    private static string ResolveRestartHelperExecutable(string sourceCwd)
+    private static string ResolveRestartSupervisorScript(string sourceCwd)
     {
-        var cliPath = Path.Combine(sourceCwd, ".ctu", "tools", "cli", "CodexTeamUp.Cli.exe");
-        if (File.Exists(cliPath))
-        {
-            return cliPath;
-        }
-
-        return Path.Combine(sourceCwd, ".ctu", "tools", "ctu", "CodexTeamUp.Cli.exe");
+        return Path.Combine(sourceCwd, "scripts", "restart-supervisor.ps1");
     }
 
     private static string QuotePowerShellPath(string value)
