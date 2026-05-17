@@ -1813,6 +1813,7 @@ static void AgentBusDashboardRendersCommunication()
     var bus = new AgentBusStore(Path.Combine(root, ".codexteamup/agentbus"));
     bus.Initialize();
     var task = bus.CreateTask("ctu/architect", "ctu/web", "Build editor", "Implement slice", "codexteamup", root, ["web/"], "ctu/architect");
+    bus.ClaimTask(task.Id, "ctu/web");
     var result = bus.WriteResult(task.Id, "Implemented", "completed", "ctu/web", "ctu/architect", null, ["dotnet build"], []);
     bus.RecordEvent(new AgentBusEvent
     {
@@ -1833,6 +1834,13 @@ static void AgentBusDashboardRendersCommunication()
     True(html.Contains("Codex</span><span class=\"team\">Team</span><span class=\"up\">Up", StringComparison.Ordinal));
     True(html.Contains("data-theme-value=\"system\"", StringComparison.Ordinal));
     True(html.Contains("class=\"meta-toolbar\"", StringComparison.Ordinal));
+    True(html.Contains("class=\"flow-overview\"", StringComparison.Ordinal));
+    True(html.Contains("Situation", StringComparison.Ordinal));
+    True(html.Contains("Route Map", StringComparison.Ordinal));
+    True(html.Contains("Latest Handoffs", StringComparison.Ordinal));
+    True(html.Contains("No stuck work detected.", StringComparison.Ordinal));
+    True(html.Contains(".side-panel{min-height:0;display:grid;grid-template-rows:auto auto minmax(0,1fr)}", StringComparison.Ordinal));
+    True(!html.Contains("flows.reduce((sum, flow) => sum + flow.tasks", StringComparison.Ordinal));
     True(!html.Contains("class=\"hero-card\"", StringComparison.Ordinal));
     True(!html.Contains("class=\"project-card\"", StringComparison.Ordinal));
     True(!html.Contains("Relationship sketch", StringComparison.Ordinal));
@@ -1844,6 +1852,7 @@ static void AgentBusDashboardRendersCommunication()
     True(html.Contains("data-ref=\"relationshipsButton\"", StringComparison.Ordinal));
     True(html.Contains("data-ref=\"projectButton\"", StringComparison.Ordinal));
     True(html.Contains("Operations / System", StringComparison.Ordinal));
+    True(html.Contains(".handoff-row.completed,.handoff-row.done", StringComparison.Ordinal));
     True(html.Contains("Architect notified.", StringComparison.Ordinal));
     True(html.Contains("Open inspector", StringComparison.Ordinal));
     True(html.Contains("Build editor", StringComparison.Ordinal));

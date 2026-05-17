@@ -203,7 +203,7 @@ button:disabled{opacity:.45;cursor:default}
   margin:0;
   padding:10px 12px 12px;
   display:grid;
-  grid-template-rows:auto auto minmax(0,1fr);
+  grid-template-rows:auto auto auto minmax(0,1fr);
   gap:10px;
   overflow:hidden;
 }
@@ -252,6 +252,76 @@ button:disabled{opacity:.45;cursor:default}
   padding:9px 10px;
   color:var(--text);
 }
+.flow-overview{
+  min-height:0;
+  display:grid;
+  grid-template-columns:minmax(0,1.1fr) minmax(0,1fr) minmax(280px,.9fr);
+  gap:10px;
+}
+.overview-panel{
+  min-width:0;
+  overflow:hidden;
+  display:grid;
+  align-content:start;
+  gap:10px;
+  padding:12px;
+  border:1px solid var(--border);
+  border-radius:8px;
+  background:var(--panel);
+  box-shadow:var(--shadow);
+}
+.overview-head{
+  display:flex;
+  justify-content:space-between;
+  align-items:flex-start;
+  gap:8px;
+}
+.overview-title{font-size:13px;font-weight:800}
+.overview-sub{font-size:12px;color:var(--muted)}
+.overview-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.signal{
+  border:1px solid var(--line);
+  border-radius:8px;
+  background:var(--panel-alt);
+  padding:9px;
+}
+.signal-value{font-size:22px;font-weight:800;line-height:1}
+.signal-label{margin-top:5px;font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+.signal.failed .signal-value,.signal.stuck .signal-value{color:#dc2626}
+:root[data-theme='dark'] .signal.failed .signal-value,:root[data-theme='dark'] .signal.stuck .signal-value{color:#fca5a5}
+.route-list,.handoff-list,.stuck-list{display:grid;gap:7px}
+.route-row,.handoff-row,.stuck-row{
+  width:100%;
+  display:grid;
+  grid-template-columns:minmax(0,1fr) auto;
+  gap:8px;
+  align-items:center;
+  text-align:left;
+  color:var(--text);
+  background:transparent;
+  padding:7px 0;
+  border-top:1px solid var(--line);
+  border-right:0;
+  border-bottom:0;
+}
+.handoff-row,.stuck-row{cursor:pointer}
+.handoff-row:hover,.stuck-row:hover{background:var(--panel-alt)}
+.route-row:first-child,.handoff-row:first-child,.stuck-row:first-child{border-top:0}
+.route-name,.handoff-title,.stuck-title{font-weight:700;overflow-wrap:anywhere}
+.route-meta,.handoff-meta,.stuck-meta{font-size:12px;color:var(--muted);overflow-wrap:anywhere}
+.route-count{
+  min-width:32px;
+  text-align:center;
+  border:1px solid var(--line);
+  border-radius:999px;
+  padding:2px 7px;
+  background:var(--panel-alt);
+  font-size:12px;
+}
+.stuck-row{border-left:3px solid #dc2626;padding-left:8px}
+.handoff-row.claimed{border-left:3px solid var(--up);padding-left:8px}
+.handoff-row.open{border-left:3px solid var(--codex);padding-left:8px}
+.handoff-row.completed,.handoff-row.done{border-left:3px solid var(--team);padding-left:8px}
 .layout{min-height:0;display:grid;grid-template-columns:minmax(0,7fr) minmax(320px,3fr);gap:10px}
 .panel{
   min-height:0;
@@ -403,7 +473,7 @@ button:disabled{opacity:.45;cursor:default}
 .operation-main{display:grid;gap:4px}
 .operation-name{font-weight:700;overflow-wrap:anywhere}
 .operation-meta{font-size:12px;color:var(--muted);overflow-wrap:anywhere}
-.side-panel{min-height:0;display:grid;grid-template-rows:auto minmax(0,1fr)}
+.side-panel{min-height:0;display:grid;grid-template-rows:auto auto minmax(0,1fr)}
 .inspector-tabs{
   display:flex;
   gap:8px;
@@ -478,8 +548,10 @@ button:disabled{opacity:.45;cursor:default}
   .meta-toolbar{grid-template-columns:1fr}
   .toolbar-controls{grid-template-columns:1fr;grid-column:auto}
   .toolbar-actions{justify-content:flex-start}
+  .flow-overview{grid-template-columns:1fr}
   .layout{grid-template-columns:1fr}
   .metric-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .overview-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
 }
 """);
         html.AppendLine("</style>");
@@ -558,6 +630,7 @@ button:disabled{opacity:.45;cursor:default}
             </div>
             <div class="count" data-ref="summaryCount"></div>
           </section>
+          <section class="flow-overview" data-ref="flowOverview"></section>
           <main class="layout">
             <section class="panel">
               <div class="panel-head"><h2>Communication</h2><span class="count" data-ref="flowCount"></span></div>
@@ -707,6 +780,7 @@ button:disabled{opacity:.45;cursor:default}
     refs.flowCount.textContent = `${model.flows.length} flows, ${model.operations.length} operations`;
     refs.summaryCount.textContent = `${model.filteredTaskCount} task threads visible`;
     renderMetaToolbar(snapshot, model);
+    renderFlowOverview(model, snapshot);
     renderCommunication(model);
     renderInspector(model, snapshot);
     renderPager(refs.pager, state.page, model.flows.length, render);
@@ -742,6 +816,98 @@ button:disabled{opacity:.45;cursor:default}
       pill.append(el("span", "", label), el("strong", "", String(value)));
       return pill;
     }));
+  }
+
+  function renderFlowOverview(model, snapshot) {
+    const stuck = model.stuckFlows.slice(0, 5);
+    const latest = model.flows.slice(0, 5);
+    const topEdges = model.edgeSummary.slice(0, 6);
+
+    const situation = el("section", "overview-panel");
+    situation.append(overviewHead("Situation", "Open, claimed, and stuck work at a glance"));
+    const stats = el("div", "overview-grid");
+    stats.append(
+      signal("Open", model.openTaskCount, "open"),
+      signal("Claimed", model.claimedTaskCount, "claimed"),
+      signal("Stuck", model.stuckCount, "stuck"));
+    situation.append(stats);
+    situation.append(renderStuckList(stuck));
+
+    const routes = el("section", "overview-panel");
+    routes.append(overviewHead("Route Map", `${model.edgeCount} active communication edges`));
+    const routeList = el("div", "route-list");
+    if (topEdges.length === 0) {
+      routeList.append(el("div", "empty", "No communication edges yet."));
+    } else {
+      for (const edge of topEdges) {
+        const row = el("div", "route-row");
+        const main = el("div");
+        main.append(el("div", "route-name", edge.label), el("div", "route-meta", `${edge.open} open / ${edge.claimed} claimed / ${edge.completed} completed`));
+        row.append(main, el("div", "route-count", String(edge.count)));
+        routeList.append(row);
+      }
+    }
+    routes.append(routeList);
+
+    const handoffs = el("section", "overview-panel");
+    handoffs.append(overviewHead("Latest Handoffs", "Most recent agent-to-agent flows"));
+    const handoffList = el("div", "handoff-list");
+    if (latest.length === 0) {
+      handoffList.append(el("div", "empty", "No handoffs match the current view."));
+    } else {
+      for (const flow of latest) {
+        const row = el("button", `handoff-row ${flow.status}`);
+        row.type = "button";
+        row.addEventListener("click", () => {
+          state.selectedFlowId = flow.id;
+          state.inspectorMode = "flow";
+          render();
+        });
+        const main = el("div");
+        main.append(el("div", "handoff-title", flow.label), el("div", "handoff-meta", `${flow.from} -> ${flow.to} | ${formatDate(flow.lastUpdate)}`));
+        row.append(main, pill(flow.status));
+        handoffList.append(row);
+      }
+    }
+    handoffs.append(handoffList);
+
+    refs.flowOverview.replaceChildren(situation, routes, handoffs);
+  }
+
+  function overviewHead(title, subtitle) {
+    const head = el("div", "overview-head");
+    const main = el("div");
+    main.append(el("div", "overview-title", title), el("div", "overview-sub", subtitle));
+    head.append(main);
+    return head;
+  }
+
+  function signal(label, value, kind) {
+    const node = el("div", `signal ${kind}`);
+    node.append(el("div", "signal-value", String(value)), el("div", "signal-label", label));
+    return node;
+  }
+
+  function renderStuckList(stuck) {
+    const list = el("div", "stuck-list");
+    if (stuck.length === 0) {
+      list.append(el("div", "empty", "No stuck work detected."));
+      return list;
+    }
+    for (const flow of stuck) {
+      const row = el("button", "stuck-row");
+      row.type = "button";
+      row.addEventListener("click", () => {
+        state.selectedFlowId = flow.id;
+        state.inspectorMode = "flow";
+        render();
+      });
+      const main = el("div");
+      main.append(el("div", "stuck-title", flow.label), el("div", "stuck-meta", `${flow.from} -> ${flow.to} | waiting ${flow.waitingText}`));
+      row.append(main, pill(flow.status));
+      list.append(row);
+    }
+    return list;
   }
 
   function renderWatermark() {
@@ -1034,21 +1200,31 @@ button:disabled{opacity:.45;cursor:default}
       flowMap.set(flowId, flow);
     }
 
-    const flows = [...flowMap.values()].map(flow => finalizeFlow(flow)).sort((left, right) => timeValue(right.lastUpdate) - timeValue(left.lastUpdate));
+    const flows = [...flowMap.values()].map(flow => finalizeFlow(flow)).sort(compareFlowsForOverview);
     const edgeMap = new Map();
     for (const flow of flows) {
       const key = `${flow.from}|${flow.to}`;
-      const edge = edgeMap.get(key) || { from: flow.from, to: flow.to, label: `${flow.from} -> ${flow.to}`, count: 0 };
+      const edge = edgeMap.get(key) || { from: flow.from, to: flow.to, label: `${flow.from} -> ${flow.to}`, count: 0, open: 0, claimed: 0, completed: 0 };
       edge.count += 1;
+      if (String(flow.status).toLowerCase() === "open") edge.open += 1;
+      if (String(flow.status).toLowerCase() === "claimed") edge.claimed += 1;
+      if (["done", "completed"].includes(String(flow.status).toLowerCase())) edge.completed += 1;
       edgeMap.set(key, edge);
     }
+    const openTaskCount = flows.reduce((sum, flow) => sum + flow.openTaskCount, 0);
+    const claimedTaskCount = flows.reduce((sum, flow) => sum + flow.claimedTaskCount, 0);
+    const stuckFlows = flows.filter(flow => flow.isStuck).sort((left, right) => timeValue(left.firstPendingAt) - timeValue(right.firstPendingAt));
 
     return {
       flows,
       operations: operations.sort((left, right) => timeValue(right.timestamp) - timeValue(left.timestamp)),
       filteredTaskCount: flows.reduce((sum, flow) => sum + flow.taskCount, 0),
       edgeCount: edgeMap.size,
-      edgeSummary: [...edgeMap.values()].sort((left, right) => right.count - left.count)
+      edgeSummary: [...edgeMap.values()].sort((left, right) => right.count - left.count),
+      openTaskCount,
+      claimedTaskCount,
+      stuckCount: stuckFlows.length,
+      stuckFlows
     };
   }
 
@@ -1084,6 +1260,14 @@ button:disabled{opacity:.45;cursor:default}
 
     const latestTask = flow.tasks.at(-1);
     const latestResult = flow.results.at(-1);
+    const pendingTasks = flow.tasks.filter(task => ["open", "claimed"].includes(String(task.status || "").toLowerCase()));
+    const openTaskCount = flow.tasks.filter(task => String(task.status || "").toLowerCase() === "open").length;
+    const claimedTaskCount = flow.tasks.filter(task => String(task.status || "").toLowerCase() === "claimed").length;
+    const firstPendingAt = pendingTasks.reduce((best, task) => {
+      const value = task.claimedAt || task.createdAt;
+      return !best || timeValue(value) < timeValue(best) ? value : best;
+    }, "");
+    const isStuck = pendingTasks.some(task => isTaskStuck(task));
     return {
       id: flow.id,
       label: flow.label,
@@ -1096,8 +1280,13 @@ button:disabled{opacity:.45;cursor:default}
       resultCount: flow.results.length,
       eventCount: flow.events.length,
       openCount: flow.openCount,
+      openTaskCount,
+      claimedTaskCount,
       status: latestResult?.status || latestTask?.status || "open",
       lastUpdate: maxDate(flow.lastUpdate, latestResult?.timestamp),
+      isStuck,
+      firstPendingAt,
+      waitingText: firstPendingAt ? age(firstPendingAt) : "n/a",
       timingText: formatTiming(flow.tasks[0]?.createdAt, latestResult?.timestamp || latestTask?.completedAt || latestTask?.claimedAt),
       responseSpeed: formatTiming(flow.tasks[0]?.createdAt, latestResult?.timestamp || latestTask?.claimedAt),
       timeline,
@@ -1348,6 +1537,44 @@ button:disabled{opacity:.45;cursor:default}
 
   function countStatus(items, status) {
     return items.filter(item => String(item.status || "").toLowerCase() === status).length;
+  }
+
+  function compareFlowsForOverview(left, right) {
+    const rankDelta = flowHealthRank(left) - flowHealthRank(right);
+    if (rankDelta !== 0) {
+      return rankDelta;
+    }
+    return timeValue(right.lastUpdate) - timeValue(left.lastUpdate);
+  }
+
+  function flowHealthRank(flow) {
+    if (flow.isStuck) {
+      return 0;
+    }
+    const status = String(flow.status || "").toLowerCase();
+    if (status === "claimed") {
+      return 1;
+    }
+    if (status === "open") {
+      return 2;
+    }
+    if (status === "failed") {
+      return 3;
+    }
+    return 4;
+  }
+
+  function isTaskStuck(task) {
+    const status = String(task.status || "").toLowerCase();
+    if (!["open", "claimed"].includes(status)) {
+      return false;
+    }
+    const started = Date.parse(task.claimedAt || task.createdAt || "");
+    if (Number.isNaN(started)) {
+      return false;
+    }
+    const minutes = (Date.now() - started) / 60000;
+    return status === "open" ? minutes >= 15 : minutes >= 30;
   }
 
   function pill(value) {

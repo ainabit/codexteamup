@@ -121,7 +121,9 @@ CodexTeamUp currently provides:
 - a repo-local AgentBus under `.codexteamup/agentbus` for tasks, claims, results, and events,
 - a local dashboard for monitoring communication and runtime state.
 
-The dashboard exists and is useful, but it is not yet where I want it to be. The current version already shows communication flows, tasks, results, and agent relationships, but the UX still needs work.
+The dashboard exists and is useful, but it is not yet where I want it to be. The current version shows a flow overview, stuck-work signals, communication routes, tasks, results, and agent relationships, but the UX still needs work.
+
+The current planning surface for upcoming work lives in [docs/ctu-roadmap-and-execution-plan.md](docs/ctu-roadmap-and-execution-plan.md).
 
 ## Dogfooding
 

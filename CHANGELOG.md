@@ -4,6 +4,14 @@ All notable CodexTeamUp changes are tracked here by date. The project does not u
 
 ## 2026-05-17
 
+### Dashboard Flow Visibility
+
+- Added a dashboard flow overview band for high-level situation awareness.
+- Surfaced open, claimed, and stuck work counts before the detailed communication list.
+- Added route-map and latest-handoff summaries so users can see agent-to-agent movement before drilling into task/result/event payloads.
+- Sorted stuck and active flows ahead of completed flows in the dashboard model.
+- Added `docs/ctu-roadmap-and-execution-plan.md` as the persistent planning artifact maintained by `ctu/projectlead`.
+
 ### Runtime Architecture Redesign
 
 CodexTeamUp now has a sharper split between stable API access and volatile orchestration logic.
