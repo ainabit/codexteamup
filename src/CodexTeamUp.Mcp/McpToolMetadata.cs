@@ -14,6 +14,7 @@ public static class McpToolMetadata
             "agentbus_register_agent" => "Register or update an agent-to-thread binding.",
             "agentbus_create_task" => "Create an AgentBus task.",
             "agentbus_list_tasks" => "List AgentBus tasks.",
+            "agentbus_list_events" => "List AgentBus events.",
             "agentbus_claim_task" => "Claim an open AgentBus task.",
             "agentbus_write_result" => "Write an AgentBus result.",
             "agentbus_wait_result" => "Wait for an AgentBus task result.",
@@ -44,6 +45,7 @@ public static class McpToolMetadata
         {
             "agentbus_list_agents" or
             "agentbus_list_tasks" or
+            "agentbus_list_events" or
             "agentbus_wait_result" or
             "codex_thread_list" or
             "codex_thread_read" or
@@ -130,6 +132,10 @@ public static class McpToolMetadata
                 ["to"] = StringSchema(),
                 ["status"] = StringSchema()
             }),
+            "agentbus_list_events" => WithBusContext(new Dictionary<string, object>
+            {
+                ["limit"] = new { type = "integer" }
+            }),
             "agentbus_claim_task" => WithBusContext(new Dictionary<string, object>
             {
                 ["taskId"] = StringSchema(),
@@ -214,7 +220,10 @@ public static class McpToolMetadata
             },
             "bridge_dispatch_task" => WithBusContext(new Dictionary<string, object>
             {
-                ["taskId"] = StringSchema()
+                ["taskId"] = StringSchema(),
+                ["defer"] = new { type = "boolean" },
+                ["ackOnly"] = new { type = "boolean" },
+                ["background"] = new { type = "boolean" }
             }),
             "bridge_notify_result" => WithBusContext(new Dictionary<string, object>
             {
@@ -234,7 +243,12 @@ public static class McpToolMetadata
                 ["initialPrompt"] = StringSchema(),
                 ["model"] = StringSchema(),
                 ["reasoningEffort"] = StringSchema(),
-                ["speed"] = StringSchema()
+                ["speed"] = StringSchema(),
+                ["prime"] = StringSchema(),
+                ["setName"] = StringSchema(),
+                ["defer"] = new { type = "boolean" },
+                ["ackOnly"] = new { type = "boolean" },
+                ["background"] = new { type = "boolean" }
             }),
             "team_ensure_agents" => WithBusContext(new Dictionary<string, object>
             {
@@ -243,7 +257,11 @@ public static class McpToolMetadata
                 ["cwd"] = StringSchema(),
                 ["project"] = StringSchema(),
                 ["createMissing"] = StringSchema(),
-                ["prime"] = StringSchema()
+                ["prime"] = StringSchema(),
+                ["setName"] = StringSchema(),
+                ["defer"] = new { type = "boolean" },
+                ["ackOnly"] = new { type = "boolean" },
+                ["background"] = new { type = "boolean" }
             }),
             "team_discover_agents" => WithBusContext(new Dictionary<string, object>
             {

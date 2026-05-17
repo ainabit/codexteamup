@@ -14,6 +14,7 @@ var tests = new (string Name, Func<Task> Body)[]
     ("AgentBus lifecycle", () => Task.Run(AgentBusLifecycle)),
     ("AgentBus normalizes agent names", () => Task.Run(AgentBusNormalizesAgentNames)),
     ("AgentBus registry and result wait", () => Task.Run(AgentBusRegistryAndResultWait)),
+    ("AgentBus tiny result wait does not throw", () => Task.Run(AgentBusTinyResultWaitDoesNotThrow)),
     ("Codex state reader parses rollout metadata", () => Task.Run(CodexStateReaderParsesRollouts)),
     ("SafeText redacts obvious secrets", () => Task.Run(SafeTextRedactsSecrets)),
     ("CTU JSON logger writes redacted machine and human logs", () => Task.Run(CtuJsonLoggerWritesRedactedMachineAndHumanLogs)),
@@ -36,18 +37,28 @@ var tests = new (string Name, Func<Task> Body)[]
     ("MCP tool metadata covers known tools", () => Task.Run(McpToolMetadataCoversKnownTools)),
     ("MCP registry exposes core tools", () => Task.Run(McpRegistryExposesCoreTools)),
     ("MCP registry reloads app-server adapter", () => Task.Run(McpRegistryReloadsAppServerAdapter)),
+    ("MCP registry loads default controller plugin", () => Task.Run(McpRegistryLoadsDefaultControllerPlugin)),
+    ("MCP registry has no hardcoded controller fallback", () => Task.Run(McpRegistryHasNoHardcodedControllerFallback)),
     ("MCP registry reloads controller runtime", () => Task.Run(McpRegistryReloadsControllerRuntime)),
     ("MCP registry reloads controller policy", () => Task.Run(McpRegistryReloadsControllerPolicy)),
     ("MCP registry archives Codex thread", () => Task.Run(McpRegistryArchivesCodexThread)),
     ("MCP registry derives bus root from cwd", () => Task.Run(McpRegistryDerivesBusRootFromCwd)),
+    ("MCP registry normalizes project-root busRoot", () => Task.Run(McpRegistryNormalizesProjectRootBusRoot)),
+    ("MCP registry preserves existing thread binding on re-register", () => Task.Run(McpRegistryPreservesExistingThreadBindingOnReregister)),
     ("MCP registry writes result file metadata", () => Task.Run(McpRegistryWritesResultFileMetadata)),
     ("MCP registry ensures explicit ctu agents", () => Task.Run(McpRegistryEnsuresExplicitCtuAgents)),
     ("MCP registry primes agents without fallback tasks", () => Task.Run(McpRegistryPrimesAgentsWithoutFallbackTasks)),
+    ("MCP registry ACKs deferred agent ensure", () => Task.Run(McpRegistryAcksDeferredAgentEnsure)),
     ("MCP registry names created agent before prime", () => Task.Run(McpRegistryNamesCreatedAgentBeforePrime)),
+    ("MCP registry can skip fragile rename and prime calls", () => Task.Run(McpRegistryCanSkipFragileRenameAndPrimeCalls)),
+    ("MCP registry defers stalled agent prime quickly", () => Task.Run(McpRegistryDefersStalledAgentPrimeQuickly)),
     ("MCP registry persists agent runtime settings", () => Task.Run(McpRegistryPersistsAgentRuntimeSettings)),
     ("MCP registry sends strict task wakeup", () => Task.Run(McpRegistrySendsStrictTaskWakeup)),
+    ("MCP registry ACKs deferred task dispatch", () => Task.Run(McpRegistryAcksDeferredTaskDispatch)),
     ("MCP registry rebinds stale agent before team message", () => Task.Run(McpRegistryRebindsStaleAgentBeforeTeamMessage)),
     ("MCP registry waits for AgentBus result", () => Task.Run(McpRegistryWaitsForAgentBusResult)),
+    ("MCP registry clamps invalid AgentBus wait timeout", () => Task.Run(McpRegistryClampsInvalidAgentBusWaitTimeout)),
+    ("MCP registry honors short AgentBus wait timeout", () => Task.Run(McpRegistryHonorsShortAgentBusWaitTimeout)),
     ("MCP team send message enqueues by default", () => Task.Run(McpTeamSendMessageEnqueuesByDefault)),
     ("MCP team send message waits for result", () => Task.Run(McpTeamSendMessageWaitsForResult)),
     ("MCP team send message defers stalled wakeup quickly", () => Task.Run(McpTeamSendMessageDefersStalledWakeupQuickly)),
@@ -158,6 +169,17 @@ static void AgentBusRegistryAndResultWait()
     var result = bus.WaitForResult(task.Id, TimeSpan.FromSeconds(5));
     True(result is not null);
     Equal(task.Id, result!.TaskId);
+}
+
+static void AgentBusTinyResultWaitDoesNotThrow()
+{
+    var root = NewTestDirectory();
+    var bus = new AgentBusStore(Path.Combine(root, ".codexteamup/agentbus"));
+    bus.Initialize();
+    var task = bus.CreateTask("architect", "01-web", "Tiny wait", "Do it later", "demo", root, [], "architect");
+
+    var result = bus.WaitForResult(task.Id, TimeSpan.FromMilliseconds(1));
+    True(result is null);
 }
 
 static void CodexStateReaderParsesRollouts()
@@ -602,6 +624,7 @@ static void McpRegistryExposesCoreTools()
     var registry = McpToolRegistry.CreateDefault(Path.Combine(root, ".codexteamup/agentbus"), new WrapperPipeAppServerClient("unused"));
     True(registry.ToolNames.Contains("agentbus_init"));
     True(registry.ToolNames.Contains("agentbus_wait_result"));
+    True(registry.ToolNames.Contains("agentbus_list_events"));
     True(registry.ToolNames.Contains("codex_thread_archive"));
     True(registry.ToolNames.Contains("codex_appserver_adapter_status"));
     True(registry.ToolNames.Contains("codex_appserver_adapter_reload"));
@@ -636,6 +659,39 @@ static void McpRegistryReloadsAppServerAdapter()
     Equal("""{"plugin":"test"}""", probe.ResultJson);
 }
 
+static void McpRegistryLoadsDefaultControllerPlugin()
+{
+    var root = NewTestDirectory();
+    var controller = ReloadableCtuController.CreateDefault(Path.Combine(root, ".codexteamup/agentbus"), new FakeAppServerClient("""{"data":[]}"""));
+
+    Equal("plugin", controller.Status.ActiveSource);
+    True(controller.Status.PluginPath?.EndsWith("CodexTeamUp.Controller.Default.dll", StringComparison.OrdinalIgnoreCase) == true);
+    True(controller.ToolNames.Contains("team_send_message"));
+}
+
+static void McpRegistryHasNoHardcodedControllerFallback()
+{
+    var root = NewTestDirectory();
+    var previousPath = Environment.GetEnvironmentVariable("CTU_CONTROLLER_PLUGIN_PATH");
+    var previousType = Environment.GetEnvironmentVariable("CTU_CONTROLLER_PLUGIN_TYPE");
+    try
+    {
+        Environment.SetEnvironmentVariable("CTU_CONTROLLER_PLUGIN_PATH", Path.Combine(root, "missing-controller.dll"));
+        Environment.SetEnvironmentVariable("CTU_CONTROLLER_PLUGIN_TYPE", null);
+
+        var controller = ReloadableCtuController.CreateDefault(Path.Combine(root, ".codexteamup/agentbus"), new FakeAppServerClient("""{"data":[]}"""));
+
+        Equal("unloaded", controller.Status.ActiveSource);
+        True(controller.Status.LastError?.Contains("not found", StringComparison.OrdinalIgnoreCase) == true);
+        True(!controller.ToolNames.Contains("team_send_message"));
+    }
+    finally
+    {
+        Environment.SetEnvironmentVariable("CTU_CONTROLLER_PLUGIN_PATH", previousPath);
+        Environment.SetEnvironmentVariable("CTU_CONTROLLER_PLUGIN_TYPE", previousType);
+    }
+}
+
 static void McpRegistryReloadsControllerRuntime()
 {
     var root = NewTestDirectory();
@@ -663,7 +719,7 @@ static void McpRegistryReloadsControllerRuntime()
     var status = registry.InvokeAsync("codex_controller_status", JsonSerializer.Deserialize<JsonElement>("{}")).GetAwaiter().GetResult();
 
     using var reloadDoc = JsonDocument.Parse(JsonSerializer.Serialize(reload, JsonFile.Options));
-    Equal("built-in", reloadDoc.RootElement.GetProperty("activeSource").GetString());
+    Equal("plugin", reloadDoc.RootElement.GetProperty("activeSource").GetString());
     using var statusDoc = JsonDocument.Parse(JsonSerializer.Serialize(status, JsonFile.Options));
     Equal("inline", statusDoc.RootElement.GetProperty("policy").GetProperty("policy").GetProperty("teamSendMessageDefaultDispatchMode").GetString());
 }
@@ -723,6 +779,80 @@ static void McpRegistryDerivesBusRootFromCwd()
     """);
     var result = registry.InvokeAsync("agentbus_init", args).GetAwaiter().GetResult();
     True(File.Exists(Path.Combine(root, ".codexteamup/agentbus", "events.jsonl")));
+}
+
+static void McpRegistryNormalizesProjectRootBusRoot()
+{
+    var root = NewTestDirectory();
+    var busRoot = Path.Combine(root, ".codexteamup", "agentbus");
+    var bus = new AgentBusStore(busRoot);
+    bus.Initialize();
+    var task = bus.CreateTask(
+        "ctu/architect",
+        "ctu/worker",
+        "Check project-root busRoot",
+        "List this task.",
+        "codexteamup.test",
+        root,
+        [],
+        "ctu/architect");
+
+    var registry = McpToolRegistry.CreateDefault(Path.Combine(root, "default", ".codexteamup/agentbus"), new WrapperPipeAppServerClient("unused"));
+    var args = JsonSerializer.Deserialize<JsonElement>($$"""
+    {
+      "busRoot": {{JsonSerializer.Serialize(root)}} ,
+      "to": "ctu/worker",
+      "status": "open"
+    }
+    """);
+
+    var response = registry.InvokeAsync("agentbus_list_tasks", args).GetAwaiter().GetResult();
+
+    using var doc = JsonDocument.Parse(JsonSerializer.Serialize(response, JsonFile.Options));
+    var tasks = doc.RootElement.GetProperty("tasks");
+    Equal(1, tasks.GetArrayLength());
+    Equal(task.Id, tasks[0].GetProperty("id").GetString());
+}
+
+static void McpRegistryPreservesExistingThreadBindingOnReregister()
+{
+    var root = NewTestDirectory();
+    var busRoot = Path.Combine(root, ".codexteamup", "agentbus");
+    var bus = new AgentBusStore(busRoot);
+    bus.Initialize();
+    bus.RegisterAgent(new AgentDefinition
+    {
+        Id = "ctu-test/architect",
+        Role = "Controller",
+        DisplayName = "ctu-test/architect",
+        ThreadId = "thread-architect",
+        Cwd = root,
+        AllowedPaths = ["docs/"],
+        InstructionFiles = ["AGENTS.md"],
+        ReturnTo = "ctu-test/runner",
+        Status = "active"
+    });
+
+    var registry = McpToolRegistry.CreateDefault(busRoot, new WrapperPipeAppServerClient("unused"));
+    var args = JsonSerializer.Deserialize<JsonElement>($$"""
+    {
+      "cwd": {{JsonSerializer.Serialize(root)}} ,
+      "id": "ctu-test/architect",
+      "displayName": "ctu-test/architect",
+      "role": "architect",
+      "status": "active",
+      "reasoningEffort": "medium"
+    }
+    """);
+
+    _ = registry.InvokeAsync("agentbus_register_agent", args).GetAwaiter().GetResult();
+
+    var agent = bus.FindAgent("ctu-test/architect");
+    Equal("thread-architect", agent?.ThreadId);
+    Equal(root, agent?.Cwd);
+    Equal("docs/", agent?.AllowedPaths.Single());
+    Equal("AGENTS.md", agent?.InstructionFiles.Single());
+    Equal("ctu-test/runner", agent?.ReturnTo);
 }
 
 static void McpRegistryWritesResultFileMetadata()
@@ -829,6 +959,48 @@ static void McpRegistryPrimesAgentsWithoutFallbackTasks()
     Equal("medium", appServer.SentTurns[0].Settings?.ReasoningEffort);
 }
 
+static void McpRegistryAcksDeferredAgentEnsure()
+{
+    var root = NewTestDirectory();
+    var appServer = new FakeAppServerClient("""{"data":[]}""");
+    var busRoot = Path.Combine(root, ".codexteamup", "agentbus");
+    var registry = McpToolRegistry.CreateDefault(busRoot, appServer);
+    var agentsJson = JsonSerializer.Serialize(new[] { new { id = "ctu/deferred", role = "Deferred Agent" } });
+    var args = JsonSerializer.Deserialize<JsonElement>($$"""
+    {
+      "cwd": {{JsonSerializer.Serialize(root)}} ,
+      "busRoot": {{JsonSerializer.Serialize(busRoot)}} ,
+      "agentsJson": {{JsonSerializer.Serialize(agentsJson)}} ,
+      "createMissing": "true",
+      "prime": "true",
+      "defer": true
+    }
+    """);
+
+    var response = registry.InvokeAsync("team_ensure_agents", args).GetAwaiter().GetResult();
+
+    using var doc = JsonDocument.Parse(JsonSerializer.Serialize(response, JsonFile.Options));
+    True(doc.RootElement.GetProperty("accepted").GetBoolean());
+    True(doc.RootElement.GetProperty("deferred").GetBoolean());
+    True(!string.IsNullOrWhiteSpace(doc.RootElement.GetProperty("operationId").GetString()));
+
+    var bus = new AgentBusStore(busRoot);
+    var deadline = DateTimeOffset.Now.AddSeconds(5);
+    AgentDefinition? agent = null;
+    while (DateTimeOffset.Now < deadline)
+    {
+        agent = bus.FindAgent("ctu/deferred");
+        if (!string.IsNullOrWhiteSpace(agent?.ThreadId))
+        {
+            break;
+        }
+
+        Thread.Sleep(50);
+    }
+
+    Equal("created-thread", agent?.ThreadId);
+}
+
 static void McpRegistryNamesCreatedAgentBeforePrime()
 {
     var root = NewTestDirectory();
@@ -850,6 +1022,63 @@ static void McpRegistryNamesCreatedAgentBeforePrime()
     Equal("ctu/new-agent", appServer.NamedThreads.Single().Name);
     Equal(1, appServer.SentTurns.Count);
     True(appServer.SentTurns.Single().Message.StartsWith("ctu/new-agent\n\nYou are ctu/new-agent", StringComparison.Ordinal));
+}
+
+static void McpRegistryCanSkipFragileRenameAndPrimeCalls()
+{
+    var root = NewTestDirectory();
+    var appServer = new FakeAppServerClient("""{"data":[]}""");
+    var registry = McpToolRegistry.CreateDefault(Path.Combine(root, ".codexteamup", "agentbus"), appServer);
+    var agentsJson = JsonSerializer.Serialize(new[] { new { id = "ctu/smoke-agent", role = "Smoke Agent" } });
+    var args = JsonSerializer.Deserialize<JsonElement>($$"""
+    {
+      "cwd": {{JsonSerializer.Serialize(root)}} ,
+      "busRoot": {{JsonSerializer.Serialize(Path.Combine(root, ".codexteamup", "agentbus"))}} ,
+      "agentsJson": {{JsonSerializer.Serialize(agentsJson)}} ,
+      "createMissing": "true",
+      "prime": "false",
+      "setName": "false"
+    }
+    """);
+
+    _ = registry.InvokeAsync("team_ensure_agents", args).GetAwaiter().GetResult();
+
+    var agent = new AgentBusStore(Path.Combine(root, ".codexteamup", "agentbus")).FindAgent("ctu/smoke-agent");
+    Equal("created-thread", agent?.ThreadId);
+    Equal(0, appServer.NamedThreads.Count);
+    Equal(0, appServer.SentTurns.Count);
+}
+
+static void McpRegistryDefersStalledAgentPrimeQuickly()
+{
+    var root = NewTestDirectory();
+    var busRoot = Path.Combine(root, ".codexteamup", "agentbus");
+    var appServer = new FakeAppServerClient("""{"data":[]}""", sendTurnDelay: TimeSpan.FromSeconds(5));
+    var policy = new ReloadableCtuControllerPolicy();
+    var policyFile = Path.Combine(root, "ctu-controller-policy.json");
+    File.WriteAllText(policyFile, JsonSerializer.Serialize(new CtuControllerPolicy("enqueue", 1, 2, false, true), JsonFile.Options));
+    policy.Reload(policyFile);
+    var registry = McpToolRegistry.CreateDefault(busRoot, appServer, policy);
+    var agentsJson = JsonSerializer.Serialize(new[] { new { id = "ctu/smoke-agent", role = "Smoke Agent" } });
+    var args = JsonSerializer.Deserialize<JsonElement>($$"""
+    {
+      "cwd": {{JsonSerializer.Serialize(root)}} ,
+      "busRoot": {{JsonSerializer.Serialize(busRoot)}} ,
+      "agentsJson": {{JsonSerializer.Serialize(agentsJson)}} ,
+      "createMissing": "true",
+      "prime": "true",
+      "setName": "false"
+    }
+    """);
+
+    var stopwatch = Stopwatch.StartNew();
+    _ = registry.InvokeAsync("team_ensure_agents", args).GetAwaiter().GetResult();
+    stopwatch.Stop();
+
+    True(stopwatch.Elapsed < TimeSpan.FromSeconds(3));
+    var bus = new AgentBusStore(busRoot);
+    Equal("created-thread", bus.FindAgent("ctu/smoke-agent")?.ThreadId);
+    True(bus.ListEvents(100).Any(evt => evt.Type == "agent.prime_deferred" && evt.To == "ctu/smoke-agent"));
 }
 
 static void McpRegistryPersistsAgentRuntimeSettings()
@@ -925,11 +1154,55 @@ static void McpRegistrySendsStrictTaskWakeup()
     _ = registry.InvokeAsync("team_send_message", args).GetAwaiter().GetResult();
     Equal(1, appServer.SentTurns.Count);
     var wake = appServer.SentTurns[0].Message;
+    True(wake.StartsWith("ctu/greeter\n\nNew CodexTeamUp message/task", StringComparison.Ordinal));
     True(wake.Contains("Verify that the task file exists", StringComparison.Ordinal));
     True(wake.Contains("do not create a replacement task", StringComparison.Ordinal));
     True(wake.Contains("do not write a result", StringComparison.Ordinal));
     Equal("gpt-5.4-mini", appServer.SentTurns[0].Settings?.Model);
     Equal("low", appServer.SentTurns[0].Settings?.ReasoningEffort);
+}
+
+static void McpRegistryAcksDeferredTaskDispatch()
+{
+    var root = NewTestDirectory();
+    var busRoot = Path.Combine(root, ".codexteamup", "agentbus");
+    var bus = new AgentBusStore(busRoot);
+    bus.Initialize();
+    bus.RegisterAgent(new AgentDefinition
+    {
+        Id = "ctu/worker",
+        Role = "Worker",
+        ThreadId = "thread-worker",
+        Cwd = root,
+        Status = "active"
+    });
+    var task = bus.CreateTask("ctu/architect", "ctu/worker", "Ping", "Reply briefly.", "demo", root, [], "ctu/architect");
+    var appServer = new FakeAppServerClient("""{"data":[{"id":"thread-worker","name":"ctu/worker","cwd":"ROOT","status":"idle"}]}"""
+        .Replace("ROOT", JsonEscaped(root), StringComparison.Ordinal));
+    var registry = McpToolRegistry.CreateDefault(busRoot, appServer);
+    var args = JsonSerializer.Deserialize<JsonElement>($$"""
+    {
+      "cwd": {{JsonSerializer.Serialize(root)}} ,
+      "busRoot": {{JsonSerializer.Serialize(busRoot)}} ,
+      "taskId": {{JsonSerializer.Serialize(task.Id)}} ,
+      "defer": true
+    }
+    """);
+
+    var response = registry.InvokeAsync("bridge_dispatch_task", args).GetAwaiter().GetResult();
+
+    using var doc = JsonDocument.Parse(JsonSerializer.Serialize(response, JsonFile.Options));
+    True(doc.RootElement.GetProperty("accepted").GetBoolean());
+    True(doc.RootElement.GetProperty("deferred").GetBoolean());
+    var deadline = DateTimeOffset.Now.AddSeconds(5);
+    while (DateTimeOffset.Now < deadline && appServer.SentTurns.Count == 0)
+    {
+        Thread.Sleep(50);
+    }
+
+    Equal(1, appServer.SentTurns.Count);
+    True(bus.ListEvents(100).Any(evt => evt.Type == "task.dispatch_accepted" && evt.TaskId == task.Id));
+    True(bus.ListEvents(100).Any(evt => evt.Type == "task.dispatched" && evt.TaskId == task.Id));
 }
 
 static void McpRegistryRebindsStaleAgentBeforeTeamMessage()
@@ -1003,6 +1276,62 @@ static void McpRegistryWaitsForAgentBusResult()
     using var doc = JsonDocument.Parse(JsonSerializer.Serialize(response, JsonFile.Options));
     True(doc.RootElement.GetProperty("completed").GetBoolean());
     Equal("fast result", doc.RootElement.GetProperty("result").GetProperty("summary").GetString());
+}
+
+static void McpRegistryClampsInvalidAgentBusWaitTimeout()
+{
+    var root = NewTestDirectory();
+    var busRoot = Path.Combine(root, ".codexteamup", "agentbus");
+    var bus = new AgentBusStore(busRoot);
+    bus.Initialize();
+    var task = bus.CreateTask("ctu/architect", "ctu/worker", "Invalid wait", "Reply briefly.", "demo", root, [], "ctu/architect");
+    _ = Task.Run(async () =>
+    {
+        await Task.Delay(100).ConfigureAwait(false);
+        bus.ClaimTask(task.Id, "ctu/worker");
+        bus.WriteResult(task.Id, "clamped result", "completed", "ctu/worker", "ctu/architect", null, [], []);
+    });
+
+    var registry = McpToolRegistry.CreateDefault(busRoot, new FakeAppServerClient("""{"data":[]}"""));
+    var args = JsonSerializer.Deserialize<JsonElement>($$"""
+    {
+      "busRoot": {{JsonSerializer.Serialize(busRoot)}} ,
+      "taskId": {{JsonSerializer.Serialize(task.Id)}} ,
+      "timeoutSeconds": -2
+    }
+    """);
+
+    var response = registry.InvokeAsync("agentbus_wait_result", args).GetAwaiter().GetResult();
+    using var doc = JsonDocument.Parse(JsonSerializer.Serialize(response, JsonFile.Options));
+    True(doc.RootElement.GetProperty("completed").GetBoolean());
+    Equal("clamped result", doc.RootElement.GetProperty("result").GetProperty("summary").GetString());
+}
+
+static void McpRegistryHonorsShortAgentBusWaitTimeout()
+{
+    var root = NewTestDirectory();
+    var busRoot = Path.Combine(root, ".codexteamup", "agentbus");
+    var bus = new AgentBusStore(busRoot);
+    bus.Initialize();
+    var task = bus.CreateTask("ctu/architect", "ctu/worker", "Short wait", "Reply later.", "demo", root, [], "ctu/architect");
+
+    var registry = McpToolRegistry.CreateDefault(busRoot, new FakeAppServerClient("""{"data":[]}"""));
+    var args = JsonSerializer.Deserialize<JsonElement>($$"""
+    {
+      "busRoot": {{JsonSerializer.Serialize(busRoot)}} ,
+      "taskId": {{JsonSerializer.Serialize(task.Id)}} ,
+      "timeoutSeconds": 1
+    }
+    """);
+
+    var stopwatch = Stopwatch.StartNew();
+    var response = registry.InvokeAsync("agentbus_wait_result", args).GetAwaiter().GetResult();
+    stopwatch.Stop();
+
+    using var doc = JsonDocument.Parse(JsonSerializer.Serialize(response, JsonFile.Options));
+    Equal(false, doc.RootElement.GetProperty("completed").GetBoolean());
+    Equal(1, doc.RootElement.GetProperty("timeoutSeconds").GetInt32());
+    True(stopwatch.Elapsed < TimeSpan.FromSeconds(2.5));
 }
 
 static void McpTeamSendMessageEnqueuesByDefault()

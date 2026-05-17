@@ -103,6 +103,12 @@ CodexTeamUp does not infer project roles. The caller provides the desired team. 
 ]
 ```
 
+`team_create_agent` and `team_ensure_agents` also accept short-control flags:
+
+- `defer=true`, `ackOnly=true`, or `background=true` returns an ACK with an operation id and continues create/bind work asynchronously.
+- `prime=false` registers or creates the agent without sending an initial prime turn.
+- `setName=false` skips the explicit Desktop thread rename call. The controller still passes `displayName` to thread creation; this flag exists for short live-smoke and recovery flows where Desktop rename/prime calls are known to be fragile.
+
 ## Agent Runtime Settings
 
 Agent runtime settings are stored in `.codexteamup/agentbus/agents.json`:

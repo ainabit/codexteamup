@@ -194,7 +194,7 @@ if ([string]::IsNullOrWhiteSpace($WrapperExe)) {
 } else {
     $wrapperExe = [System.IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($WrapperExe))
 }
-$logRoot = Join-Path $repoRoot ".ctu\cli-wrapper-probe"
+$logRoot = Join-Path $repoRoot ".codexteamup\logs"
 $workspacePath = if ([string]::IsNullOrWhiteSpace($Workspace)) {
     ""
 } else {

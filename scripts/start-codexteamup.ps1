@@ -23,6 +23,9 @@ $desktopStart = Join-Path $repoRoot "scripts\start-codex-desktop-with-cli-wrappe
 $wrapperExe = Join-Path $repoRoot ".ctu\tools\wrapper\CodexTeamUp.CodexWrapper.exe"
 $serviceExe = Join-Path $repoRoot ".ctu\tools\service\CodexTeamUp.Service.exe"
 $serviceLogRoot = Join-Path $repoRoot ".ctu\service"
+$controllerRuntimeRoot = Join-Path $repoRoot ".ctu\runtime\controllers\default"
+$controllerPluginPath = Join-Path $controllerRuntimeRoot "CodexTeamUp.Controller.Default.dll"
+$controllerCurrentPluginPath = Join-Path $controllerRuntimeRoot "current-plugin.txt"
 
 function Get-ProcessCommandLines {
     $map = @{}
@@ -39,6 +42,38 @@ function Get-ProcessCommandLines {
     return $map
 }
 
+function Get-ProcessMetadata {
+    $map = @{}
+    try {
+        $processes = @(Get-CimInstance Win32_Process -ErrorAction Stop)
+        foreach ($process in $processes) {
+            if ($process.ProcessId) {
+                $map[[int]$process.ProcessId] = [pscustomobject]@{
+                    CommandLine = $process.CommandLine
+                    ParentProcessId = if ($process.ParentProcessId) { [int]$process.ParentProcessId } else { $null }
+                    ParentName = $null
+                }
+            }
+        }
+
+        foreach ($process in $processes) {
+            if (-not $process.ProcessId -or -not $process.ParentProcessId) {
+                continue
+            }
+
+            $metadata = $map[[int]$process.ProcessId]
+            $parentProcess = $processes | Where-Object { $_.ProcessId -eq $process.ParentProcessId } | Select-Object -First 1
+            if ($metadata -and $parentProcess) {
+                $metadata.ParentName = $parentProcess.Name
+            }
+        }
+    } catch {
+        Write-Warning "Could not inspect process metadata: $($_.Exception.Message)"
+    }
+
+    return $map
+}
+
 function Get-ProcessPathSafe {
     param($Process)
 
@@ -47,6 +82,17 @@ function Get-ProcessPathSafe {
     } catch {
         return $null
     }
+}
+
+function Get-ControllerPluginPath {
+    if (Test-Path -LiteralPath $controllerCurrentPluginPath -PathType Leaf) {
+        $candidate = (Get-Content -LiteralPath $controllerCurrentPluginPath -Raw).Trim()
+        if (-not [string]::IsNullOrWhiteSpace($candidate) -and (Test-Path -LiteralPath $candidate -PathType Leaf)) {
+            return $candidate
+        }
+    }
+
+    return $controllerPluginPath
 }
 
 function Test-ContainsIgnoreCase {
@@ -67,7 +113,7 @@ function Add-ProcessCandidate {
         [System.Collections.Generic.List[object]]$Candidates,
         $Process,
         [string]$Reason,
-        [hashtable]$CommandLines
+        [hashtable]$ProcessMetadata
     )
 
     if ($null -eq $Process -or $Process.Id -eq $PID) {
@@ -79,10 +125,15 @@ function Add-ProcessCandidate {
     }
 
     $path = Get-ProcessPathSafe -Process $Process
-    $commandLine = $CommandLines[$Process.Id]
+    $metadata = $ProcessMetadata[$Process.Id]
+    $commandLine = if ($metadata) { $metadata.CommandLine } else { $null }
+    $parentProcessId = if ($metadata) { $metadata.ParentProcessId } else { $null }
+    $parentName = if ($metadata) { $metadata.ParentName } else { $null }
     $Candidates.Add([pscustomobject]@{
         Id = $Process.Id
         Name = $Process.ProcessName
+        ParentProcessId = $parentProcessId
+        ParentName = $parentName
         Reason = $Reason
         Path = $path
         CommandLine = $commandLine
@@ -90,24 +141,24 @@ function Add-ProcessCandidate {
 }
 
 function Get-CodexTeamUpProcessCandidates {
-    $commandLines = Get-ProcessCommandLines
+    $processMetadata = Get-ProcessMetadata
     $candidates = [System.Collections.Generic.List[object]]::new()
 
     if (-not $NoLaunch -and -not $AllowExistingDesktop) {
         foreach ($process in @(Get-Process -Name "Codex", "codex" -ErrorAction SilentlyContinue)) {
-            Add-ProcessCandidate -Candidates $candidates -Process $process -Reason "Codex Desktop must be relaunched with the current wrapper environment." -CommandLines $commandLines
+            Add-ProcessCandidate -Candidates $candidates -Process $process -Reason "Codex Desktop must be relaunched with the current wrapper environment." -ProcessMetadata $processMetadata
         }
     }
 
     if (-not $NoService -or $RestartService) {
         foreach ($process in @(Get-Process -Name "CodexTeamUp.Service" -ErrorAction SilentlyContinue)) {
-            Add-ProcessCandidate -Candidates $candidates -Process $process -Reason "Existing CodexTeamUp service must be replaced." -CommandLines $commandLines
+            Add-ProcessCandidate -Candidates $candidates -Process $process -Reason "Existing CodexTeamUp service must be replaced." -ProcessMetadata $processMetadata
         }
     }
 
     if (-not $NoLaunch) {
         foreach ($process in @(Get-Process -Name "CodexTeamUp.CodexWrapper" -ErrorAction SilentlyContinue)) {
-            Add-ProcessCandidate -Candidates $candidates -Process $process -Reason "Existing CodexTeamUp wrapper must be replaced." -CommandLines $commandLines
+            Add-ProcessCandidate -Candidates $candidates -Process $process -Reason "Existing CodexTeamUp wrapper must be replaced." -ProcessMetadata $processMetadata
         }
     }
 
@@ -116,7 +167,8 @@ function Get-CodexTeamUpProcessCandidates {
             continue
         }
 
-        $commandLine = $commandLines[$process.Id]
+        $metadata = $processMetadata[$process.Id]
+        $commandLine = if ($metadata) { $metadata.CommandLine } else { $null }
         if ([string]::IsNullOrWhiteSpace($commandLine)) {
             continue
         }
@@ -131,7 +183,7 @@ function Get-CodexTeamUpProcessCandidates {
             (Test-ContainsIgnoreCase -Text $normalizedCommand -Value "scripts/test-live-multi-agent-orchestration.ps1") -or
             ((-not $NoService -or $RestartService) -and (Test-ContainsIgnoreCase -Text $normalizedCommand -Value "CodexTeamUp.Service")) -or
             ((-not $NoLaunch) -and (Test-ContainsIgnoreCase -Text $normalizedCommand -Value "CodexTeamUp.CodexWrapper"))) {
-            Add-ProcessCandidate -Candidates $candidates -Process $process -Reason "CTU-related helper/test process from this repository is still running." -CommandLines $commandLines
+            Add-ProcessCandidate -Candidates $candidates -Process $process -Reason "CTU-related helper/test process from this repository is still running." -ProcessMetadata $processMetadata
         }
     }
 
@@ -147,7 +199,7 @@ function Stop-CodexTeamUpProcessesForFreshStart {
 
     Write-Host "Existing processes must be stopped for a fresh CodexTeamUp start:"
     $candidates |
-        Select-Object Id, Name, Reason, Path |
+        Select-Object Id, Name, ParentProcessId, ParentName, Reason, Path |
         Format-Table -AutoSize
 
     if (-not $ForceStopExisting) {
@@ -177,7 +229,7 @@ function Stop-CodexTeamUpProcessesForFreshStart {
     }
 
     if ($remaining.Count -gt 0) {
-        $remaining | Select-Object Id, Name, Reason, Path | Format-Table -AutoSize
+        $remaining | Select-Object Id, Name, ParentProcessId, ParentName, Reason, Path | Format-Table -AutoSize
         throw "Could not stop all existing CTU/Desktop processes. Fresh start was not guaranteed."
     }
 }
@@ -400,6 +452,7 @@ function Start-CodexTeamUpService {
         $previousResponseTimeout = [Environment]::GetEnvironmentVariable("CTU_APP_SERVER_RESPONSE_TIMEOUT_MS", "Process")
         $previousLogRoot = [Environment]::GetEnvironmentVariable("CTU_LOG_ROOT", "Process")
         $previousControllerPolicy = [Environment]::GetEnvironmentVariable("CTU_CONTROLLER_POLICY_PATH", "Process")
+        $previousControllerPlugin = [Environment]::GetEnvironmentVariable("CTU_CONTROLLER_PLUGIN_PATH", "Process")
         $serviceArguments = @("--url", $ServiceUrl)
         if ($ParentProcessId -gt 0) {
             $serviceArguments += @("--parent-pid", "$ParentProcessId")
@@ -410,6 +463,7 @@ function Start-CodexTeamUpService {
             Set-Item -LiteralPath "Env:CTU_APP_SERVER_RESPONSE_TIMEOUT_MS" -Value "30000"
             Set-Item -LiteralPath "Env:CTU_LOG_ROOT" -Value (Join-Path $repoRoot ".codexteamup\logs")
             Set-Item -LiteralPath "Env:CTU_CONTROLLER_POLICY_PATH" -Value (Join-Path $repoRoot "config\ctu-controller-policy.json")
+            Set-Item -LiteralPath "Env:CTU_CONTROLLER_PLUGIN_PATH" -Value (Get-ControllerPluginPath)
             Start-Process `
                 -FilePath $serviceExe `
                 -ArgumentList $serviceArguments `
@@ -424,6 +478,7 @@ function Start-CodexTeamUpService {
             if ($null -eq $previousResponseTimeout) { Remove-Item -LiteralPath "Env:CTU_APP_SERVER_RESPONSE_TIMEOUT_MS" -ErrorAction SilentlyContinue } else { Set-Item -LiteralPath "Env:CTU_APP_SERVER_RESPONSE_TIMEOUT_MS" -Value $previousResponseTimeout }
             if ($null -eq $previousLogRoot) { Remove-Item -LiteralPath "Env:CTU_LOG_ROOT" -ErrorAction SilentlyContinue } else { Set-Item -LiteralPath "Env:CTU_LOG_ROOT" -Value $previousLogRoot }
             if ($null -eq $previousControllerPolicy) { Remove-Item -LiteralPath "Env:CTU_CONTROLLER_POLICY_PATH" -ErrorAction SilentlyContinue } else { Set-Item -LiteralPath "Env:CTU_CONTROLLER_POLICY_PATH" -Value $previousControllerPolicy }
+            if ($null -eq $previousControllerPlugin) { Remove-Item -LiteralPath "Env:CTU_CONTROLLER_PLUGIN_PATH" -ErrorAction SilentlyContinue } else { Set-Item -LiteralPath "Env:CTU_CONTROLLER_PLUGIN_PATH" -Value $previousControllerPlugin }
         }
 
         $started = $false
@@ -445,6 +500,27 @@ function Start-CodexTeamUpService {
     } else {
         Write-Host "CodexTeamUp service already running at $ServiceUrl"
     }
+}
+
+function Ensure-ControllerRuntime {
+    if (Test-Path -LiteralPath $controllerPluginPath -PathType Leaf) {
+        return
+    }
+
+    New-Item -ItemType Directory -Force -Path $controllerRuntimeRoot | Out-Null
+    $servicePlugin = Join-Path (Split-Path -Parent $serviceExe) "CodexTeamUp.Controller.Default.dll"
+    if (-not (Test-Path -LiteralPath $servicePlugin -PathType Leaf)) {
+        throw "Controller runtime not found: $controllerPluginPath. Run scripts\publish-ctu.ps1 or scripts\publish-controller-runtime.ps1 first."
+    }
+
+    foreach ($file in Get-ChildItem -LiteralPath (Split-Path -Parent $servicePlugin) -File) {
+        $extension = [System.IO.Path]::GetExtension($file.Name)
+        if ($extension -in @(".dll", ".pdb", ".json")) {
+            Copy-Item -LiteralPath $file.FullName -Destination (Join-Path $controllerRuntimeRoot $file.Name) -Force
+        }
+    }
+
+    Set-Content -LiteralPath $controllerCurrentPluginPath -Value $controllerPluginPath -Encoding UTF8
 }
 
 if (-not $NoLaunch -or -not $NoService -or $RestartService) {
@@ -470,6 +546,8 @@ if (-not (Test-Path -LiteralPath $wrapperExe -PathType Leaf)) {
 if (-not (Test-Path -LiteralPath $serviceExe -PathType Leaf)) {
     $serviceExe = Join-Path $repoRoot "src\CodexTeamUp.Service\bin\Release\net10.0\CodexTeamUp.Service.exe"
 }
+
+Ensure-ControllerRuntime
 
 if (-not (Test-Path -LiteralPath $wrapperExe -PathType Leaf)) {
     throw "Wrapper not found: $wrapperExe. Close Codex Desktop, then run scripts\publish-ctu.ps1 or dotnet build -c Release."

@@ -19,7 +19,7 @@ public sealed class McpToolRegistry
         _logger = logger;
     }
 
-    public static IReadOnlyList<string> KnownToolNames => DefaultCtuController.KnownToolNames;
+    public static IReadOnlyList<string> KnownToolNames => CtuControllerTools.KnownToolNames;
 
     public IReadOnlyList<string> ToolNames => _controller.ToolNames;
 
@@ -48,7 +48,7 @@ public sealed class McpToolRegistry
         IAppServerClient appServer,
         ReloadableCtuControllerPolicy? controllerPolicy = null,
         CtuJsonLogger? logger = null)
-        => new(new DefaultCtuController(busRoot, appServer, controllerPolicy, logger), logger);
+        => new(ReloadableCtuController.CreateDefault(busRoot, appServer, logger, controllerPolicy), logger);
 
     public static McpToolRegistry CreateServiceBacked(Uri serviceUri)
     {

@@ -1,6 +1,7 @@
 using System.Reflection;
 using System.Runtime.Loader;
 using System.Text.Json;
+using CodexTeamUp.AgentBus;
 using CodexTeamUp.AppServer;
 using CodexTeamUp.Core;
 
@@ -51,7 +52,7 @@ public sealed class ReloadableCtuController : IReloadableCtuController, IDisposa
         _appServer = appServer;
         _logger = logger;
         _policy = policy;
-        _current = CreateBuiltIn(defaultBusRoot, appServer, logger, policy, 0, null);
+        _current = CreateUnloaded(policy, 0, "Controller plugin has not been loaded.");
     }
 
     public IReadOnlyList<string> ToolNames => _current.Controller.ToolNames
@@ -74,11 +75,9 @@ public sealed class ReloadableCtuController : IReloadableCtuController, IDisposa
         ReloadableCtuControllerPolicy? policy = null)
     {
         var controller = new ReloadableCtuController(defaultBusRoot, appServer, logger, policy ?? new ReloadableCtuControllerPolicy(logger: logger));
-        var pluginPath = Environment.GetEnvironmentVariable("CTU_CONTROLLER_PLUGIN_PATH");
-        if (!string.IsNullOrWhiteSpace(pluginPath))
-        {
-            controller.Reload(pluginPath, Environment.GetEnvironmentVariable("CTU_CONTROLLER_PLUGIN_TYPE"));
-        }
+        controller.Reload(
+            Environment.GetEnvironmentVariable("CTU_CONTROLLER_PLUGIN_PATH"),
+            Environment.GetEnvironmentVariable("CTU_CONTROLLER_PLUGIN_TYPE"));
 
         return controller;
     }
@@ -122,9 +121,8 @@ public sealed class ReloadableCtuController : IReloadableCtuController, IDisposa
             LoadedController next;
             try
             {
-                next = string.IsNullOrWhiteSpace(pluginPath)
-                    ? CreateBuiltIn(_defaultBusRoot, _appServer, _logger, _policy, _reloadCount, null)
-                    : CreatePlugin(_defaultBusRoot, _appServer, _logger, _policy, pluginPath!, pluginType, options ?? new Dictionary<string, string>(), _reloadCount);
+                var resolvedPluginPath = ResolveControllerPluginPath(pluginPath);
+                next = CreatePlugin(_defaultBusRoot, _appServer, _logger, _policy, resolvedPluginPath, pluginType, options ?? new Dictionary<string, string>(), _reloadCount);
             }
             catch (Exception ex)
             {
@@ -147,27 +145,45 @@ public sealed class ReloadableCtuController : IReloadableCtuController, IDisposa
         DisposeLoaded(_current);
     }
 
-    private static LoadedController CreateBuiltIn(
-        string defaultBusRoot,
-        IAppServerClient appServer,
-        CtuJsonLogger? logger,
+    private static LoadedController CreateUnloaded(
         ReloadableCtuControllerPolicy policy,
         int reloadCount,
         string? lastError)
     {
-        var controller = new DefaultCtuController(defaultBusRoot, appServer, policy, logger);
         return new LoadedController(
-            controller,
+            new NoControllerLoaded(),
             null,
             new CtuControllerRuntimeStatus(
-                "built-in",
-                controller.GetType().FullName ?? controller.GetType().Name,
+                "unloaded",
+                nameof(NoControllerLoaded),
                 null,
                 null,
                 DateTimeOffset.Now,
                 reloadCount,
                 lastError,
                 policy.Status));
+    }
+
+    private static string ResolveControllerPluginPath(string? pluginPath)
+    {
+        if (!string.IsNullOrWhiteSpace(pluginPath))
+        {
+            return pluginPath;
+        }
+
+        var configuredDefaultPath = Environment.GetEnvironmentVariable("CTU_CONTROLLER_PLUGIN_PATH");
+        if (!string.IsNullOrWhiteSpace(configuredDefaultPath))
+        {
+            return configuredDefaultPath;
+        }
+
+        var defaultPath = Path.Combine(AppContext.BaseDirectory, "CodexTeamUp.Controller.Default.dll");
+        if (File.Exists(defaultPath))
+        {
+            return defaultPath;
+        }
+
+        throw new FileNotFoundException("Default CTU controller plugin was not found. Set CTU_CONTROLLER_PLUGIN_PATH or deploy CodexTeamUp.Controller.Default.dll next to the service.", defaultPath);
     }
 
     private static LoadedController CreatePlugin(
@@ -312,13 +328,41 @@ public sealed class ReloadableCtuController : IReloadableCtuController, IDisposa
         AssemblyLoadContext? LoadContext,
         CtuControllerRuntimeStatus Status);
 
+    private sealed class NoControllerLoaded : ICtuController
+    {
+        public IReadOnlyList<string> ToolNames => [];
+
+        public CtuControllerRuntimeStatus Status => new(
+            "unloaded",
+            nameof(NoControllerLoaded),
+            null,
+            null,
+            DateTimeOffset.Now,
+            0,
+            "Controller plugin has not been loaded.",
+            new CtuControllerPolicyStatus(
+                "unloaded",
+                nameof(CtuControllerPolicy),
+                null,
+                DateTimeOffset.Now,
+                0,
+                null,
+                CtuControllerPolicy.Default));
+
+        public Task<object> InvokeToolAsync(string name, JsonElement arguments, CancellationToken cancellationToken = default)
+            => throw new InvalidOperationException("No CTU controller plugin is loaded. Use codex_controller_reload with a plugin DLL path.");
+    }
+
     private sealed class ControllerPluginLoadContext(string pluginPath) : AssemblyLoadContext(isCollectible: true)
     {
         private readonly AssemblyDependencyResolver _resolver = new(pluginPath);
 
         protected override Assembly? Load(AssemblyName assemblyName)
         {
-            if (assemblyName.Name == typeof(ICtuController).Assembly.GetName().Name)
+            if (assemblyName.Name == typeof(ICtuController).Assembly.GetName().Name
+                || assemblyName.Name == typeof(AgentBusStore).Assembly.GetName().Name
+                || assemblyName.Name == typeof(IAppServerClient).Assembly.GetName().Name
+                || assemblyName.Name == typeof(CtuJsonLogger).Assembly.GetName().Name)
             {
                 return null;
             }

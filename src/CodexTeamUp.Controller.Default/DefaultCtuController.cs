@@ -7,13 +7,14 @@ using CodexTeamUp.Core;
 namespace CodexTeamUp.Controller;
 
 /// <summary>
-/// Built-in CTU workflow controller. API adapters should delegate orchestration here.
+/// Default CTU workflow controller loaded through the controller plugin host.
 /// </summary>
 public sealed class DefaultCtuController : ICtuController
 {
     private const string DefaultSpeed = "standard";
     private static readonly TimeSpan WakeupReadyTimeout = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan WakeupReadyPollInterval = TimeSpan.FromMilliseconds(200);
+    private static readonly SemaphoreSlim DesktopWakeupGate = new(1, 1);
     private readonly ReloadableCtuControllerPolicy _controllerPolicy;
     private readonly CtuJsonLogger? _logger;
     private readonly DateTimeOffset _loadedAt = DateTimeOffset.Now;
@@ -30,34 +31,7 @@ public sealed class DefaultCtuController : ICtuController
     }
 
     /// <summary>All tool names exposed by CodexTeamUp.</summary>
-    public static readonly IReadOnlyList<string> KnownToolNames =
-    [
-        "agentbus_init",
-        "agentbus_list_agents",
-        "agentbus_register_agent",
-        "agentbus_create_task",
-        "agentbus_list_tasks",
-        "agentbus_claim_task",
-        "agentbus_write_result",
-        "agentbus_wait_result",
-        "codex_thread_list",
-        "codex_thread_read",
-        "codex_thread_archive",
-        "codex_turn_start",
-        "codex_appserver_adapter_status",
-        "codex_appserver_adapter_reload",
-        "codex_controller_status",
-        "codex_controller_reload",
-        "codex_controller_policy_status",
-        "codex_controller_policy_reload",
-        "bridge_dispatch_task",
-        "bridge_notify_result",
-        "team_create_agent",
-        "team_ensure_agents",
-        "team_discover_agents",
-        "team_send_message",
-        "team_dashboard_export"
-    ];
+    public static readonly IReadOnlyList<string> KnownToolNames = CtuControllerTools.KnownToolNames;
 
     private readonly Dictionary<string, Func<JsonElement, CancellationToken, Task<object>>> _handlers = new(StringComparer.OrdinalIgnoreCase);
 
@@ -94,7 +68,7 @@ public sealed class DefaultCtuController : ICtuController
     }
 
     public CtuControllerRuntimeStatus Status => new(
-        "built-in",
+        "plugin-default",
         GetType().FullName ?? GetType().Name,
         null,
         null,
@@ -163,6 +137,12 @@ public sealed class DefaultCtuController : ICtuController
             return Task.FromResult<object>(new { tasks = bus.ListTasks(Optional(args, "to"), Optional(args, "status")) });
         });
 
+        registry.Register("agentbus_list_events", (args, _) =>
+        {
+            var bus = Bus(args, busRoot);
+            return Task.FromResult<object>(new { events = bus.ListEvents(Int(args, "limit", 500)) });
+        });
+
         registry.Register("agentbus_claim_task", (args, _) =>
         {
             var bus = Bus(args, busRoot);
@@ -191,15 +171,21 @@ public sealed class DefaultCtuController : ICtuController
         {
             var bus = Bus(args, busRoot);
             var taskId = Required(args, "taskId");
-            var timeoutSeconds = Math.Clamp(Int(args, "timeoutSeconds", 300), 1, 1800);
+            var policy = _controllerPolicy.Policy;
+            var timeoutSeconds = WaitTimeoutSeconds(
+                args,
+                "timeoutSeconds",
+                Math.Min(3, policy.WaitResultTimeoutCapSeconds),
+                policy.WaitResultTimeoutCapSeconds);
             var stopwatch = Stopwatch.StartNew();
-            var result = bus.WaitForResult(taskId, TimeSpan.FromSeconds(timeoutSeconds), ct);
+            var result = WaitForResultSafe(bus, taskId, TimeSpan.FromSeconds(timeoutSeconds), ct);
             stopwatch.Stop();
             return Task.FromResult<object>(new
             {
                 taskId,
                 completed = result is not null,
                 result,
+                timeoutSeconds,
                 waitedMs = stopwatch.ElapsedMilliseconds
             });
         });
@@ -276,22 +262,30 @@ public sealed class DefaultCtuController : ICtuController
         registry.Register("bridge_dispatch_task", async (args, ct) =>
         {
             var bus = Bus(args, busRoot);
-            var task = bus.FindTask(Required(args, "taskId")) ?? throw new FileNotFoundException("Task not found.");
-            var agent = await EnsureAgentBoundAsync(bus, appServer, task.To, task.Cwd, ct).ConfigureAwait(false);
-
-            var message = BuildTaskWakeMessage(task.Id, task.To, DefaultArchitectFor(task.To));
-            var wakeup = await SendTurnWhenReadyAsync(appServer, agent.ThreadId!, message, task.Cwd, RuntimeSettings(agent), registry.ControllerWakeupTimeout(), ct).ConfigureAwait(false);
-            bus.RecordEvent(new AgentBusEvent
+            var taskId = Required(args, "taskId");
+            if (Defer(args))
             {
-                Timestamp = DateTimeOffset.Now,
-                Type = wakeup.Deferred ? "task.dispatch_deferred" : wakeup.Result.Succeeded ? "task.dispatched" : "task.dispatch_failed",
-                TaskId = task.Id,
-                From = task.From,
-                To = task.To,
-                Message = WakeupEventMessage(wakeup),
-                Payload = WakeupEventPayload(agent.ThreadId!, wakeup)
-            });
-            return new { wakeup.Result.Succeeded, wakeup.Result.ResultJson, wakeup.Result.Error, wakeup.Deferred, wakeup.InitialStatus, wakeup.FinalStatus };
+                var task = bus.FindTask(taskId) ?? throw new FileNotFoundException("Task not found.");
+                var operationId = NewOperationId("bridge-dispatch-task");
+                bus.RecordEvent(new AgentBusEvent
+                {
+                    Timestamp = DateTimeOffset.Now,
+                    Type = "task.dispatch_accepted",
+                    TaskId = task.Id,
+                    From = task.From,
+                    To = task.To,
+                    Message = $"Accepted deferred dispatch for {task.Id}.",
+                    Payload = new { operationId }
+                });
+                _ = RunDeferredAsync(operationId, "bridge.dispatch_task", async () =>
+                {
+                    await DispatchTaskAsync(bus, appServer, taskId, registry.ControllerWakeupTimeout(), CancellationToken.None).ConfigureAwait(false);
+                });
+
+                return new { accepted = true, deferred = true, operationId, taskId };
+            }
+
+            return await DispatchTaskAsync(bus, appServer, taskId, registry.ControllerWakeupTimeout(), ct).ConfigureAwait(false);
         });
 
         registry.Register("bridge_notify_result", async (args, ct) =>
@@ -464,7 +458,51 @@ public sealed class DefaultCtuController : ICtuController
                 Optional(args, "reasoningEffort") ?? Optional(args, "effort"),
                 Optional(args, "speed"));
 
-            var agent = await EnsureOrCreateAgentAsync(bus, appServer, spec, cwd, createMissing: true, prime: true, registry._controllerPolicy.Policy, ct).ConfigureAwait(false);
+            if (Defer(args))
+            {
+                var operationId = NewOperationId("team-create-agent");
+                var prime = !IsExplicitFalse(args, "prime");
+                var setName = !IsExplicitFalse(args, "setName");
+                bus.RecordEvent(new AgentBusEvent
+                {
+                    Timestamp = DateTimeOffset.Now,
+                    Type = "team.create_agent_accepted",
+                    To = spec.Id,
+                    Message = $"Accepted deferred create/bind for {spec.Id}.",
+                    Payload = new { operationId, spec.Id }
+                });
+                _ = RunDeferredAsync(operationId, "team.create_agent", async () =>
+                {
+                    try
+                    {
+                        var agent = await EnsureOrCreateAgentAsync(bus, appServer, spec, cwd, createMissing: true, prime, setName, registry._controllerPolicy.Policy, CancellationToken.None).ConfigureAwait(false);
+                        bus.RecordEvent(new AgentBusEvent
+                        {
+                            Timestamp = DateTimeOffset.Now,
+                            Type = "team.agent_created_deferred",
+                            To = spec.Id,
+                            Message = $"Deferred create/bind completed for {spec.Id}.",
+                            Payload = new { operationId, agent.Id, agent.ThreadId, agent.DisplayName }
+                        });
+                    }
+                    catch (Exception ex)
+                    {
+                        bus.RecordEvent(new AgentBusEvent
+                        {
+                            Timestamp = DateTimeOffset.Now,
+                            Type = "team.agent_create_failed_deferred",
+                            To = spec.Id,
+                            Message = SafeText.Redact(ex.Message),
+                            Payload = new { operationId, spec.Id }
+                        });
+                        throw;
+                    }
+                });
+
+                return new { accepted = true, deferred = true, operationId, agents = new[] { spec.Id } };
+            }
+
+            var agent = await EnsureOrCreateAgentAsync(bus, appServer, spec, cwd, createMissing: true, prime: true, setName: !IsExplicitFalse(args, "setName"), registry._controllerPolicy.Policy, ct).ConfigureAwait(false);
             return new { agent };
         });
 
@@ -475,16 +513,66 @@ public sealed class DefaultCtuController : ICtuController
             var cwd = Optional(args, "cwd") ?? Environment.CurrentDirectory;
             var createMissing = !string.Equals(Optional(args, "createMissing"), "false", StringComparison.OrdinalIgnoreCase);
             var prime = !string.Equals(Optional(args, "prime"), "false", StringComparison.OrdinalIgnoreCase);
+            var setName = !IsExplicitFalse(args, "setName");
             var specs = ParseTeamAgentSpecs(args).ToList();
             if (specs.Count == 0)
             {
                 throw new ArgumentException("team_ensure_agents requires agentsJson or agents.");
             }
 
+            if (Defer(args))
+            {
+                var operationId = NewOperationId("team-ensure-agents");
+                var requestedAgents = specs.Select(spec => spec.Id).ToArray();
+                bus.RecordEvent(new AgentBusEvent
+                {
+                    Timestamp = DateTimeOffset.Now,
+                    Type = "team.ensure_accepted",
+                    Message = $"Accepted deferred ensure for {requestedAgents.Length} CodexTeamUp agents.",
+                    Payload = new { operationId, agents = requestedAgents }
+                });
+                _ = RunDeferredAsync(operationId, "team.ensure_agents", async () =>
+                {
+                    try
+                    {
+                        var registered = new List<AgentDefinition>();
+                        foreach (var spec in specs)
+                        {
+                            registered.Add(await EnsureOrCreateAgentAsync(bus, appServer, spec, cwd, createMissing, prime, setName, registry._controllerPolicy.Policy, CancellationToken.None).ConfigureAwait(false));
+                        }
+
+                        bus.RecordEvent(new AgentBusEvent
+                        {
+                            Timestamp = DateTimeOffset.Now,
+                            Type = "team.ensured_deferred",
+                            Message = $"Deferred ensure completed for {registered.Count} CodexTeamUp agents.",
+                            Payload = new
+                            {
+                                operationId,
+                                agents = registered.Select(agent => new { agent.Id, agent.ThreadId, agent.DisplayName, agent.Status }).ToArray()
+                            }
+                        });
+                    }
+                    catch (Exception ex)
+                    {
+                        bus.RecordEvent(new AgentBusEvent
+                        {
+                            Timestamp = DateTimeOffset.Now,
+                            Type = "team.ensure_failed_deferred",
+                            Message = SafeText.Redact(ex.Message),
+                            Payload = new { operationId, agents = requestedAgents }
+                        });
+                        throw;
+                    }
+                });
+
+                return new { accepted = true, deferred = true, operationId, agents = requestedAgents };
+            }
+
             var registered = new List<AgentDefinition>();
             foreach (var spec in specs)
             {
-                registered.Add(await EnsureOrCreateAgentAsync(bus, appServer, spec, cwd, createMissing, prime, registry._controllerPolicy.Policy, ct).ConfigureAwait(false));
+                registered.Add(await EnsureOrCreateAgentAsync(bus, appServer, spec, cwd, createMissing, prime, setName, registry._controllerPolicy.Policy, ct).ConfigureAwait(false));
             }
 
             bus.RecordEvent(new AgentBusEvent
@@ -567,9 +655,9 @@ public sealed class DefaultCtuController : ICtuController
             long? waitedMs = null;
             if (Bool(args, "waitResult") && !wakeup.Deferred)
             {
-                var timeoutSeconds = Math.Clamp(Int(args, "timeoutSeconds", policy.WaitResultTimeoutCapSeconds), 1, policy.WaitResultTimeoutCapSeconds);
+                var timeoutSeconds = WaitTimeoutSeconds(args, "timeoutSeconds", policy.WaitResultTimeoutCapSeconds, policy.WaitResultTimeoutCapSeconds);
                 var waitStopwatch = Stopwatch.StartNew();
-                waitedResult = bus.WaitForResult(task.Id, TimeSpan.FromSeconds(timeoutSeconds), ct);
+                waitedResult = WaitForResultSafe(bus, task.Id, TimeSpan.FromSeconds(timeoutSeconds), ct);
                 waitStopwatch.Stop();
                 waitedMs = waitStopwatch.ElapsedMilliseconds;
                 bus.RecordEvent(new AgentBusEvent
@@ -608,7 +696,7 @@ public sealed class DefaultCtuController : ICtuController
         var busRoot = Optional(args, "busRoot");
         if (!string.IsNullOrWhiteSpace(busRoot))
         {
-            return new AgentBusStore(busRoot);
+            return new AgentBusStore(NormalizeBusRoot(busRoot));
         }
 
         var cwd = Optional(args, "cwd");
@@ -618,6 +706,92 @@ public sealed class DefaultCtuController : ICtuController
         }
 
         return new AgentBusStore(defaultBusRoot);
+    }
+
+    private static string NormalizeBusRoot(string busRoot)
+    {
+        var fullPath = Path.GetFullPath(busRoot);
+        var directoryName = Path.GetFileName(fullPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+        if (directoryName.Equals("agentbus", StringComparison.OrdinalIgnoreCase))
+        {
+            return fullPath;
+        }
+
+        if (directoryName.Equals(".codexteamup", StringComparison.OrdinalIgnoreCase))
+        {
+            return Path.Combine(fullPath, "agentbus");
+        }
+
+        if (Directory.Exists(Path.Combine(fullPath, ".codexteamup")))
+        {
+            return DefaultBusRootForCwd(fullPath);
+        }
+
+        return fullPath;
+    }
+
+    private static string NewOperationId(string prefix)
+    {
+        var value = $"{prefix}-{DateTimeOffset.Now:yyyyMMdd-HHmmss}-{Guid.NewGuid():N}";
+        return value[..Math.Min(value.Length, 80)];
+    }
+
+    private bool Defer(JsonElement args)
+    {
+        return Bool(args, "defer")
+            || Bool(args, "ackOnly")
+            || Bool(args, "background");
+    }
+
+    private async Task RunDeferredAsync(string operationId, string operationName, Func<Task> action)
+    {
+        var startedAt = DateTimeOffset.Now;
+        _logger?.Info("controller.deferred.start", new { operationId, operationName });
+        try
+        {
+            await action().ConfigureAwait(false);
+            _logger?.Info("controller.deferred.complete", new
+            {
+                operationId,
+                operationName,
+                elapsedMs = (DateTimeOffset.Now - startedAt).TotalMilliseconds
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger?.Error("controller.deferred.exception", ex, new
+            {
+                operationId,
+                operationName,
+                elapsedMs = (DateTimeOffset.Now - startedAt).TotalMilliseconds
+            });
+        }
+    }
+
+    private static async Task<object> DispatchTaskAsync(
+        AgentBusStore bus,
+        IAppServerClient appServer,
+        string taskId,
+        TimeSpan wakeupTimeout,
+        CancellationToken cancellationToken)
+    {
+        var task = bus.FindTask(taskId) ?? throw new FileNotFoundException("Task not found.");
+        var agent = await EnsureAgentBoundAsync(bus, appServer, task.To, task.Cwd, cancellationToken).ConfigureAwait(false);
+
+        var message = BuildTaskWakeMessage(task.Id, task.To, DefaultArchitectFor(task.To));
+        var wakeup = await SendTurnWhenReadyAsync(appServer, agent.ThreadId!, message, task.Cwd, RuntimeSettings(agent), wakeupTimeout, cancellationToken).ConfigureAwait(false);
+        bus.RecordEvent(new AgentBusEvent
+        {
+            Timestamp = DateTimeOffset.Now,
+            Type = wakeup.Deferred ? "task.dispatch_deferred" : wakeup.Result.Succeeded ? "task.dispatched" : "task.dispatch_failed",
+            TaskId = task.Id,
+            From = task.From,
+            To = task.To,
+            Message = WakeupEventMessage(wakeup),
+            Payload = WakeupEventPayload(agent.ThreadId!, wakeup)
+        });
+
+        return new { wakeup.Result.Succeeded, wakeup.Result.ResultJson, wakeup.Result.Error, wakeup.Deferred, wakeup.InitialStatus, wakeup.FinalStatus };
     }
 
     private static string RoleFromAgentId(string agentId)
@@ -707,6 +881,7 @@ public sealed class DefaultCtuController : ICtuController
         string cwd,
         bool createMissing,
         bool prime,
+        bool setName,
         CtuControllerPolicy policy,
         CancellationToken cancellationToken)
     {
@@ -750,11 +925,6 @@ public sealed class DefaultCtuController : ICtuController
             throw new InvalidOperationException($"Agent {spec.Id} has no visible thread and createMissing=false.");
         }
 
-        if (policy.EnsureThreadNameBeforePrime || created is null || !prime)
-        {
-            await EnsureThreadNameAsync(appServer, threadId, spec.DisplayName, cancellationToken).ConfigureAwait(false);
-        }
-
         var agent = bus.RegisterAgent(new AgentDefinition
         {
             Id = spec.Id,
@@ -779,16 +949,50 @@ public sealed class DefaultCtuController : ICtuController
             Message = created is null ? "Visible thread bound." : "Visible thread created."
         });
 
+        if (setName && (policy.EnsureThreadNameBeforePrime || created is null || !prime))
+        {
+            try
+            {
+                await EnsureThreadNameAsync(appServer, threadId, spec.DisplayName, cancellationToken).ConfigureAwait(false);
+                bus.RecordEvent(new AgentBusEvent
+                {
+                    Timestamp = DateTimeOffset.Now,
+                    Type = "agent.named",
+                    To = spec.Id,
+                    Message = $"Visible thread name set to {spec.DisplayName}."
+                });
+            }
+            catch (Exception ex)
+            {
+                bus.RecordEvent(new AgentBusEvent
+                {
+                    Timestamp = DateTimeOffset.Now,
+                    Type = "agent.name_failed",
+                    To = spec.Id,
+                    Message = SafeText.Redact(ex.Message)
+                });
+            }
+        }
+
         if (prime)
         {
             var prompt = BuildAgentPrimePrompt(agent, spec.InitialPrompt, policy.PrimePromptStartsWithAgentId);
-            var wake = await appServer.SendTurnAsync(threadId, prompt, cwd, RuntimeSettings(agent), cancellationToken).ConfigureAwait(false);
+            var wakeup = await SendTurnWhenReadyAsync(
+                appServer,
+                threadId,
+                prompt,
+                cwd,
+                RuntimeSettings(agent),
+                TimeSpan.FromSeconds(policy.WakeupTimeoutSeconds),
+                cancellationToken).ConfigureAwait(false);
+            var wake = wakeup.Result;
             bus.RecordEvent(new AgentBusEvent
             {
                 Timestamp = DateTimeOffset.Now,
-                Type = "agent.primed",
+                Type = wakeup.Deferred ? "agent.prime_deferred" : "agent.primed",
                 To = spec.Id,
-                Message = wake.Succeeded ? "Initial prompt sent." : wake.Error
+                Message = wake.Succeeded ? "Initial prompt sent." : WakeupEventMessage(wakeup),
+                Payload = WakeupEventPayload(threadId, wakeup)
             });
         }
 
@@ -889,7 +1093,7 @@ public sealed class DefaultCtuController : ICtuController
 
     private static string BuildTaskWakeMessage(string taskId, string agentId, string returnTo)
     {
-        return $"""
+        var body = $"""
         New CodexTeamUp message/task for {agentId}: {taskId}.
 
         Please read exactly this task file:
@@ -906,6 +1110,7 @@ public sealed class DefaultCtuController : ICtuController
 
         If the task file is missing or not addressed to {agentId}: do not create a replacement task, do not reconstruct a task from chat text, and do not write a result. Reply only briefly in chat with the diagnosis.
         """;
+        return $"{agentId}\n\n{body}";
     }
 
     private static string? TryExtractThreadId(string json)
@@ -1238,6 +1443,9 @@ public sealed class DefaultCtuController : ICtuController
         TimeSpan sendTimeout,
         CancellationToken cancellationToken)
     {
+        await DesktopWakeupGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
         var stopwatch = Stopwatch.StartNew();
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(sendTimeout);
@@ -1299,6 +1507,11 @@ public sealed class DefaultCtuController : ICtuController
                 waitedMs,
                 stopwatch.ElapsedMilliseconds);
         }
+        }
+        finally
+        {
+            DesktopWakeupGate.Release();
+        }
     }
 
     private TimeSpan ControllerWakeupTimeout()
@@ -1310,6 +1523,72 @@ public sealed class DefaultCtuController : ICtuController
     {
         var defaultSeconds = _controllerPolicy.Policy.WakeupTimeoutSeconds;
         return TimeSpan.FromSeconds(Math.Clamp(Int(args, "wakeupTimeoutSeconds", defaultSeconds), 1, 10));
+    }
+
+    private static AgentBusResult? WaitForResultSafe(AgentBusStore bus, string taskId, TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        bus.Initialize();
+        var stopwatch = Stopwatch.StartNew();
+        while (stopwatch.Elapsed < timeout)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var existing = FindResultByTaskIdSafe(bus, taskId);
+            if (existing is not null)
+            {
+                return existing;
+            }
+
+            var remaining = timeout - stopwatch.Elapsed;
+            if (remaining <= TimeSpan.Zero)
+            {
+                break;
+            }
+
+            var delay = remaining < TimeSpan.FromMilliseconds(200)
+                ? remaining
+                : TimeSpan.FromMilliseconds(200);
+            if (delay <= TimeSpan.Zero)
+            {
+                break;
+            }
+
+            Task.Delay(delay, cancellationToken).GetAwaiter().GetResult();
+        }
+
+        return FindResultByTaskIdSafe(bus, taskId);
+    }
+
+    private static AgentBusResult? FindResultByTaskIdSafe(AgentBusStore bus, string taskId)
+    {
+        if (!Directory.Exists(bus.ResultsDirectory))
+        {
+            return null;
+        }
+
+        foreach (var path in Directory.EnumerateFiles(bus.ResultsDirectory, "*.json"))
+        {
+            try
+            {
+                var result = JsonFile.Read<AgentBusResult>(path);
+                if (result is not null && result.TaskId == taskId)
+                {
+                    return result;
+                }
+            }
+            catch
+            {
+                // Result files can be observed mid-write; polling will retry on the next pass.
+            }
+        }
+
+        return null;
+    }
+
+    private static int WaitTimeoutSeconds(JsonElement args, string name, int defaultSeconds, int capSeconds)
+    {
+        var cap = Math.Max(1, capSeconds);
+        var value = Int(args, name, defaultSeconds);
+        return Math.Clamp(value, 1, cap);
     }
 
     private static bool IsBusyThreadStatus(string? status)
@@ -1381,6 +1660,11 @@ public sealed class DefaultCtuController : ICtuController
         var settings = RuntimeSettings(agent.Model, agent.ReasoningEffort, agent.Speed, existing);
         return agent with
         {
+            ThreadId = BlankToNull(agent.ThreadId) ?? existing?.ThreadId,
+            Cwd = BlankToNull(agent.Cwd) ?? existing?.Cwd,
+            AllowedPaths = agent.AllowedPaths.Count > 0 ? agent.AllowedPaths : existing?.AllowedPaths ?? [],
+            InstructionFiles = agent.InstructionFiles.Count > 0 ? agent.InstructionFiles : existing?.InstructionFiles ?? [],
+            ReturnTo = BlankToNull(agent.ReturnTo) ?? existing?.ReturnTo,
             Model = settings?.Model,
             ReasoningEffort = settings?.ReasoningEffort,
             Speed = NormalizeSpeed(agent.Speed) ?? NormalizeSpeed(existing?.Speed) ?? DefaultSpeed
@@ -1469,6 +1753,18 @@ public sealed class DefaultCtuController : ICtuController
         return args.ValueKind == JsonValueKind.Object
             && args.TryGetProperty(name, out var value)
             && value.ValueKind == JsonValueKind.True;
+    }
+
+    private static bool IsExplicitFalse(JsonElement args, string name)
+    {
+        if (args.ValueKind != JsonValueKind.Object || !args.TryGetProperty(name, out var value))
+        {
+            return false;
+        }
+
+        return value.ValueKind == JsonValueKind.False
+            || (value.ValueKind == JsonValueKind.String
+                && string.Equals(value.GetString(), "false", StringComparison.OrdinalIgnoreCase));
     }
 
     private static int Int(JsonElement args, string name, int defaultValue)

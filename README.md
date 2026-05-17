@@ -16,6 +16,18 @@ I am also aware that other agent frameworks and orchestration tools may already 
 
 This is not a tool for the sake of having another tool. I built it to make my own work easier, and I hope it can do the same for others who like working with Codex Desktop. I had a lot of fun building the current PoC from May 14 to May 15, 2026, and I am now even more curious what other tools and projects I can build with this kind of visible local AI team.
 
+## What's New
+
+Recent architecture work tightens the runtime around the parts that are most likely to change while Codex Desktop itself keeps evolving:
+
+- CTU now separates the fixed API adapter layer from a reloadable controller layer. MCP and HTTP endpoints stay thin; agent/thread workflow, timing, naming, retry, and dispatch policy live in the controller runtime.
+- The default controller is loaded as a plugin DLL through the same reload path as replacement controllers. There is no hidden hardcoded workflow fallback when the controller is missing.
+- Controller runtime files live under `.ctu/runtime`, separate from normal source build output, so local build/test runs are not coupled to the running CTU process.
+- Controller-only fixes can be published and reloaded without restarting CTU, using the controller runtime publish script and the controller reload MCP/HTTP endpoint.
+- CTU now writes both machine JSONL logs and human-readable `.log` files for controller, app-server/API adapter, and wrapper diagnostics under `.codexteamup/logs`.
+- Live smoke tests exercise the real Codex Desktop context: creating a visible agent, having one agent create peer agents, and replacing a stale agent binding.
+- Desktop wakeups are treated as best-effort delivery. AgentBus remains the durable truth, calls use short ACK/NACK behavior, and controller wakeups are serialized to avoid bursty Desktop app-server cancellations.
+
 ## Visual Walkthrough
 
 The screenshots below show the [Hello World Team Sample](samples/hello-world/README.md). The sample is intentionally tiny: one architect agent creates a small visible team, asks a designer for direction, delegates implementation to a developer, reviews the result, and leaves an AgentBus trace that can be inspected in the dashboard.
@@ -235,6 +247,7 @@ samples/
 ## Documentation Map
 
 - [CONTRIBUTING.md](CONTRIBUTING.md): controlled contribution and feedback flow
+- [CHANGELOG.md](CHANGELOG.md): notable changes, architecture redesign notes, and verification history
 - [SECURITY.md](SECURITY.md): security reporting and sensitive-data guidance
 - [docs/interested-user-onboarding.md](docs/interested-user-onboarding.md): clone-first onboarding for interested users and their local Codex agent
 - [docs/architecture.md](docs/architecture.md): system architecture, startup flow, and task/result lifecycle

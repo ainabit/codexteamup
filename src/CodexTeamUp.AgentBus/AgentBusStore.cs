@@ -316,7 +316,18 @@ public sealed class AgentBusStore
             }
 
             var remaining = deadline - DateTimeOffset.UtcNow;
-            signal.Wait(remaining < TimeSpan.FromSeconds(1) ? remaining : TimeSpan.FromSeconds(1), cancellationToken);
+            if (remaining <= TimeSpan.Zero)
+            {
+                break;
+            }
+
+            var waitFor = remaining < TimeSpan.FromSeconds(1) ? remaining : TimeSpan.FromSeconds(1);
+            if (waitFor <= TimeSpan.Zero)
+            {
+                break;
+            }
+
+            signal.Wait(waitFor, cancellationToken);
             signal.Reset();
         }
 

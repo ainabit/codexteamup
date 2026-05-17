@@ -25,6 +25,17 @@ The pipe accepts one JSON line:
 
 The wrapper assigns an internal request id with prefix `ctu:` and forwards the request to the real app-server. Responses with this id are intercepted and returned to the pipe client, not to Desktop.
 
+## Bridge Selection
+
+Codex Desktop may start multiple wrapped `app-server` processes. CTU exposes the named-pipe bridge only from the Desktop app-server invocation by default. Helper invocations, for example `app-server --listen stdio://` processes started under tool runtimes, remain transparent proxies and do not open the shared CTU pipe.
+
+Set `CODEX_WRAPPER_BRIDGE_MODE=all` before launching Desktop only when diagnosing the old behavior where every wrapper instance opens the bridge pipe. Set `CODEX_WRAPPER_BRIDGE_MODE=none` to disable bridge exposure.
+
+Wrapper diagnostics are written beside the other CTU logs under `.codexteamup/logs`:
+
+- `wrapper-YYYYMMDD.jsonl`
+- `wrapper-YYYYMMDD.log`
+
 ## Special Method
 
 ```json

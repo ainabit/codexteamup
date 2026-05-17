@@ -111,16 +111,24 @@ Keep CTU split into two runtime layers:
 
 Do not put volatile Desktop timing and orchestration policy into the fixed API adapter layer. Prefer controller policy/script/plugin changes that can be reloaded without killing the CTU service.
 
+The normal controller implementation is a loaded controller plugin DLL, not hardcoded service logic. The default controller may be shipped as `CodexTeamUp.Controller.Default.dll` and loaded automatically when no replacement is configured. If no controller plugin is loaded, CTU must report an explicit unloaded/error state and keep only reload/status controls available; it must not silently fall back to a non-hot-swappable built-in workflow controller.
+
+Controller runtime files live under `.ctu/runtime/controllers/default` by default. Build and test outputs must stay isolated from the running CTU runtime; do not run the service from `src/**/bin` or depend on `src/**/obj`. `scripts/start-codexteamup.ps1` remains the KISS user entrypoint and must publish or refresh the runtime as needed. For fast controller-only development, publish the controller DLL into the runtime directory and call `codex_controller_reload` without restarting CTU. If an active controller DLL is locked, the publish script may place a versioned runtime under `.ctu/runtime/controllers/default/releases/...` and update `current-plugin.txt`; reload that published plugin path instead of killing CTU.
+
 The service writes project-local JSONL and human `.log` files under `.codexteamup/logs` by default:
 
 - `api-adapter-YYYYMMDD.jsonl` for hard app-server/API adapter calls and failures.
 - `api-adapter-YYYYMMDD.log` for human-readable hard app-server/API adapter diagnostics.
 - `controller-YYYYMMDD.jsonl` for MCP/controller tool calls, policy reloads, and orchestration failures.
 - `controller-YYYYMMDD.log` for human-readable controller diagnostics.
+- `wrapper-YYYYMMDD.jsonl` for Codex CLI wrapper invocations, parent/bridge decisions, and pipe diagnostics.
+- `wrapper-YYYYMMDD.log` for human-readable wrapper diagnostics.
 
 Logging is diagnostic only. Logging failures must never break CTU. Logs must redact obvious secrets and avoid dumping full prompts when a short preview, task id, result id, thread id, or error message is enough.
 
-Visible Codex Desktop threads should be named with their agent id/display name. Always call the thread naming path before the first prime turn when a thread is created or rebound. The first line of the prime prompt should also be the exact agent id as a fallback for Desktop title generation.
+Codex Desktop may start multiple wrapped `app-server` processes. Only the visible Desktop app-server should expose the CTU bridge pipe by default; otherwise CTU can connect to a non-visible helper app-server and wakeups become nondeterministic. Use `CODEX_WRAPPER_BRIDGE_MODE=all` only for explicit diagnostics when every wrapper instance should expose the bridge pipe.
+
+Visible Codex Desktop threads should be named with their agent id/display name. Normal controller policy should pass the display name at thread creation and call the explicit thread naming path before the first prime turn when a thread is created or rebound. For short ACK/NACK live smoke paths, the controller may use `prime=false setName=false` to avoid fragile Desktop rename or prime calls before the AgentBus registration is usable; those paths must still pass the intended display name into thread creation and include the exact agent id in the first dispatched task or prime fallback. The first line of every prime prompt should also be the exact agent id as a fallback for Desktop title generation.
 
 `docs/ctu-runtime-architecture.md` is the binding architecture reference. Read it before changing CTU runtime, MCP, app-server adapter, controller, AgentBus, logging, or orchestration code. New runtime changes must preserve its layer split: MCP and app-server adapters stay thin; workflow lives in the hot-reloadable controller runtime; AgentBus remains durable truth.
 
@@ -134,6 +142,7 @@ Use a short ACK/NACK pattern:
 - a call should acknowledge that a task/message was accepted, deferred, or failed to enqueue;
 - long work must continue asynchronously through AgentBus task/result files;
 - prefer queue-first communication: create AgentBus tasks first, then dispatch/wake threads as a separate best-effort step;
+- do not fan out Desktop `turn/start` calls in parallel; the controller should serialize wakeups or otherwise throttle them because the Desktop app-server can cancel otherwise valid calls under bursty load;
 - callers that need completion should poll or call `agentbus_wait_result` in short chunks instead of holding one long tool call;
 - `team_send_message` defaults to enqueue-only. Use `bridge_dispatch_task` to wake the target thread, or `dispatchMode=inline` only for narrow compatibility/debug cases;
 - `team_send_message` with `waitResult=true` is only for quick acknowledgements or very short answers and should not be used as a cross-agent RPC primitive. Longer work should use asynchronous enqueue, explicit dispatch, and result polling.
@@ -179,6 +188,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\test-codexteamup.ps1 -UseTest
 ```
 
 Use `-UseTestWorkspace -LiveAll` before merging broad orchestration or wrapper changes. The default test workspace is the sibling directory `codexteamup.test`. Live smoke agents use the `ctu-test/<run-id>/...` prefix and should be cleaned up by the runner unless manual inspection is needed.
+
+Controller-style live smoke tests may assume the test workspace has one manually created initial controller chat named `ctu-test/architect`. That controller is the in-Desktop starting point for run-scoped worker creation and coordination inside `codexteamup.test`; the runner should bind that existing chat and enqueue one controller task instead of inventing a new controlling role.
 
 After changing CTU service, wrapper, or MCP tool registration code, restart Codex Desktop through `scripts/start-codexteamup.ps1` before live smoke tests. Otherwise the running service may not expose the new tool surface.
 
