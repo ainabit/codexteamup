@@ -35,6 +35,8 @@ public static class McpToolMetadata
             "team_discover_agents" => "Discover visible Desktop threads by team names and bind them as project agents.",
             "team_send_message" => "Create a project AgentBus message/task. Defaults to enqueue-only; use bridge_dispatch_task for wakeup.",
             "team_dashboard_export" => "Export a local HTML dashboard for project communication.",
+            "ctu_restart_request" => "Request a persistent cross-checkout CTU restart with durable state and continuation intent.",
+            "ctu_restart_status" => "Read the durable restart operation state by operation id or record path.",
             _ => "CodexTeamUp tool."
         };
     }
@@ -80,6 +82,8 @@ public static class McpToolMetadata
             "team_create_agent" or
             "team_ensure_agents" or
             "team_send_message" or
+            "ctu_restart_request" or
+            "ctu_restart_status" or
             "team_dashboard_export" => new
             {
                 readOnlyHint = false,
@@ -292,6 +296,24 @@ public static class McpToolMetadata
             "team_dashboard_export" => WithBusContext(new Dictionary<string, object>
             {
                 ["outputPath"] = StringSchema()
+            }),
+            "ctu_restart_request" => WithBusContext(new Dictionary<string, object>
+            {
+                ["targetCwd"] = StringSchema(),
+                ["targetBusRoot"] = StringSchema(),
+                ["sourceCwd"] = StringSchema(),
+                ["targetAgentId"] = StringSchema(),
+                ["requestedByAgentId"] = StringSchema(),
+                ["fallbackCwd"] = StringSchema(),
+                ["fallbackBusRoot"] = StringSchema(),
+                ["continueTitle"] = StringSchema(),
+                ["continuePrompt"] = StringSchema(),
+                ["expectedTargetBranch"] = StringSchema()
+            }),
+            "ctu_restart_status" => WithBusContext(new Dictionary<string, object>
+            {
+                ["operationPath"] = StringSchema(),
+                ["operationId"] = StringSchema()
             }),
             _ => new Dictionary<string, object>()
         };

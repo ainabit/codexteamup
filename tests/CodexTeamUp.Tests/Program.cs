@@ -75,7 +75,10 @@ var tests = new (string Name, Func<Task> Body)[]
     ("Agent thread matcher binds named team threads", () => Task.Run(AgentThreadMatcherBindsNamedTeamThreads)),
     ("Agent thread matcher binds exact preview names", () => Task.Run(AgentThreadMatcherBindsExactPreviewNames)),
     ("AgentBus dashboard creates snapshot", () => Task.Run(AgentBusDashboardCreatesSnapshot)),
-    ("AgentBus dashboard renders communication", () => Task.Run(AgentBusDashboardRendersCommunication))
+    ("AgentBus dashboard renders communication", () => Task.Run(AgentBusDashboardRendersCommunication)),
+    ("Restart orchestration record lifecycle", () => Task.Run(RestartOperationLifecycleAndPersistence)),
+    ("Restart orchestration validation rejects missing target", () => Task.Run(RestartOperationRejectsInvalidTargetCwd)),
+    ("Restart operation status updates are idempotent", () => Task.Run(RestartOperationStatusUpdateIsIdempotent))
 };
 
 var failed = 0;
@@ -1882,6 +1885,179 @@ static void AgentBusDashboardCreatesSnapshot()
     True(snapshot.Tasks.Single().Title.Contains("Build editor", StringComparison.Ordinal));
     True(snapshot.Results.Single().Summary.Contains("Implemented", StringComparison.Ordinal));
     True(snapshot.Events.Count > 0);
+}
+
+static void RestartOperationLifecycleAndPersistence()
+{
+    var root = NewTestDirectory();
+    var sourceCwd = Path.Combine(root, "source-checkout");
+    var targetCwd = Path.Combine(root, "target-checkout");
+    var fallbackCwd = Path.Combine(root, "fallback-checkout");
+    SeedRestartCheckout(sourceCwd);
+    SeedRestartCheckout(targetCwd);
+    SeedRestartCheckout(fallbackCwd);
+
+    var store = new RestartOperationStore(Path.Combine(root, ".codexteamup", "agentbus"));
+    var op = store.Create(
+        requestedByAgentId: "ctu/architect",
+        sourceCwd: sourceCwd,
+        sourceBusRoot: Path.Combine(sourceCwd, ".codexteamup", "agentbus"),
+        targetCwd: targetCwd,
+        targetBusRoot: Path.Combine(targetCwd, ".codexteamup", "agentbus"),
+        targetAgentId: "ctu/architect",
+        fallbackCwd: fallbackCwd,
+        fallbackBusRoot: Path.Combine(fallbackCwd, ".codexteamup", "agentbus"),
+        continueTitle: "Continue after restart",
+        continuePrompt: "Validate restart handoff.",
+        expectedTargetBranch: null);
+
+    Equal(RestartOperationStatus.Prepared, op.Status);
+    True(!string.IsNullOrWhiteSpace(op.Id));
+    var path = store.OperationPath(op.Id);
+    True(File.Exists(path));
+    var read = store.Find(op.Id);
+    Equal(op.Id, read?.Id);
+    Equal(op.Status, read?.Status);
+    Equal("ctu.desktop-restart", read?.Kind);
+    Equal(sourceCwd, read?.SourceCwd);
+    Equal(targetCwd, read?.TargetCwd);
+    Equal("ctu/architect", read?.TargetAgentId);
+    Equal("Continue after restart", read?.ContinueTitle);
+    Equal(fallbackCwd, read?.FallbackCwd);
+
+    Equal(RestartOperationStatus.HelperStarted, store.UpdateStatus(op.Id, RestartOperationStatus.HelperStarted, helperPid: "555").Status);
+    Equal(RestartOperationStatus.StoppingSource, store.UpdateStatus(op.Id, RestartOperationStatus.StoppingSource).Status);
+    Equal(RestartOperationStatus.StartingTarget, store.UpdateStatus(op.Id, RestartOperationStatus.StartingTarget).Status);
+    Equal(RestartOperationStatus.TargetHealthy, store.UpdateStatus(op.Id, RestartOperationStatus.TargetHealthy).Status);
+    Equal(RestartOperationStatus.ContinuationEnqueued, store.UpdateStatus(op.Id, RestartOperationStatus.ContinuationEnqueued).Status);
+    Equal(RestartOperationStatus.ContinuationDispatched, store.UpdateStatus(op.Id, RestartOperationStatus.ContinuationDispatched).Status);
+
+    var completed = store.UpdateStatus(op.Id, RestartOperationStatus.Completed);
+    Equal(RestartOperationStatus.Completed, completed.Status);
+    True(completed.CompletedAt is not null);
+}
+
+static void RestartOperationRejectsInvalidTargetCwd()
+{
+    var root = NewTestDirectory();
+    var store = new RestartOperationStore(Path.Combine(root, ".codexteamup", "agentbus"));
+    var sourceCwd = Path.Combine(root, "source");
+    SeedRestartCheckout(sourceCwd);
+
+    try
+    {
+        _ = store.Create(
+            "ctu/architect",
+            sourceCwd,
+            Path.Combine(sourceCwd, ".codexteamup", "agentbus"),
+            Path.Combine(root, "missing-target"),
+            Path.Combine(root, "missing-target", ".codexteamup", "agentbus"),
+            "ctu/architect",
+            null,
+            null,
+            "Continue after restart",
+            "Continue from next agent.",
+            null);
+        throw new InvalidOperationException("Expected missing target checkout failure.");
+    }
+    catch (DirectoryNotFoundException)
+    {
+        // expected.
+    }
+
+    var sameCwd = Path.Combine(root, "same");
+    Directory.CreateDirectory(sameCwd);
+    try
+    {
+        _ = store.Create(
+            "ctu/architect",
+            sameCwd,
+            Path.Combine(sameCwd, ".codexteamup", "agentbus"),
+            sameCwd,
+            Path.Combine(sameCwd, ".codexteamup", "agentbus"),
+            "ctu/architect",
+            null,
+            null,
+            "Continue after restart",
+            "Continue from same path.",
+            null);
+        throw new InvalidOperationException("Expected same-checkout failure.");
+    }
+    catch (InvalidOperationException)
+    {
+        // expected.
+    }
+}
+
+static void RestartOperationStatusUpdateIsIdempotent()
+{
+    var root = NewTestDirectory();
+    var sourceCwd = Path.Combine(root, "source");
+    var targetCwd = Path.Combine(root, "target");
+    SeedRestartCheckout(sourceCwd);
+    SeedRestartCheckout(targetCwd);
+    var store = new RestartOperationStore(Path.Combine(root, ".codexteamup", "agentbus"));
+
+    var op = store.Create(
+        "ctu/architect",
+        sourceCwd,
+        Path.Combine(sourceCwd, ".codexteamup", "agentbus"),
+        targetCwd,
+        Path.Combine(targetCwd, ".codexteamup", "agentbus"),
+        "ctu/architect",
+        null,
+        null,
+        "Continue after restart",
+        "Continue from prior work.",
+        null);
+
+    var first = store.UpdateStatus(op.Id, RestartOperationStatus.HelperStarted, helperPid: "111");
+    var second = store.UpdateStatus(op.Id, RestartOperationStatus.HelperStarted);
+    Equal(first.Id, second.Id);
+    Equal(RestartOperationStatus.HelperStarted, second.Status);
+    Equal(first.CompletedAt, second.CompletedAt);
+    Equal("111", second.HelperPid);
+
+    var stopping = store.UpdateStatus(op.Id, RestartOperationStatus.StoppingSource);
+    Equal(RestartOperationStatus.StoppingSource, stopping.Status);
+    var rollback = store.UpdateStatus(op.Id, RestartOperationStatus.RollbackStarting);
+    Equal(RestartOperationStatus.RollbackStarting, rollback.Status);
+    var rolledBack = store.UpdateStatus(op.Id, RestartOperationStatus.RolledBack);
+    Equal(RestartOperationStatus.RolledBack, rolledBack.Status);
+    True(rolledBack.CompletedAt >= rolledBack.RequestedAt);
+    var replay = store.UpdateStatus(op.Id, RestartOperationStatus.RolledBack);
+    Equal(rolledBack.CompletedAt, replay.CompletedAt);
+
+    var completed = store.Create(
+        "ctu/architect",
+        sourceCwd,
+        Path.Combine(sourceCwd, ".codexteamup", "agentbus"),
+        targetCwd,
+        Path.Combine(targetCwd, ".codexteamup", "agentbus"),
+        "ctu/architect",
+        null,
+        null,
+        "Continue after restart",
+        "Continue second scenario.",
+        null);
+
+    completed = store.UpdateStatus(completed.Id, RestartOperationStatus.HelperStarted);
+    completed = store.UpdateStatus(completed.Id, RestartOperationStatus.StoppingSource);
+    completed = store.UpdateStatus(completed.Id, RestartOperationStatus.StartingTarget);
+    completed = store.UpdateStatus(completed.Id, RestartOperationStatus.TargetHealthy);
+    completed = store.UpdateStatus(completed.Id, RestartOperationStatus.ContinuationEnqueued);
+    var completedViaTerminal = store.UpdateStatus(completed.Id, RestartOperationStatus.Completed);
+    Equal(RestartOperationStatus.Completed, completedViaTerminal.Status);
+    var terminalReplay = store.UpdateStatus(completed.Id, RestartOperationStatus.Completed);
+    Equal(completedViaTerminal.CompletedAt, terminalReplay.CompletedAt);
+}
+
+static void SeedRestartCheckout(string checkout)
+{
+    Directory.CreateDirectory(Path.Combine(checkout, "scripts"));
+    File.WriteAllText(
+        Path.Combine(checkout, "scripts", "start-codexteamup.ps1"),
+        @"# synthetic startup script for deterministic tests");
 }
 
 static string NewTestDirectory()

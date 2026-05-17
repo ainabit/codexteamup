@@ -35,11 +35,12 @@ internal static class Cli
                 "turns" => await RunTurnsAsync(args).ConfigureAwait(false),
                 "bus" => RunBus(args),
                 "dispatch" => await RunDispatchAsync(args).ConfigureAwait(false),
-                "notify" => await RunNotifyAsync(args).ConfigureAwait(false),
-                "delegate" => await RunDelegateAsync(args).ConfigureAwait(false),
-                "dashboard" => RunDashboard(args),
-                _ => UsageError($"Unknown command: {args.Positionals[0]}")
-            };
+            "notify" => await RunNotifyAsync(args).ConfigureAwait(false),
+            "delegate" => await RunDelegateAsync(args).ConfigureAwait(false),
+            "dashboard" => RunDashboard(args),
+            "restart" => await RunRestartAsync(args).ConfigureAwait(false),
+            _ => UsageError($"Unknown command: {args.Positionals[0]}")
+        };
         }
         catch (Exception ex)
         {
@@ -492,6 +493,233 @@ internal static class Cli
         return 0;
     }
 
+    private static async Task<int> RunRestartAsync(Args args)
+    {
+        var sub = args.PositionalAt(1);
+        return sub switch
+        {
+            "execute" => await RunRestartExecuteAsync(args).ConfigureAwait(false),
+            _ => UsageError("Expected: ctu restart execute --operation-path <path>")
+        };
+    }
+
+    private static async Task<int> RunRestartExecuteAsync(Args args)
+    {
+        var operationPath = args.Require("operation-path");
+        var fullPath = Path.GetFullPath(operationPath);
+        var preview = JsonFile.Read<RestartOperationRecord>(fullPath)
+            ?? throw new FileNotFoundException($"Restart operation not found: {fullPath}");
+        var operationStore = new RestartOperationStore(preview.SourceBusRoot);
+        var operation = operationStore.FindByPath(fullPath)
+            ?? throw new FileNotFoundException($"Restart operation not tracked: {preview.Id}");
+        var refreshed = operationStore.Find(operation.Id) ?? throw new FileNotFoundException($"Restart operation not tracked: {operation.Id}");
+
+        try
+        {
+            operation = operationStore.UpdateStatus(refreshed, RestartOperationStatus.HelperStarted, helperPid: Environment.ProcessId.ToString());
+            operationStore.Write(operation);
+
+            return await RunRestartFlowAsync(operationStore, operation).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            operation = operationStore.UpdateStatus(refreshed, RestartOperationStatus.Failed, lastError: SafeText.Redact(ex.Message));
+            operationStore.Write(operation);
+            Console.Error.WriteLine($"restart execute failed: {SafeText.Redact(ex.Message)}");
+            return 1;
+        }
+    }
+
+    private static async Task<int> RunRestartFlowAsync(RestartOperationStore operationStore, RestartOperationRecord operation)
+    {
+        var processRunner = new ProcessRunner();
+        var runningOperation = operation;
+
+        try
+        {
+            runningOperation = operationStore.UpdateStatus(runningOperation, RestartOperationStatus.StoppingSource);
+            operationStore.Write(runningOperation);
+            runningOperation = operationStore.UpdateStatus(runningOperation, RestartOperationStatus.StartingTarget);
+            operationStore.Write(runningOperation);
+
+            var startupResult = await processRunner.RunAsync(
+                "pwsh",
+                $"-ExecutionPolicy Bypass -File \"{Path.Combine(runningOperation.TargetCwd, "scripts", "start-codexteamup.ps1")}\" -ForceStopExisting",
+                runningOperation.TargetCwd,
+                timeout: TimeSpan.FromMinutes(5)).ConfigureAwait(false);
+
+            if (!startupResult.Succeeded)
+            {
+                throw new InvalidOperationException($"start-codexteamup.ps1 failed for {runningOperation.TargetCwd}: {SafeText.Preview(startupResult.StandardError, 250)}");
+            }
+
+            var healthy = await PollTargetServiceAsync(runningOperation.TargetBusRoot).ConfigureAwait(false);
+            if (!healthy)
+            {
+                throw new InvalidOperationException($"Target service did not become healthy within timeout for {runningOperation.TargetCwd}.");
+            }
+
+            runningOperation = operationStore.UpdateStatus(runningOperation, RestartOperationStatus.TargetHealthy);
+            operationStore.Write(runningOperation);
+
+            var created = await CreateContinuationTaskAsync(runningOperation).ConfigureAwait(false);
+            runningOperation = operationStore.UpdateStatus(
+                runningOperation,
+                created.dispatched
+                    ? RestartOperationStatus.ContinuationDispatched
+                    : RestartOperationStatus.ContinuationEnqueued,
+                continuationTaskId: created.taskId);
+            operationStore.Write(runningOperation);
+
+            if (created.dispatched)
+            {
+                runningOperation = operationStore.UpdateStatus(runningOperation, RestartOperationStatus.Completed);
+                operationStore.Write(runningOperation);
+                return 0;
+            }
+
+            throw new InvalidOperationException("Continuation task was enqueued but dispatch failed.");
+        }
+        catch (Exception ex)
+        {
+            var fallbackCwd = runningOperation.FallbackCwd;
+
+            if (!string.IsNullOrWhiteSpace(fallbackCwd))
+            {
+                runningOperation = operationStore.UpdateStatus(runningOperation, RestartOperationStatus.RollbackStarting, lastError: SafeText.Redact(ex.Message));
+                operationStore.Write(runningOperation);
+
+                var fallbackScriptPath = Path.Combine(fallbackCwd, "scripts", "start-codexteamup.ps1");
+                var fallbackResult = await processRunner.RunAsync(
+                    "pwsh",
+                    $"-ExecutionPolicy Bypass -File \"{fallbackScriptPath}\" -ForceStopExisting",
+                    fallbackCwd,
+                    timeout: TimeSpan.FromMinutes(5)).ConfigureAwait(false);
+
+                if (!fallbackResult.Succeeded)
+                {
+                    runningOperation = operationStore.UpdateStatus(
+                        runningOperation,
+                        RestartOperationStatus.Failed,
+                        lastError: SafeText.Preview(fallbackResult.StandardError, 250));
+                    operationStore.Write(runningOperation);
+                    return 1;
+                }
+
+                runningOperation = operationStore.UpdateStatus(runningOperation, RestartOperationStatus.RolledBack);
+                operationStore.Write(runningOperation);
+                return 1;
+            }
+
+            runningOperation = operationStore.UpdateStatus(runningOperation, RestartOperationStatus.Failed, lastError: SafeText.Redact(ex.Message));
+            operationStore.Write(runningOperation);
+            Console.Error.WriteLine(SafeText.Redact(ex.Message));
+            return 1;
+        }
+    }
+
+    private static async Task<bool> PollTargetServiceAsync(string expectedBusRoot, int timeoutSeconds = 120, int intervalSeconds = 2)
+    {
+        var normalizedExpectedBusRoot = NormalizeBusRootForComparison(expectedBusRoot);
+        using var client = new HttpClient();
+        var deadline = DateTimeOffset.UtcNow.AddSeconds(timeoutSeconds);
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            await Task.Delay(TimeSpan.FromSeconds(intervalSeconds), CancellationToken.None).ConfigureAwait(false);
+            if (await IsTargetBusRootHealthyAsync(client, normalizedExpectedBusRoot).ConfigureAwait(false))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static async Task<bool> IsTargetBusRootHealthyAsync(HttpClient client, string expectedBusRoot)
+    {
+        try
+        {
+            using var response = await client.GetAsync("http://127.0.0.1:47319/health").ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode)
+            {
+                return false;
+            }
+
+            var raw = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+            using var doc = JsonDocument.Parse(raw);
+            if (!doc.RootElement.TryGetProperty("status", out var statusElement)
+                || !string.Equals(statusElement.GetString(), "ok", StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            var busRoot = doc.RootElement.TryGetProperty("defaultBusRoot", out var busRootElement)
+                ? busRootElement.GetString()
+                : null;
+            return string.Equals(NormalizeBusRootForComparison(busRoot), expectedBusRoot, StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static string NormalizeBusRootForComparison(string? busRoot)
+    {
+        if (string.IsNullOrWhiteSpace(busRoot))
+        {
+            return string.Empty;
+        }
+
+        return Path.GetFullPath(busRoot)
+            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+            .ToLowerInvariant();
+    }
+
+    private static async Task<(string taskId, bool dispatched)> CreateContinuationTaskAsync(RestartOperationRecord operation)
+    {
+        var targetBus = new AgentBusStore(operation.TargetBusRoot);
+        targetBus.Initialize();
+        var task = targetBus.CreateTask(
+            string.IsNullOrWhiteSpace(operation.RequestedByAgentId) ? operation.TargetAgentId : operation.RequestedByAgentId,
+            operation.TargetAgentId,
+            operation.ContinueTitle ?? "Continue after restart",
+            operation.ContinuePrompt
+                ?? "Please continue the source task after restart and inspect the state in the operation record.",
+            new DirectoryInfo(operation.TargetCwd).Name,
+            operation.TargetCwd,
+            [],
+            operation.RequestedByAgentId);
+
+        var appServer = new CodexAppServerClient();
+        var targetAgent = targetBus.FindAgent(operation.TargetAgentId);
+        if (string.IsNullOrWhiteSpace(targetAgent?.ThreadId))
+        {
+            return (task.Id, false);
+        }
+
+        var wakeMessage = BuildRestartContinuationMessage(task.Id, operation.TargetAgentId, operation.RequestedByAgentId);
+        var wakeup = await appServer.SendTurnAsync(targetAgent.ThreadId!, wakeMessage, operation.TargetCwd, null).ConfigureAwait(false);
+        if (!wakeup.Succeeded)
+        {
+            return (task.Id, false);
+        }
+
+        return (task.Id, true);
+    }
+
+    private static string BuildRestartContinuationMessage(string taskId, string targetAgentId, string? requestedByAgentId)
+    {
+        var body = $"""
+        New CodexTeamUp message/task for {targetAgentId}: {taskId}.
+
+        Please read exactly this task file:
+        .codexteamup/agentbus/tasks/open/{taskId}.json
+        """;
+
+        return $"{targetAgentId}\n\n{body}\nFlow:\n3. Continue immediately from the target context.";
+    }
+
     private static async Task<int> RunDispatchAsync(Args args)
     {
         var bus = CreateBus(args);
@@ -861,6 +1089,7 @@ internal static class Cli
           ctu notify --result-id <id> --to-agent architect [--yes]
           ctu delegate --to 01-web --title <title> --prompt-file <file> [--wait-result] [--yes]
           ctu dashboard export [--bus-root <path>] [--out <html>]
+          ctu restart execute --operation-path <path>
         """);
     }
 }

@@ -28,7 +28,9 @@ public static class CtuControllerTools
         "team_create_agent",
         "team_ensure_agents",
         "team_discover_agents",
-        "team_send_message",
-        "team_dashboard_export"
-    ];
+            "team_send_message",
+            "team_dashboard_export",
+            "ctu_restart_request",
+            "ctu_restart_status"
+        ];
 }

@@ -119,6 +119,40 @@ Assertions:
 - each prime prompt includes role, allowed paths, instruction files, runtime settings, and strict AgentBus task handling rules,
 - events include `agent.created` and `agent.primed`.
 
+### 6. Restart Orchestration Slice 1 (Deterministic)
+
+Use `ctu_restart_request` and `ctu_restart_status` checks through deterministic fake adapters, exercising the production restart model in
+`src/CodexTeamUp.AgentBus/RestartOperations.cs` directly.
+
+Required assertions for the first slice:
+
+- restart operation records are written to `.codexteamup/restart/operations/<operationId>.json`.
+- required fields are present for `ctu.desktop-restart` records (`requestedByAgentId`, `sourceCwd`, `targetCwd`, `targetAgentId`, `continueTitle`, `continuePrompt`).
+- invalid target checkout requests fail with deterministic errors (`targetCwd` missing, same as source).
+- status transitions are durable and idempotent for legal paths:
+  `prepared -> helper_started -> stopping_source -> starting_target -> target_healthy -> continuation_enqueued -> continuation_dispatched -> completed`.
+- terminal states (`completed`, `rolled_back`, `failed`) are stable on repeated transition writes and set completion metadata.
+- fallback config is preserved in the record (`fallbackCwd`, `fallbackBusRoot`).
+
+### 7. Restart Live Proof Contract (Not in deterministic suite)
+
+The first live proof remains manual and should be limited in scope:
+
+1. start source orchestration checkout on `codexteamup`,
+2. request restart into a prepared target checkout (`codexteamup.acceptance`),
+3. verify `ctu/architect` receives `Continue after restart` result/task with `ctu_continue` intent,
+4. run `scripts/test-codexteamup.ps1` smoke for the target to verify continuation health,
+5. request restart back into `codexteamup`,
+6. verify architect receives and can continue the run from the previous continuation point.
+
+Evidence bundle expected in the tester result:
+
+- commands run,
+- operation ids and their final status,
+- continuation task id,
+- target assistant confirmation message captured in AgentBus events,
+- pass/fail + cleanup status.
+
 ### 2. Agent A Enqueues Work For B And C
 
 Invoke `team_send_message` twice:

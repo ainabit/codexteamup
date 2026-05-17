@@ -688,6 +688,98 @@ public sealed class DefaultCtuController : ICtuController
             return Task.FromResult<object>(new { path });
         });
 
+        registry.Register("ctu_restart_request", (args, _) =>
+        {
+            var bus = Bus(args, busRoot);
+            var sourceBusRoot = bus.RootDirectory;
+            var sourceCwd = RestartOperationStore.NormalizeCheckoutPath(
+                Optional(args, "sourceCwd")
+                ?? Environment.CurrentDirectory);
+            var targetCwd = RestartOperationStore.NormalizeCheckoutPath(Required(args, "targetCwd"));
+            var targetBusRoot = ResolveCheckoutBusRoot(targetCwd, Optional(args, "targetBusRoot"));
+            var fallbackCwd = Optional(args, "fallbackCwd") is { } fallback
+                ? RestartOperationStore.NormalizeCheckoutPath(fallback)
+                : null;
+            var fallbackBusRoot = string.IsNullOrWhiteSpace(fallbackCwd)
+                ? null
+                : ResolveCheckoutBusRoot(
+                    fallbackCwd,
+                    Optional(args, "fallbackBusRoot"));
+
+            var operationStore = new RestartOperationStore(sourceBusRoot);
+            var operation = operationStore.Create(
+                BlankToNull(Optional(args, "requestedByAgentId")) ?? "ctu/architect",
+                sourceCwd,
+                sourceBusRoot,
+                targetCwd,
+                targetBusRoot,
+                Required(args, "targetAgentId"),
+                fallbackCwd,
+                fallbackBusRoot,
+                Optional(args, "continueTitle") ?? "Continue after restart",
+                Optional(args, "continuePrompt") ?? $"{Required(args, "targetAgentId")} requested a checkpointed restart into this checkout.\nPlease continue the active task from the source context.",
+                Optional(args, "expectedTargetBranch"));
+            var operationPath = operationStore.OperationPath(operation.Id);
+            try
+            {
+                var helperProcess = LaunchRestartHelper(sourceCwd, operationPath);
+                operation = operationStore.UpdateStatus(operation, RestartOperationStatus.HelperStarted, helperPid: helperProcess.Id.ToString());
+                operationStore.Write(operation);
+                return Task.FromResult<object>(new
+                {
+                    accepted = true,
+                    operationId = operation.Id,
+                    operationPath,
+                    status = operation.Status,
+                    request = new
+                    {
+                        operation.Kind,
+                        operation.SourceCwd,
+                        operation.TargetCwd
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                operation = operationStore.UpdateStatus(operation, RestartOperationStatus.Failed, lastError: ex.Message);
+                operationStore.Write(operation);
+                throw;
+            }
+        });
+
+        registry.Register("ctu_restart_status", (args, _) =>
+        {
+            var operationPath = Optional(args, "operationPath");
+            var operationId = Optional(args, "operationId");
+            if (string.IsNullOrWhiteSpace(operationPath) && string.IsNullOrWhiteSpace(operationId))
+            {
+                throw new ArgumentException("Missing operationPath or operationId.");
+            }
+
+            RestartOperationRecord? operation = null;
+            var opStore = new RestartOperationStore(Bus(args, busRoot).RootDirectory);
+            if (!string.IsNullOrWhiteSpace(operationPath))
+            {
+                var resolvedPath = Path.GetFullPath(operationPath);
+                operation = opStore.FindByPath(resolvedPath);
+                if (operation is null)
+                {
+                    throw new FileNotFoundException($"Operation record was not found: {resolvedPath}");
+                }
+            }
+            else
+            {
+                operation = opStore.Find(operationId!);
+            }
+
+            if (operation is null)
+            {
+                throw new FileNotFoundException($"Restart operation not found.");
+            }
+
+            return Task.FromResult<object>(new { operation });
+        });
+
         return;
     }
 
@@ -728,6 +820,76 @@ public sealed class DefaultCtuController : ICtuController
         }
 
         return fullPath;
+    }
+
+    private static string ResolveCheckoutBusRoot(string cwd, string? requestedBusRoot)
+    {
+        if (!string.IsNullOrWhiteSpace(requestedBusRoot))
+        {
+            var normalized = NormalizeBusRoot(requestedBusRoot);
+            if (Path.GetFileName(normalized).Equals("agentbus", StringComparison.OrdinalIgnoreCase))
+            {
+                return normalized;
+            }
+
+            if (Directory.Exists(Path.Combine(normalized, ".codexteamup", "agentbus")))
+            {
+                return Path.Combine(normalized, ".codexteamup", "agentbus");
+            }
+
+            if (Directory.Exists(Path.Combine(normalized, "agentbus")))
+            {
+                return Path.Combine(normalized, "agentbus");
+            }
+        }
+
+        return DefaultBusRootForCwd(string.IsNullOrWhiteSpace(cwd) ? Environment.CurrentDirectory : cwd);
+    }
+
+    private static Process LaunchRestartHelper(string sourceCwd, string operationPath)
+    {
+        var exePath = ResolveRestartHelperExecutable(sourceCwd);
+        if (!File.Exists(exePath))
+        {
+            throw new FileNotFoundException($"CodexTeamUp.Cli executable not found at {exePath}.");
+        }
+
+        var command = $"& {QuotePowerShellPath(exePath)} restart execute --operation-path {QuotePowerShellPath(operationPath)}";
+        var process = new Process
+        {
+            StartInfo = new ProcessStartInfo
+            {
+                FileName = "pwsh",
+                Arguments = $"-NoExit -ExecutionPolicy Bypass -Command \"{command}\"",
+                WorkingDirectory = sourceCwd,
+                UseShellExecute = true,
+                WindowStyle = ProcessWindowStyle.Normal,
+                CreateNoWindow = false
+            }
+        };
+
+        if (!process.Start())
+        {
+            throw new InvalidOperationException("Restart helper process failed to start.");
+        }
+
+        return process;
+    }
+
+    private static string ResolveRestartHelperExecutable(string sourceCwd)
+    {
+        var cliPath = Path.Combine(sourceCwd, ".ctu", "tools", "cli", "CodexTeamUp.Cli.exe");
+        if (File.Exists(cliPath))
+        {
+            return cliPath;
+        }
+
+        return Path.Combine(sourceCwd, ".ctu", "tools", "ctu", "CodexTeamUp.Cli.exe");
+    }
+
+    private static string QuotePowerShellPath(string value)
+    {
+        return $"'{value.Replace("'", "''")}'";
     }
 
     private static string NewOperationId(string prefix)
