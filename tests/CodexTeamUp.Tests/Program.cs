@@ -4,6 +4,7 @@ using CodexTeamUp.CodexWrapper;
 using CodexTeamUp.Controller;
 using CodexTeamUp.Core;
 using CodexTeamUp.Mcp;
+using CodexTeamUp.Service;
 using System.Diagnostics;
 using System.IO.Pipes;
 using System.Text;
@@ -23,6 +24,8 @@ var tests = new (string Name, Func<Task> Body)[]
     ("Schema service extracts interesting methods", () => Task.Run(SchemaServiceExtractsMethods)),
     ("Wrapper protocol rewrites turn list sorting", () => Task.Run(WrapperProtocolRewritesTurnListSorting)),
     ("Wrapper protocol stamps live turn started notifications", () => Task.Run(WrapperProtocolStampsLiveTurnStartedNotifications)),
+    ("Wrapper protocol normalizes git directive cwd paths", () => Task.Run(WrapperProtocolNormalizesGitDirectiveCwdPaths)),
+    ("HTTP request reader preserves UTF-8 body", HttpRequestReaderPreservesUtf8Body),
     ("Wrapper protocol identifies bridge responses", () => Task.Run(WrapperProtocolIdentifiesBridgeResponses)),
     ("Wrapper pipe client parses JSON-RPC result", WrapperPipeClientParsesResult),
     ("Wrapper pipe client times out stalled responses", WrapperPipeClientTimesOutStalledResponses),
@@ -45,6 +48,7 @@ var tests = new (string Name, Func<Task> Body)[]
     ("MCP registry derives bus root from cwd", () => Task.Run(McpRegistryDerivesBusRootFromCwd)),
     ("MCP registry normalizes project-root busRoot", () => Task.Run(McpRegistryNormalizesProjectRootBusRoot)),
     ("MCP registry preserves existing thread binding on re-register", () => Task.Run(McpRegistryPreservesExistingThreadBindingOnReregister)),
+    ("MCP registry accepts chatName as agent display name", () => Task.Run(McpRegistryAcceptsChatNameAsAgentDisplayName)),
     ("MCP registry writes result file metadata", () => Task.Run(McpRegistryWritesResultFileMetadata)),
     ("MCP registry ensures explicit ctu agents", () => Task.Run(McpRegistryEnsuresExplicitCtuAgents)),
     ("MCP registry primes agents without fallback tasks", () => Task.Run(McpRegistryPrimesAgentsWithoutFallbackTasks)),
@@ -300,6 +304,46 @@ static void WrapperProtocolStampsLiveTurnStartedNotifications()
         unixTimeProvider: () => 1778829000);
     True(unchanged.Contains("\"startedAt\":1778828000", StringComparison.Ordinal));
     True(!unchanged.Contains("\"startedAt\":1778829000", StringComparison.Ordinal));
+}
+
+static void WrapperProtocolNormalizesGitDirectiveCwdPaths()
+{
+    var line = """
+        {"method":"turn/completed","params":{"turn":{"items":[{"type":"message","content":[{"type":"output_text","text":"Done\n\n::git-stage{cwd=\"X:\\repo\\codexteamup\"}\n::git-push{cwd=\"X:\\repo\\codexteamup\" branch=\"codex/fix\"}"}]}]}}}
+        """;
+
+    var rewritten = WrapperProtocol.RewriteGitDirectiveCwdWindowsPaths(line, enabled: true);
+    using var rewrittenDoc = JsonDocument.Parse(rewritten);
+    var text = rewrittenDoc.RootElement
+        .GetProperty("params")
+        .GetProperty("turn")
+        .GetProperty("items")[0]
+        .GetProperty("content")[0]
+        .GetProperty("text")
+        .GetString();
+    True(text?.Contains("::git-stage{cwd=\"X:/repo/codexteamup\"}", StringComparison.Ordinal) == true);
+    True(text?.Contains("::git-push{cwd=\"X:/repo/codexteamup\" branch=\"codex/fix\"}", StringComparison.Ordinal) == true);
+    True(text?.Contains("cwd=\"X:\\repo", StringComparison.Ordinal) == false);
+
+    var unchanged = WrapperProtocol.RewriteGitDirectiveCwdWindowsPaths(
+        "{\"method\":\"event\",\"params\":{\"message\":\"plain cwd=\\\"X:\\\\repo\\\\codexteamup\\\"\"}}",
+        enabled: true);
+    using var unchangedDoc = JsonDocument.Parse(unchanged);
+    var message = unchangedDoc.RootElement.GetProperty("params").GetProperty("message").GetString();
+    True(message?.Contains("cwd=\"X:\\repo", StringComparison.Ordinal) == true);
+}
+
+static async Task HttpRequestReaderPreservesUtf8Body()
+{
+    var body = "{\"prompt\":\"Bitte pruefe: äöü ÄÖÜ ß\"}";
+    var bytes = Encoding.UTF8.GetBytes(
+        $"POST /mcp/tools/team_send_message HTTP/1.1\r\nContent-Length: {Encoding.UTF8.GetByteCount(body)}\r\n\r\n{body}");
+    await using var stream = new MemoryStream(bytes);
+
+    Equal("POST /mcp/tools/team_send_message HTTP/1.1", await HttpRequestReader.ReadAsciiLineAsync(stream).ConfigureAwait(false));
+    Equal($"Content-Length: {Encoding.UTF8.GetByteCount(body)}", await HttpRequestReader.ReadAsciiLineAsync(stream).ConfigureAwait(false));
+    Equal(string.Empty, await HttpRequestReader.ReadAsciiLineAsync(stream).ConfigureAwait(false));
+    Equal(body, await HttpRequestReader.ReadUtf8BodyAsync(stream, Encoding.UTF8.GetByteCount(body)).ConfigureAwait(false));
 }
 
 static void WrapperProtocolIdentifiesBridgeResponses()
@@ -853,6 +897,27 @@ static void McpRegistryPreservesExistingThreadBindingOnReregister()
     Equal("docs/", agent?.AllowedPaths.Single());
     Equal("AGENTS.md", agent?.InstructionFiles.Single());
     Equal("ctu-test/runner", agent?.ReturnTo);
+}
+
+static void McpRegistryAcceptsChatNameAsAgentDisplayName()
+{
+    var root = NewTestDirectory();
+    var busRoot = Path.Combine(root, ".codexteamup", "agentbus");
+    var registry = McpToolRegistry.CreateDefault(busRoot, new WrapperPipeAppServerClient("unused"));
+    var args = JsonSerializer.Deserialize<JsonElement>("""
+    {
+      "id": "ctu/service",
+      "role": "Service maintainer",
+      "chatName": "Service Implementation Chat",
+      "status": "active"
+    }
+    """);
+
+    _ = registry.InvokeAsync("agentbus_register_agent", args).GetAwaiter().GetResult();
+
+    var agent = new AgentBusStore(busRoot).FindAgent("ctu/service");
+    Equal("Service Implementation Chat", agent?.DisplayName);
+    Equal("active", agent?.Status);
 }
 
 static void McpRegistryWritesResultFileMetadata()

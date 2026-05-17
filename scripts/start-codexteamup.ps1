@@ -3,6 +3,7 @@ param(
     [string]$ServiceUrl = "http://127.0.0.1:47319/",
     [string]$DesktopExe = "",
     [string]$RealCodexExe = "",
+    [string]$PipeName = "",
     [switch]$ForceTurnsAscending,
     [switch]$NoForceTurnsAscending,
     [switch]$NoStampTurnStartedAt,
@@ -10,6 +11,7 @@ param(
     [switch]$NoLaunch,
     [switch]$AllowExistingDesktop,
     [switch]$ForceStopExisting,
+    [switch]$KillExistingCodex,
     [switch]$RestartService,
     [switch]$NoService,
     [switch]$NoConfigureMcp
@@ -202,7 +204,7 @@ function Stop-CodexTeamUpProcessesForFreshStart {
         Select-Object Id, Name, ParentProcessId, ParentName, Reason, Path |
         Format-Table -AutoSize
 
-    if (-not $ForceStopExisting) {
+    if (-not ($ForceStopExisting -or $KillExistingCodex)) {
         $answer = Read-Host "Stop these processes now? Type YES to continue"
         if ($answer -ne "YES") {
             throw "Aborted. Existing CTU/Desktop processes are still running; fresh start was not guaranteed."
@@ -232,6 +234,12 @@ function Stop-CodexTeamUpProcessesForFreshStart {
         $remaining | Select-Object Id, Name, ParentProcessId, ParentName, Reason, Path | Format-Table -AutoSize
         throw "Could not stop all existing CTU/Desktop processes. Fresh start was not guaranteed."
     }
+}
+
+if ([string]::IsNullOrWhiteSpace($PipeName)) {
+    $PipeName = "codexteamup-appserver-$([Guid]::NewGuid().ToString("N").Substring(0, 12))"
+} else {
+    $PipeName = $PipeName.Trim()
 }
 
 function Stop-ServiceListener {
@@ -417,7 +425,8 @@ approval_mode = "approve"
 
 function Start-CodexTeamUpService {
     param(
-        [int]$ParentProcessId = 0
+        [int]$ParentProcessId = 0,
+        [string]$PipeName = "codexteamup-appserver"
     )
 
     New-Item -ItemType Directory -Force -Path $serviceLogRoot | Out-Null
@@ -439,11 +448,7 @@ function Start-CodexTeamUpService {
     }
 
     if (-not $serviceRunning) {
-        if ($ParentProcessId -gt 0) {
-            Write-Host "Starting CodexTeamUp service at $ServiceUrl (watching pid=$ParentProcessId)"
-        } else {
-            Write-Host "Starting CodexTeamUp service at $ServiceUrl"
-        }
+        Write-Host "Starting CodexTeamUp service at $ServiceUrl (watching pid=$ParentProcessId, pipe=$PipeName)"
         $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
         $stdoutLog = Join-Path $serviceLogRoot "service-$stamp.out.log"
         $stderrLog = Join-Path $serviceLogRoot "service-$stamp.err.log"
@@ -459,7 +464,7 @@ function Start-CodexTeamUpService {
         }
         try {
             Set-Item -LiteralPath "Env:CTU_SERVICE_URL" -Value $ServiceUrl
-            Set-Item -LiteralPath "Env:CODEX_WRAPPER_PIPE_NAME" -Value "codexteamup-appserver"
+            Set-Item -LiteralPath "Env:CODEX_WRAPPER_PIPE_NAME" -Value $PipeName
             Set-Item -LiteralPath "Env:CTU_APP_SERVER_RESPONSE_TIMEOUT_MS" -Value "30000"
             Set-Item -LiteralPath "Env:CTU_LOG_ROOT" -Value (Join-Path $repoRoot ".codexteamup\logs")
             Set-Item -LiteralPath "Env:CTU_CONTROLLER_POLICY_PATH" -Value (Join-Path $repoRoot "config\ctu-controller-policy.json")
@@ -555,6 +560,7 @@ if (-not (Test-Path -LiteralPath $wrapperExe -PathType Leaf)) {
 
 $startArgs = @{
     WrapperExe = $wrapperExe
+    PipeName = $PipeName
 }
 
 if (-not [string]::IsNullOrWhiteSpace($Workspace)) {
@@ -605,7 +611,7 @@ if (-not $NoService) {
     if ($desktopProcess -and $desktopProcess.Id) {
         $serviceParentPid = $desktopProcess.Id
     }
-    Start-CodexTeamUpService -ParentProcessId $serviceParentPid
+    Start-CodexTeamUpService -ParentProcessId $serviceParentPid -PipeName $PipeName
 }
 
 Write-Host ""
@@ -613,4 +619,5 @@ Write-Host "CodexTeamUp agent backend:"
 Write-Host "  Service URL: $ServiceUrl"
 Write-Host "  Dashboard:   $($ServiceUrl.TrimEnd('/'))/"
 Write-Host "  MCP URL:     $($ServiceUrl.TrimEnd('/'))/mcp"
+Write-Host "  Pipe name:   $PipeName"
 Write-Host "  Agent tools: Codex Desktop uses the registered HTTP MCP endpoint."

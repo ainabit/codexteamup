@@ -8,6 +8,7 @@
     <ProjectReference Include="..\..\src\CodexTeamUp.Controller\CodexTeamUp.Controller.csproj" />
     <ProjectReference Include="..\..\src\CodexTeamUp.Controller.Default\CodexTeamUp.Controller.Default.csproj" />
     <ProjectReference Include="..\..\src\CodexTeamUp.Mcp\CodexTeamUp.Mcp.csproj" />
+    <ProjectReference Include="..\..\src\CodexTeamUp.Service\CodexTeamUp.Service.csproj" />
   </ItemGroup>
 
   <PropertyGroup>

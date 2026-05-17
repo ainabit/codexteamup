@@ -210,6 +210,53 @@ public static class WrapperProtocol
     }
 
     /// <summary>
+    /// Normalizes Windows backslashes in app git-directive cwd attributes before Desktop
+    /// renders the markdown. Recent Desktop builds tokenize these directives strictly and
+    /// can reject Windows-style cwd values because the backslashes are parsed as escapes.
+    /// </summary>
+    public static string RewriteGitDirectiveCwdWindowsPaths(string line, bool enabled, Action? onRewrite = null)
+    {
+        if (!enabled)
+        {
+            return line;
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(line);
+            var changed = false;
+            using var stream = new MemoryStream();
+            using (var writer = new Utf8JsonWriter(stream))
+            {
+                WriteElementWithStringTransform(document.RootElement, writer, TransformString);
+            }
+
+            if (!changed)
+            {
+                return line;
+            }
+
+            onRewrite?.Invoke();
+            return Encoding.UTF8.GetString(stream.ToArray());
+
+            string TransformString(string value)
+            {
+                var transformed = NormalizeGitDirectiveCwdAttributes(value);
+                if (!string.Equals(transformed, value, StringComparison.Ordinal))
+                {
+                    changed = true;
+                }
+
+                return transformed;
+            }
+        }
+        catch (JsonException)
+        {
+            return line;
+        }
+    }
+
+    /// <summary>
     /// Extracts the JSON-RPC id and method from a line without throwing for malformed input.
     /// </summary>
     public static WrapperRpcSummary SummarizeJsonLine(string line)
@@ -241,6 +288,127 @@ public static class WrapperProtocol
             JsonValueKind.Number => idElement.GetRawText(),
             _ => idElement.GetRawText()
         };
+    }
+
+    private static void WriteElementWithStringTransform(JsonElement element, Utf8JsonWriter writer, Func<string, string> transform)
+    {
+        switch (element.ValueKind)
+        {
+            case JsonValueKind.Object:
+                writer.WriteStartObject();
+                foreach (var property in element.EnumerateObject())
+                {
+                    writer.WritePropertyName(property.Name);
+                    WriteElementWithStringTransform(property.Value, writer, transform);
+                }
+                writer.WriteEndObject();
+                break;
+            case JsonValueKind.Array:
+                writer.WriteStartArray();
+                foreach (var item in element.EnumerateArray())
+                {
+                    WriteElementWithStringTransform(item, writer, transform);
+                }
+                writer.WriteEndArray();
+                break;
+            case JsonValueKind.String:
+                writer.WriteStringValue(transform(element.GetString() ?? string.Empty));
+                break;
+            default:
+                element.WriteTo(writer);
+                break;
+        }
+    }
+
+    private static string NormalizeGitDirectiveCwdAttributes(string value)
+    {
+        if (!value.Contains("::git-", StringComparison.Ordinal) || !value.Contains("cwd=\"", StringComparison.Ordinal))
+        {
+            return value;
+        }
+
+        var builder = new StringBuilder(value);
+        var searchFrom = 0;
+        while (searchFrom < builder.Length)
+        {
+            var directiveStart = IndexOf(builder, "::git-", searchFrom);
+            if (directiveStart < 0)
+            {
+                break;
+            }
+
+            var directiveEnd = IndexOf(builder, "}", directiveStart);
+            if (directiveEnd < 0)
+            {
+                break;
+            }
+
+            var cwdStart = IndexOf(builder, "cwd=\"", directiveStart);
+            if (cwdStart < 0 || cwdStart > directiveEnd)
+            {
+                searchFrom = directiveEnd + 1;
+                continue;
+            }
+
+            var valueStart = cwdStart + "cwd=\"".Length;
+            var valueEnd = IndexOf(builder, "\"", valueStart);
+            if (valueEnd < 0 || valueEnd > directiveEnd)
+            {
+                searchFrom = directiveEnd + 1;
+                continue;
+            }
+
+            if (LooksLikeWindowsPath(builder, valueStart, valueEnd))
+            {
+                for (var i = valueStart; i < valueEnd; i++)
+                {
+                    if (builder[i] == '\\')
+                    {
+                        builder[i] = '/';
+                    }
+                }
+            }
+
+            searchFrom = directiveEnd + 1;
+        }
+
+        return builder.ToString();
+    }
+
+    private static bool LooksLikeWindowsPath(StringBuilder builder, int valueStart, int valueEnd)
+    {
+        return valueEnd - valueStart >= 3
+            && char.IsAsciiLetter(builder[valueStart])
+            && builder[valueStart + 1] == ':'
+            && builder[valueStart + 2] == '\\';
+    }
+
+    private static int IndexOf(StringBuilder builder, string value, int startIndex)
+    {
+        if (value.Length == 0)
+        {
+            return startIndex;
+        }
+
+        for (var i = startIndex; i <= builder.Length - value.Length; i++)
+        {
+            var matched = true;
+            for (var j = 0; j < value.Length; j++)
+            {
+                if (builder[i + j] != value[j])
+                {
+                    matched = false;
+                    break;
+                }
+            }
+
+            if (matched)
+            {
+                return i;
+            }
+        }
+
+        return -1;
     }
 }
 

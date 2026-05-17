@@ -101,7 +101,7 @@ public sealed class DefaultCtuController : ICtuController
             {
                 Id = Required(args, "id"),
                 Role = Optional(args, "role") ?? Required(args, "id"),
-                DisplayName = Optional(args, "displayName") ?? Required(args, "id"),
+                DisplayName = Optional(args, "displayName") ?? Optional(args, "chatName") ?? Required(args, "id"),
                 ThreadId = Optional(args, "threadId"),
                 Cwd = Optional(args, "cwd"),
                 AllowedPaths = Csv(args, "allowedPaths"),

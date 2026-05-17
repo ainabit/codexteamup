@@ -205,9 +205,16 @@ The tester should report exact commands, pass/fail status, run id for live tests
 
 Codex Desktop currently has a renderer issue when a Git app directive contains a Windows path with backslashes in its `cwd` value. Such responses can trigger the Desktop Oops screen when old thread history is loaded.
 
-Always use forward-slash paths in Git app directives, for example `S:/_work/_development/codexteamup`. Do not quote or reproduce the broken backslash form as a raw app directive in final answers, documentation, or agent instructions.
+Always use forward-slash paths in Git app directives, for example `X:/repo/codexteamup`. Do not quote or reproduce the broken backslash form as a raw app directive in final answers, documentation, or agent instructions.
 
 The CTU wrapper can sanitize newly generated answers, but historical session history remains a separate problem and may still need cleanup or avoidance.
+
+## Pull Requests
+
+Pull request titles use a short conventional prefix:
+
+- Fixes start with `fix: ` followed by a short title.
+- Features start with `feat: ` followed by a short title.
 
 ## Non-Goals
 
