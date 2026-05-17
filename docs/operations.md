@@ -12,7 +12,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\start-codexteamup.ps1
 
 That is the normal and preferred start path. It starts the backend service, registers the HTTP MCP URL, and launches Codex Desktop through the wrapper.
 
-If Codex Desktop, the Codex CLI app-server, or a CTU wrapper is already running, the startup script lists those processes and asks whether to stop them before launching. Answer `y` for a clean CTU start. Use `-KillExistingCodex` to make that cleanup non-interactive, or `-AllowExistingDesktop` only for diagnostics where you intentionally accept that an existing Desktop instance may ignore the wrapper environment.
+The script treats a normal start as a fresh restart. It detects existing Codex Desktop, Codex CLI app-server, CTU service, CTU wrapper, and repo-local CTU test/helper processes, shows them in the console, and asks before stopping them. If a process cannot be stopped, the script aborts instead of continuing with a half-old session. For unattended recovery starts, pass `-ForceStopExisting`; `-KillExistingCodex` remains as a legacy alias for the same cleanup behavior. Use `-AllowExistingDesktop` only for diagnostics where you intentionally accept that an existing Desktop instance may ignore the wrapper environment.
 
 The startup script discovers the installed Codex Desktop package at runtime instead of pinning a specific WindowsApps version. It also discovers a runnable Codex CLI separately from the Desktop executable. CLI candidates are checked with `--version` before use, and protected WindowsApps resource paths are skipped if they cannot be executed directly.
 
@@ -57,6 +57,17 @@ If the wrapper build output is locked, close Codex Desktop and rebuild. The long
 If a task is stuck in `claimed`, inspect `.codexteamup/agentbus/events.jsonl`, the task file, and the target thread. Move it manually only after ownership is clear.
 
 ## Logging
+
+Service runtime logs default to:
+
+```text
+<repo>\.codexteamup\logs
+```
+
+Key files:
+
+- `api-adapter-YYYYMMDD.jsonl`
+- `controller-YYYYMMDD.jsonl`
 
 Wrapper logs default to:
 

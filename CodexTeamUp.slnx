@@ -3,6 +3,8 @@
     <Project Path="src/CodexTeamUp.AgentBus/CodexTeamUp.AgentBus.csproj" />
     <Project Path="src/CodexTeamUp.AppServer/CodexTeamUp.AppServer.csproj" />
     <Project Path="src/CodexTeamUp.Cli/CodexTeamUp.Cli.csproj" />
+    <Project Path="src/CodexTeamUp.Controller/CodexTeamUp.Controller.csproj" />
+    <Project Path="src/CodexTeamUp.Controller.Default/CodexTeamUp.Controller.Default.csproj" />
     <Project Path="src/CodexTeamUp.CodexWrapper/CodexTeamUp.CodexWrapper.csproj" />
     <Project Path="src/CodexTeamUp.Core/CodexTeamUp.Core.csproj" />
     <Project Path="src/CodexTeamUp.Mcp/CodexTeamUp.Mcp.csproj" />

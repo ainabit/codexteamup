@@ -15,11 +15,13 @@ public sealed class WrapperPipeAppServerClient : IAppServerClient
 
     private readonly string _pipeName;
     private readonly TimeSpan _connectTimeout;
+    private readonly TimeSpan _responseTimeout;
 
-    public WrapperPipeAppServerClient(string? pipeName = null, TimeSpan? connectTimeout = null)
+    public WrapperPipeAppServerClient(string? pipeName = null, TimeSpan? connectTimeout = null, TimeSpan? responseTimeout = null)
     {
         _pipeName = string.IsNullOrWhiteSpace(pipeName) ? DefaultPipeName : pipeName.Trim();
         _connectTimeout = connectTimeout ?? TimeSpan.FromSeconds(5);
+        _responseTimeout = responseTimeout ?? ResolveResponseTimeout();
     }
 
     public async Task<AppServerCallResult> ProbeAsync(CancellationToken cancellationToken = default)
@@ -72,7 +74,14 @@ public sealed class WrapperPipeAppServerClient : IAppServerClient
 
     private async Task<AppServerCallResult> ResumeThreadForWakeupAsync(string threadId, CancellationToken cancellationToken)
     {
-        return await CallAsync("thread/resume", new { threadId, excludeTurns = true }, cancellationToken)
+        var result = await CallAsync("thread/resume", new { threadId, excludeTurns = true }, cancellationToken)
+            .ConfigureAwait(false);
+        if (result.Succeeded || !IsThreadNotFound(result.Error))
+        {
+            return result;
+        }
+
+        return await CallAsync("thread/resume", new { threadId }, cancellationToken)
             .ConfigureAwait(false);
     }
 
@@ -83,12 +92,39 @@ public sealed class WrapperPipeAppServerClient : IAppServerClient
         AppServerAgentSettings? settings = null,
         CancellationToken cancellationToken = default)
     {
-        var resume = await ResumeThreadForWakeupAsync(threadId, cancellationToken).ConfigureAwait(false);
-        if (!resume.Succeeded)
+        var parameters = BuildTurnStartParameters(threadId, message, cwd, settings);
+        AppServerCallResult? last = null;
+
+        for (var attempt = 0; attempt < 40; attempt++)
         {
-            return resume;
+            var resume = await ResumeThreadForWakeupAsync(threadId, cancellationToken).ConfigureAwait(false);
+            if (!resume.Succeeded)
+            {
+                last = resume;
+                if (!IsThreadTemporarilyUnavailable(resume.Error))
+                {
+                    return resume;
+                }
+            }
+
+            last = await CallAsync("turn/start", parameters, cancellationToken).ConfigureAwait(false);
+            if (last.Succeeded || !IsThreadTemporarilyUnavailable(last.Error))
+            {
+                return last;
+            }
+
+            await Task.Delay(TimeSpan.FromMilliseconds(250), cancellationToken).ConfigureAwait(false);
         }
 
+        return last ?? new AppServerCallResult(false, null, $"Could not wake thread {threadId}.");
+    }
+
+    private static Dictionary<string, object?> BuildTurnStartParameters(
+        string threadId,
+        string message,
+        string? cwd,
+        AppServerAgentSettings? settings)
+    {
         var parameters = new Dictionary<string, object?>
         {
             ["threadId"] = threadId,
@@ -102,8 +138,7 @@ public sealed class WrapperPipeAppServerClient : IAppServerClient
         }
 
         AddRuntimeSettings(parameters, settings);
-
-        return await CallAsync("turn/start", parameters, cancellationToken).ConfigureAwait(false);
+        return parameters;
     }
 
     private static void AddRuntimeSettings(Dictionary<string, object?> parameters, AppServerAgentSettings? settings)
@@ -182,7 +217,9 @@ public sealed class WrapperPipeAppServerClient : IAppServerClient
             using var reader = new StreamReader(pipe, Encoding.UTF8, detectEncodingFromByteOrderMarks: false, leaveOpen: true);
 
             await writer.WriteLineAsync(line).ConfigureAwait(false);
-            var response = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false);
+            using var responseCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            responseCancellation.CancelAfter(_responseTimeout);
+            var response = await reader.ReadLineAsync(responseCancellation.Token).ConfigureAwait(false);
             if (string.IsNullOrWhiteSpace(response))
             {
                 return new AppServerCallResult(false, null, "Wrapper pipe returned an empty response.");
@@ -192,7 +229,7 @@ public sealed class WrapperPipeAppServerClient : IAppServerClient
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
-            return new AppServerCallResult(false, null, $"Timed out connecting to wrapper pipe '{_pipeName}'. Is Codex Desktop running through the wrapper?");
+            return new AppServerCallResult(false, null, $"Timed out waiting for wrapper pipe '{_pipeName}' after {_responseTimeout.TotalSeconds:n0}s.");
         }
         catch (Exception ex) when (ex is IOException or TimeoutException or UnauthorizedAccessException or InvalidOperationException)
         {
@@ -262,6 +299,30 @@ public sealed class WrapperPipeAppServerClient : IAppServerClient
         {
             return null;
         }
+    }
+
+    private static TimeSpan ResolveResponseTimeout()
+    {
+        var raw = Environment.GetEnvironmentVariable("CTU_APP_SERVER_RESPONSE_TIMEOUT_MS");
+        return int.TryParse(raw, out var milliseconds) && milliseconds > 0
+            ? TimeSpan.FromMilliseconds(milliseconds)
+            : TimeSpan.FromSeconds(30);
+    }
+
+    private static bool IsThreadNotFound(string? error)
+    {
+        return !string.IsNullOrWhiteSpace(error)
+            && error.Contains("thread not found", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsThreadTemporarilyUnavailable(string? error)
+    {
+        return IsThreadNotFound(error)
+            || (!string.IsNullOrWhiteSpace(error)
+                && (error.Contains("no rollout found for thread id", StringComparison.OrdinalIgnoreCase)
+                    || (error.Contains("failed to read thread", StringComparison.OrdinalIgnoreCase)
+                        && error.Contains("rollout", StringComparison.OrdinalIgnoreCase)
+                        && error.Contains("is empty", StringComparison.OrdinalIgnoreCase))));
     }
 
     private static string? TryFindTurnStatus(string json, string turnId)

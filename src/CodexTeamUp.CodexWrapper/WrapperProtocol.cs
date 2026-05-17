@@ -212,7 +212,7 @@ public static class WrapperProtocol
     /// <summary>
     /// Normalizes Windows backslashes in app git-directive cwd attributes before Desktop
     /// renders the markdown. Recent Desktop builds tokenize these directives strictly and
-    /// reject values such as cwd="S:\repo" because the backslashes are parsed as escapes.
+    /// can reject Windows-style cwd values because the backslashes are parsed as escapes.
     /// </summary>
     public static string RewriteGitDirectiveCwdWindowsPaths(string line, bool enabled, Action? onRewrite = null)
     {

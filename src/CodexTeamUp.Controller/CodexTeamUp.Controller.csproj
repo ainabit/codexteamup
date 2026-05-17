@@ -2,8 +2,8 @@
 
   <ItemGroup>
     <ProjectReference Include="..\CodexTeamUp.Core\CodexTeamUp.Core.csproj" />
+    <ProjectReference Include="..\CodexTeamUp.AgentBus\CodexTeamUp.AgentBus.csproj" />
     <ProjectReference Include="..\CodexTeamUp.AppServer\CodexTeamUp.AppServer.csproj" />
-    <ProjectReference Include="..\CodexTeamUp.Controller\CodexTeamUp.Controller.csproj" />
   </ItemGroup>
 
   <PropertyGroup>

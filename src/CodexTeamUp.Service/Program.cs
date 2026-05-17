@@ -5,6 +5,7 @@ using System.Text;
 using System.Text.Json;
 using CodexTeamUp.AgentBus;
 using CodexTeamUp.AppServer;
+using CodexTeamUp.Controller;
 using CodexTeamUp.Core;
 using CodexTeamUp.Mcp;
 using CodexTeamUp.Service;
@@ -24,7 +25,16 @@ var defaultBusRoot = Environment.GetEnvironmentVariable("CTU_AGENTBUS_ROOT")
 var pipeName = Environment.GetEnvironmentVariable("CODEX_WRAPPER_PIPE_NAME");
 var parentProcessId = ReadIntOption(args, "--parent-pid")
     ?? ReadIntEnvironment("CTU_PARENT_PROCESS_ID");
-var registry = McpToolRegistry.CreateDefault(defaultBusRoot, new WrapperPipeAppServerClient(pipeName));
+var logRoot = Environment.GetEnvironmentVariable("CTU_LOG_ROOT")
+    ?? Path.Combine(ResolveProjectRootForBus(defaultBusRoot), ".codexteamup", "logs");
+var apiLogger = new CtuJsonLogger(Path.Combine(logRoot, $"api-adapter-{DateTimeOffset.Now:yyyyMMdd}.jsonl"));
+var controllerLogger = new CtuJsonLogger(Path.Combine(logRoot, $"controller-{DateTimeOffset.Now:yyyyMMdd}.jsonl"));
+var appServer = ReloadableAppServerClient.CreateDefault(pipeName, apiLogger);
+var controllerPolicy = new ReloadableCtuControllerPolicy(
+    Environment.GetEnvironmentVariable("CTU_CONTROLLER_POLICY_PATH"),
+    controllerLogger);
+var controller = ReloadableCtuController.CreateDefault(defaultBusRoot, appServer, controllerLogger, controllerPolicy);
+var registry = McpToolRegistry.CreateDefault(controller, controllerLogger);
 var jsonOptions = new JsonSerializerOptions(JsonFile.Options) { WriteIndented = false };
 
 using var shutdown = new CancellationTokenSource();
@@ -37,6 +47,7 @@ listener.Start();
 
 Console.WriteLine($"CodexTeamUp.Service listening on http://127.0.0.1:{port}/");
 Console.WriteLine($"Default AgentBus root: {defaultBusRoot}");
+Console.WriteLine($"CTU logs: {logRoot}");
 if (parentProcessId is int parentPid)
 {
     Console.WriteLine($"Parent process monitor: {parentPid}");
@@ -150,6 +161,10 @@ async Task HandleRequestAsync(NetworkStream stream, string method, string target
             url = $"http://127.0.0.1:{port}/",
             mcpUrl = $"http://127.0.0.1:{port}/mcp",
             defaultBusRoot,
+            logRoot,
+            appServerAdapter = appServer.Status,
+            controller = controller.Status,
+            controllerPolicy = controller.Status.Policy,
             tools = McpToolRegistry.KnownToolNames
         }).ConfigureAwait(false);
         return;
@@ -205,6 +220,64 @@ async Task HandleRequestAsync(NetworkStream stream, string method, string target
     {
         var bus = new AgentBusStore(query.TryGetValue("busRoot", out var busRoot) ? busRoot : defaultBusRoot);
         await WriteJsonAsync(stream, 200, new { events = bus.ListEvents(500) }).ConfigureAwait(false);
+        return;
+    }
+
+    if (method == "GET" && path == "api/appserver-adapter")
+    {
+        await WriteJsonAsync(stream, 200, appServer.Status).ConfigureAwait(false);
+        return;
+    }
+
+    if (method == "GET" && path == "api/controller-policy")
+    {
+        await WriteJsonAsync(stream, 200, controller.Status.Policy).ConfigureAwait(false);
+        return;
+    }
+
+    if (method == "POST" && path == "api/controller-policy/reload")
+    {
+        var request = string.IsNullOrWhiteSpace(body)
+            ? JsonSerializer.Deserialize<JsonElement>("{}")
+            : JsonSerializer.Deserialize<JsonElement>(body, JsonFile.Options);
+        await WriteJsonAsync(stream, 200, controller.ReloadPolicy(JsonString(request, "policyPath") ?? JsonString(request, "path"))).ConfigureAwait(false);
+        return;
+    }
+
+    if (method == "GET" && path == "api/controller")
+    {
+        await WriteJsonAsync(stream, 200, controller.Status).ConfigureAwait(false);
+        return;
+    }
+
+    if (method == "POST" && path == "api/controller/reload")
+    {
+        var request = string.IsNullOrWhiteSpace(body)
+            ? JsonSerializer.Deserialize<JsonElement>("{}")
+            : JsonSerializer.Deserialize<JsonElement>(body, JsonFile.Options);
+        var policyPath = JsonString(request, "policyPath");
+        if (!string.IsNullOrWhiteSpace(policyPath))
+        {
+            controller.ReloadPolicy(policyPath);
+        }
+
+        await WriteJsonAsync(stream, 200, controller.Reload(
+            JsonString(request, "pluginPath") ?? JsonString(request, "path"),
+            JsonString(request, "pluginType") ?? JsonString(request, "type"),
+            JsonStringDictionary(request, "options"))).ConfigureAwait(false);
+        return;
+    }
+
+    if (method == "POST" && path == "api/appserver-adapter/reload")
+    {
+        var request = string.IsNullOrWhiteSpace(body)
+            ? JsonSerializer.Deserialize<JsonElement>("{}")
+            : JsonSerializer.Deserialize<JsonElement>(body, JsonFile.Options);
+        var status = appServer.Reload(
+            JsonString(request, "pluginPath") ?? JsonString(request, "path"),
+            JsonString(request, "pluginType") ?? JsonString(request, "type"),
+            JsonStringDictionary(request, "options"));
+        await WriteJsonAsync(stream, 200, status).ConfigureAwait(false);
         return;
     }
 
@@ -410,6 +483,43 @@ static Dictionary<string, string> ParseQuery(string query)
     }
 
     return result;
+}
+
+static string? JsonString(JsonElement element, string name)
+{
+    return element.ValueKind == JsonValueKind.Object
+        && element.TryGetProperty(name, out var value)
+        && value.ValueKind == JsonValueKind.String
+        ? value.GetString()
+        : null;
+}
+
+static IReadOnlyDictionary<string, string> JsonStringDictionary(JsonElement element, string name)
+{
+    if (element.ValueKind != JsonValueKind.Object
+        || !element.TryGetProperty(name, out var value)
+        || value.ValueKind != JsonValueKind.Object)
+    {
+        return new Dictionary<string, string>();
+    }
+
+    return value.EnumerateObject()
+        .Where(property => property.Value.ValueKind == JsonValueKind.String)
+        .ToDictionary(property => property.Name, property => property.Value.GetString() ?? "", StringComparer.OrdinalIgnoreCase);
+}
+
+static string ResolveProjectRootForBus(string busRoot)
+{
+    var full = Path.GetFullPath(busRoot);
+    var directory = new DirectoryInfo(full);
+    if (string.Equals(directory.Name, "agentbus", StringComparison.OrdinalIgnoreCase)
+        && string.Equals(directory.Parent?.Name, ".codexteamup", StringComparison.OrdinalIgnoreCase)
+        && directory.Parent?.Parent is not null)
+    {
+        return directory.Parent.Parent.FullName;
+    }
+
+    return Environment.CurrentDirectory;
 }
 
 static string? ReadOption(string[] args, string name)

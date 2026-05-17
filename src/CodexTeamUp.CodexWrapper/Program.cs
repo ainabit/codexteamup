@@ -50,7 +50,7 @@ try
 
     if (IsAppServerInvocation(args))
     {
-        await RunAppServerProxyAsync(process, logger, cancellation.Token).ConfigureAwait(false);
+        await RunAppServerProxyAsync(process, args, logger, cancellation.Token).ConfigureAwait(false);
     }
     else
     {
@@ -95,14 +95,15 @@ static async Task RunTransparentProxyAsync(Process process, CancellationToken ca
     await Task.WhenAll(stdoutTask, stderrTask).ConfigureAwait(false);
 }
 
-static async Task RunAppServerProxyAsync(Process process, WrapperLogger logger, CancellationToken cancellationToken)
+static async Task RunAppServerProxyAsync(Process process, string[] args, WrapperLogger logger, CancellationToken cancellationToken)
 {
     var pipeName = ResolvePipeName();
+    var exposeBridge = ShouldExposeBridgePipe(args);
     var pending = new ConcurrentDictionary<string, PendingBridgeRequest>();
     using var proxyCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
     using var childWriteLock = new SemaphoreSlim(1, 1);
 
-    logger.Write("appserver-proxy-start", new { pipeName, childPid = process.Id });
+    logger.Write("appserver-proxy-start", new { pipeName, childPid = process.Id, exposeBridge, args });
 
     var desktopToChild = RelayJsonLinesAsync(
         source: Console.OpenStandardInput(),
@@ -130,14 +131,16 @@ static async Task RunAppServerProxyAsync(Process process, WrapperLogger logger, 
         closeDestination: false,
         cancellationToken);
 
-    var pipeServer = RunBridgePipeServerAsync(
-        pipeName,
-        process.Id,
-        process.StandardInput.BaseStream,
-        childWriteLock,
-        pending,
-        logger,
-        proxyCancellation.Token);
+    var pipeServer = exposeBridge
+        ? RunBridgePipeServerAsync(
+            pipeName,
+            process.Id,
+            process.StandardInput.BaseStream,
+            childWriteLock,
+            pending,
+            logger,
+            proxyCancellation.Token)
+        : Task.CompletedTask;
 
     await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
     await proxyCancellation.CancelAsync().ConfigureAwait(false);
@@ -161,7 +164,7 @@ static async Task RunBridgePipeServerAsync(
 {
     while (!cancellationToken.IsCancellationRequested)
     {
-        await using var pipe = new NamedPipeServerStream(
+        var pipe = new NamedPipeServerStream(
             pipeName,
             PipeDirection.InOut,
             NamedPipeServerStream.MaxAllowedServerInstances,
@@ -171,14 +174,30 @@ static async Task RunBridgePipeServerAsync(
         try
         {
             await pipe.WaitForConnectionAsync(cancellationToken).ConfigureAwait(false);
-            await HandleBridgePipeClientAsync(pipe, childPid, childStdin, childWriteLock, pending, logger, cancellationToken).ConfigureAwait(false);
+            _ = Task.Run(async () =>
+            {
+                await using var connectedPipe = pipe;
+                try
+                {
+                    await HandleBridgePipeClientAsync(pipe, childPid, childStdin, childWriteLock, pending, logger, cancellationToken).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                }
+                catch (Exception ex)
+                {
+                    logger.Write("pipe-client-error", new { type = ex.GetType().FullName, ex.Message });
+                }
+            }, CancellationToken.None);
         }
         catch (OperationCanceledException)
         {
+            await pipe.DisposeAsync().ConfigureAwait(false);
             break;
         }
         catch (Exception ex)
         {
+            await pipe.DisposeAsync().ConfigureAwait(false);
             logger.Write("pipe-error", new { type = ex.GetType().FullName, ex.Message });
         }
     }
@@ -446,6 +465,27 @@ static string ResolvePipeName()
     return "codexteamup-appserver";
 }
 
+static bool ShouldExposeBridgePipe(string[] args)
+{
+    var mode = Environment.GetEnvironmentVariable("CODEX_WRAPPER_BRIDGE_MODE");
+    if (string.Equals(mode, "all", StringComparison.OrdinalIgnoreCase))
+    {
+        return true;
+    }
+
+    if (string.Equals(mode, "none", StringComparison.OrdinalIgnoreCase))
+    {
+        return false;
+    }
+
+    if (args.Any(arg => string.Equals(arg, "--analytics-default-enabled", StringComparison.OrdinalIgnoreCase)))
+    {
+        return true;
+    }
+
+    return false;
+}
+
 static bool IsAppServerInvocation(string[] args)
 {
     return args.Length > 0 && string.Equals(args[0], "app-server", StringComparison.OrdinalIgnoreCase);
@@ -575,6 +615,7 @@ static Dictionary<string, string?> SelectedEnvironment()
         "CODEX_WRAPPER_REAL_CODEX",
         "CODEX_WRAPPER_LOG_DIR",
         "CODEX_WRAPPER_PIPE_NAME",
+        "CODEX_WRAPPER_BRIDGE_MODE",
         "CODEX_WRAPPER_REQUEST_TIMEOUT_MS",
         "CODEX_WRAPPER_FORCE_TURNS_ASC",
         "CODEX_WRAPPER_STAMP_TURN_STARTED_AT",
@@ -634,17 +675,22 @@ static class WrapperJson
 sealed class WrapperLogger
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
-    private readonly string? logFile;
+    private readonly string invocationId;
+    private readonly string? jsonlFile;
+    private readonly string? humanFile;
     private readonly object gate = new();
 
-    private WrapperLogger(string? logFile)
+    private WrapperLogger(string invocationId, string? jsonlFile, string? humanFile)
     {
-        this.logFile = logFile;
+        this.invocationId = invocationId;
+        this.jsonlFile = jsonlFile;
+        this.humanFile = humanFile;
     }
 
     public static WrapperLogger Create(string invocationId)
     {
-        var configuredDir = Environment.GetEnvironmentVariable("CODEX_WRAPPER_LOG_DIR");
+        var configuredDir = Environment.GetEnvironmentVariable("CODEX_WRAPPER_LOG_DIR")
+            ?? Environment.GetEnvironmentVariable("CTU_LOG_ROOT");
         var logDir = string.IsNullOrWhiteSpace(configuredDir)
             ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex", "codexteamup-wrapper")
             : Environment.ExpandEnvironmentVariables(configuredDir.Trim());
@@ -652,17 +698,21 @@ sealed class WrapperLogger
         try
         {
             Directory.CreateDirectory(logDir);
-            return new WrapperLogger(Path.Combine(logDir, $"codex-wrapper-{invocationId}.jsonl"));
+            var date = DateTimeOffset.Now.ToString("yyyyMMdd");
+            return new WrapperLogger(
+                invocationId,
+                Path.Combine(logDir, $"wrapper-{date}.jsonl"),
+                Path.Combine(logDir, $"wrapper-{date}.log"));
         }
         catch
         {
-            return new WrapperLogger(null);
+            return new WrapperLogger(invocationId, null, null);
         }
     }
 
     public void Write(string type, object payload)
     {
-        if (string.IsNullOrWhiteSpace(logFile))
+        if (string.IsNullOrWhiteSpace(jsonlFile) && string.IsNullOrWhiteSpace(humanFile))
         {
             return;
         }
@@ -670,16 +720,27 @@ sealed class WrapperLogger
         var entry = new
         {
             timestamp = DateTimeOffset.UtcNow,
+            invocationId,
+            pid = Environment.ProcessId,
             type,
             payload
         };
 
         var line = JsonSerializer.Serialize(entry, JsonOptions);
+        var humanLine = $"{DateTimeOffset.Now:O} [{type}] pid={Environment.ProcessId} invocation={invocationId} {JsonSerializer.Serialize(payload, JsonOptions)}";
         lock (gate)
         {
             try
             {
-                File.AppendAllText(logFile, line + Environment.NewLine, Encoding.UTF8);
+                if (!string.IsNullOrWhiteSpace(jsonlFile))
+                {
+                    File.AppendAllText(jsonlFile, line + Environment.NewLine, Encoding.UTF8);
+                }
+
+                if (!string.IsNullOrWhiteSpace(humanFile))
+                {
+                    File.AppendAllText(humanFile, humanLine + Environment.NewLine, Encoding.UTF8);
+                }
             }
             catch
             {

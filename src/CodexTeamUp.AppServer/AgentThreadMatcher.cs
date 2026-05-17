@@ -54,23 +54,29 @@ public static class AgentThreadMatcher
 
     private static int Score(CodexThreadRecord thread, string normalizedAgent, string withoutPrefix)
     {
-        var haystack = Normalize(thread.Name);
-        if (haystack.Length == 0)
+        var name = Normalize(thread.Name);
+        var preview = Normalize(thread.Preview);
+        if (name.Length == 0 && preview.Length == 0)
         {
             return 0;
         }
 
-        if (haystack == normalizedAgent)
+        if (name == normalizedAgent)
         {
             return 100;
         }
 
-        if (haystack.Contains(normalizedAgent, StringComparison.Ordinal))
+        if (preview == normalizedAgent)
+        {
+            return 95;
+        }
+
+        if (name.Contains(normalizedAgent, StringComparison.Ordinal))
         {
             return 90;
         }
 
-        if (!string.IsNullOrWhiteSpace(withoutPrefix) && haystack.Contains(withoutPrefix, StringComparison.Ordinal))
+        if (!string.IsNullOrWhiteSpace(withoutPrefix) && name.Contains(withoutPrefix, StringComparison.Ordinal))
         {
             return 70;
         }
