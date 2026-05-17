@@ -2,6 +2,19 @@
 
 All notable CodexTeamUp changes are tracked here by date. The project does not use formal version numbers yet.
 
+## 2026-05-18
+
+### Fresh Clone Acceptance Path
+
+- Added `scripts/test-fresh-clone-acceptance.ps1` as the smallest acceptance runner for a real fresh clone.
+- Clarified in `AGENTS.md`, `README.md`, and onboarding docs that `codexteamup.acceptance` is a separate outside-user checkout, not a second development workspace.
+- Updated the acceptance flow so it runs against the current checkout and refuses to masquerade a plain state folder as a real clone.
+- Verified that CTU can be started from `S:/_work/_development/codexteamup.acceptance` and that the acceptance clone can run the deterministic suite plus the live `basic` smoke.
+
+Why this exists:
+
+We want to test the path another person would actually take, not just whether the branch works inside the main development checkout. The acceptance clone acts like a synthetic outside-user machine: clone from remote, start CTU there, let visible agents validate the run, and only fix problems back in the main repo. That keeps the test honest and makes failures easier to reason about.
+
 ## 2026-05-17
 
 ### Dashboard Flow Visibility
