@@ -3,7 +3,7 @@ param(
     [string]$Workspace = "",
     [string]$RunId = "",
     [string]$Prefix = "ctu-test",
-    [ValidateSet("basic", "peer", "replacement", "controller", "all")]
+    [ValidateSet("basic", "peer", "replacement", "controller", "controller-suite", "all")]
     [string]$Scenario = "all",
     [string]$ControllerAgent = "ctu-test/architect",
     [int]$TimeoutSeconds = 900,
@@ -182,6 +182,31 @@ function Wait-TeamMessageResult {
     throw "Timed out waiting for $Label result."
 }
 
+function Assert-ResultContains {
+    param(
+        [Parameter(Mandatory = $true)]
+        $Result,
+
+        [Parameter(Mandatory = $true)]
+        [string[]]$Markers,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Label
+    )
+
+    $haystack = @(
+        $Result.summary
+        $Result.outcome
+        $Result.tests
+        $Result.checks
+        $Result.nextSuggestedAction
+    ) -join "`n"
+
+    foreach ($marker in $Markers) {
+        Assert-True ($haystack -like "*$marker*") "Expected $Label result to contain evidence marker '$marker'."
+    }
+}
+
 function Wait-DeferredOperation {
     param(
         [Parameter(Mandatory = $true)]
@@ -348,7 +373,7 @@ Write-Host "  workspace: $Workspace"
 Write-Host "  run id:    $RunId"
 Write-Host "  scenario:  $Scenario"
 Write-Host "  agents:    $agentA, $agentB, $agentC"
-if ($Scenario -eq "controller") {
+if ($Scenario -eq "controller" -or $Scenario -eq "controller-suite") {
     Write-Host "  controller: $ControllerAgent"
 }
 Write-Host "  tool wait: ${ToolTimeoutSeconds}s"
@@ -364,7 +389,7 @@ try {
         throw "Could not reach live Codex Desktop wrapper through CTU. Start Desktop with scripts/start-codexteamup.ps1 first. $($_.Exception.Message)"
     }
 
-    if ($Scenario -eq "controller") {
+    if ($Scenario -eq "controller" -or $Scenario -eq "controller-suite") {
         Write-Host "Checking manually provided controller agent..."
         $controller = Get-Agent -Id $ControllerAgent
         if ($null -eq $controller -or [string]::IsNullOrWhiteSpace($controller.threadId)) {
@@ -391,7 +416,61 @@ try {
 
         $controller = Require-Agent -Id $ControllerAgent
 
-        $controllerPrompt = @"
+        if ($Scenario -eq "controller-suite") {
+            $suiteAgentAName = "$agentPrefix/implementation-role"
+            $suiteAgentBName = "$agentPrefix/review-role"
+            $suiteAgentCName = "$agentPrefix/deep-role"
+            $controllerPrompt = @"
+Live CTU controller-suite run $RunId.
+
+You are the manually provided test controller $ControllerAgent in workspace $Workspace.
+
+This is a repeatable safety-net package. Use CodexTeamUp MCP only. Keep direct calls short:
+- enqueue work quickly;
+- wake queued tasks with bridge_dispatch_task;
+- poll AgentBus in short chunks;
+- do not turn this into one long blocking RPC.
+
+Create or bind these run-scoped worker agents with team_ensure_agents defer=true prime=true setName=false:
+- id=$agentA, displayName=$suiteAgentAName, role="Implementation role marker for controller-suite; this role is intentionally not the id.", speed=fast, model=gpt-5.4-mini, reasoningEffort=low.
+- id=$agentB, displayName=$suiteAgentBName, role="Review role marker for controller-suite; this role is intentionally not the id.", speed=fast, model=gpt-5.4-mini, reasoningEffort=low.
+- id=$agentC, displayName=$suiteAgentCName, role="Deep reasoning role marker for controller-suite; this role is intentionally not the id.", speed=standard, model=gpt-5.4, reasoningEffort=medium.
+
+Verify with agentbus_list_agents that all three agents have active thread ids, persisted displayName values, persisted roles, and the requested model/reasoning/speed. Only then include evidence marker runtime-ok and role-ok in your final result.
+
+Then exercise these result/stop outcomes through normal AgentBus tasks:
+1. Send a task to $agentA asking for exactly one result with outcome done. Wait for it. Include outcome-done-ok only if observed.
+2. Send a task to $agentB asking for exactly one result with outcome human and a short open question. Wait for it. Include outcome-human-ok only if observed.
+3. Send a task to $agentC asking for exactly one result with outcome failed and a short failure reason. Wait for it. Include outcome-failed-ok only if observed.
+4. Send a task to $agentA asking it to create one child task for $agentB, wake it, and then write outcome handed_off back to you with the child task id. Wait for $agentA result. Include outcome-handed-off-ok only if observed.
+5. Send a task to $agentC asking it to write outcome self_continue with a deduplicated continuation wakeup after 5 seconds, then handle the continuation by writing outcome done. Poll continuations/results in short chunks. Include self-continue-ok only if both the self_continue result and follow-up done result are observed.
+
+Finally write exactly one AgentBus result for your controller-suite task back to ctu-test/runner.
+Your final result summary/checks must include these exact evidence markers only when verified:
+- runtime-ok
+- role-ok
+- outcome-done-ok
+- outcome-human-ok
+- outcome-failed-ok
+- outcome-handed-off-ok
+- self-continue-ok
+
+Also include worker agent ids, worker task ids, worker result ids, continuation id if available, and any Desktop wakeup uncertainty.
+Use forward-slash cwd values in any Git app directives.
+"@
+            $controllerTitle = "Live smoke: controller suite"
+            $resultLabel = "$ControllerAgent controller suite"
+            $requiredMarkers = @(
+                "runtime-ok",
+                "role-ok",
+                "outcome-done-ok",
+                "outcome-human-ok",
+                "outcome-failed-ok",
+                "outcome-handed-off-ok",
+                "self-continue-ok"
+            )
+        } else {
+            $controllerPrompt = @"
 Live CTU in-app smoke test run $RunId.
 
 You are the manually provided test controller $ControllerAgent in workspace $Workspace.
@@ -415,13 +494,17 @@ Finally write exactly one AgentBus result for your controller task back to ctu-t
 
 Use forward-slash cwd values in any Git app directives.
 "@
+            $controllerTitle = "Live smoke: controller orchestration"
+            $resultLabel = "$ControllerAgent controller orchestration"
+            $requiredMarkers = @()
+        }
 
         Write-Host "Sending controller-orchestrated smoke task..."
         $phaseController = Send-TeamMessageQueued -Dispatch -Arguments @{
             cwd = $Workspace
             from = "ctu-test/runner"
             to = $ControllerAgent
-            title = "Live smoke: controller orchestration"
+            title = $controllerTitle
             message = $controllerPrompt
             returnTo = "ctu-test/runner"
             waitResult = $false
@@ -431,10 +514,13 @@ Use forward-slash cwd values in any Git app directives.
             throw "Controller thread $ControllerAgent is bound but not wakeable through Desktop turn/start: $($phaseController.dispatchEvent.message)"
         }
 
-        $controllerResult = Wait-TeamMessageResult -Response $phaseController -Label "$ControllerAgent controller orchestration"
+        $controllerResult = Wait-TeamMessageResult -Response $phaseController -Label $resultLabel
+        if ($requiredMarkers.Count -gt 0) {
+            Assert-ResultContains -Result $controllerResult -Markers $requiredMarkers -Label $resultLabel
+        }
 
         Write-Host ""
-        Write-Host "PASS live CTU controller smoke run $RunId"
+        Write-Host "PASS live CTU $Scenario smoke run $RunId"
         Write-Host "  controller: $ControllerAgent"
         Write-Host "  controller result: $($controllerResult.id)"
         return

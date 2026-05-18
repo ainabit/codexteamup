@@ -5,12 +5,13 @@ This feature needs a real Codex Desktop smoke path because the risky behavior li
 The target live scenario is:
 
 1. assume a manually created first controller agent such as `ctu-test/architect` exists in the test project,
-2. optionally ask that controller to create or bind `ctu-test/<run-id>/agent-a`,
+2. optionally ask that controller to create or bind run-scoped workers such as `ctu-test/<run-id>/agent-a`,
 3. have `agent-a` or the controller create or wake `agent-b` and `agent-c`,
 3. verify `agent-b` and `agent-c` can communicate through AgentBus,
 4. take the `agent-b` binding out of service and create or bind a replacement,
 5. verify `model`, `speed`, and `reasoningEffort` are persisted and passed into wakeups,
-6. archive the temporary test chats and mark their AgentBus bindings as retired when cleanup is requested.
+6. verify agent-owned continuation and terminal outcome behavior when the controller-suite scenario is used,
+7. archive the temporary test chats and mark their AgentBus bindings as retired when cleanup is requested.
 
 ## Test Agent Prefix
 
@@ -34,9 +35,10 @@ powershell -ExecutionPolicy Bypass -File .\scripts\test-codexteamup.ps1 -UseTest
 
 After changing CTU service, wrapper, or MCP tool registration code, restart Desktop through `scripts/start-codexteamup.ps1` before live smoke tests. The running service must expose the branch's current MCP tools.
 
-The three repeatable smoke tests are:
+The repeatable smoke tests are:
 
 - `controller`: send one task to the manually provided `ctu-test/architect`; the controller performs the run-scoped orchestration from inside Codex Desktop.
+- `controller-suite`: send one packaged safety-net task to `ctu-test/architect`; the controller creates workers with distinct display names, roles, models, and reasoning depths, then verifies terminal outcomes and self-continuation evidence.
 - `basic`: create or bind `agent-a`, wake it, and wait for one AgentBus result.
 - `peer`: run `basic`, have `agent-a` create `agent-b` and `agent-c`, and verify `agent-b -> agent-c` communication.
 - `replacement`: run `peer`, mark `agent-b` stale, create or bind a replacement, and verify the replacement handles a task.
@@ -46,6 +48,7 @@ Useful commands:
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\test-codexteamup.ps1
 powershell -ExecutionPolicy Bypass -File .\scripts\test-codexteamup.ps1 -UseTestWorkspace -Live -LiveScenario controller
+powershell -ExecutionPolicy Bypass -File .\scripts\test-codexteamup.ps1 -UseTestWorkspace -Live -LiveScenario controller-suite
 powershell -ExecutionPolicy Bypass -File .\scripts\test-codexteamup.ps1 -UseTestWorkspace -Live -LiveScenario basic
 powershell -ExecutionPolicy Bypass -File .\scripts\test-codexteamup.ps1 -UseTestWorkspace -Live -LiveScenario peer
 powershell -ExecutionPolicy Bypass -File .\scripts\test-codexteamup.ps1 -UseTestWorkspace -Live -LiveScenario replacement
@@ -54,6 +57,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\test-live-multi-agent-orchest
 ```
 
 `test-codexteamup.ps1` always runs `dotnet build` and the deterministic suite first. With `-UseTestWorkspace`, it creates or validates the sibling `codexteamup.test` workspace and keeps live AgentBus state out of the main repo. Live smoke runs clean up temporary test chats by default. Use `-KeepLiveAgents` only when the visible test threads need manual inspection.
+
+Every `test-codexteamup.ps1` run writes a Markdown safety report under `.codexteamup/reports` unless `-ReportPath` is provided. The report lists each high-level testcase with category, status, failure reason, and details so the run is inspectable without reading the full console log. Use `-LiveAll` as the repeatable "all current CTU features except fresh-clone acceptance" package.
 
 Live smoke tool calls use a short per-call timeout, defaulting to 10 seconds, so Desktop/app-server stalls fail with a clear phase instead of blocking the runner for many minutes. Override with `-ToolTimeoutSeconds` only for diagnostics.
 
@@ -68,9 +73,11 @@ The live smoke runner checks:
 - CTU service health,
 - wrapper reachability through `codex_thread_list`,
 - optional controller orchestration through a manually provided `ctu-test/architect`,
+- controller-driven agent creation with display names and roles that are intentionally not tied to the agent id,
 - creation and priming of `agent-a`,
 - `agent-a` creating agents, enqueuing tasks for `agent-b` and `agent-c`, and dispatching those tasks separately,
 - runtime settings on `agent-b` and `agent-c`,
+- controller-suite evidence markers for `done`, `human`, `failed`, `handed_off`, and agent-owned `self_continue`,
 - peer communication from `agent-b` to `agent-c`,
 - replacement of a stale `agent-b` binding,
 - replacement wakeup and result.
@@ -90,6 +97,8 @@ The tester should choose the smallest useful set:
 - normal fixes: `test-codexteamup.ps1`
 - wakeup, binding, runtime, MCP, AgentBus, service, or wrapper changes: deterministic safety net plus one live scenario
 - broad orchestration changes: deterministic safety net plus `-LiveAll`
+
+Use `controller-suite` as the frequent packaged CTU-in-Desktop proof when the goal is to verify the whole coordination loop through `ctu-test/architect` rather than through the architect chat that is currently developing CTU.
 
 The tester result must include the commands used, pass/fail status, live run id, cleanup status, and any blockers.
 

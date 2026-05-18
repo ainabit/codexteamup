@@ -1,7 +1,7 @@
 param(
     [switch]$Live,
     [switch]$LiveAll,
-    [ValidateSet("basic", "peer", "replacement", "controller", "all")]
+    [ValidateSet("basic", "peer", "replacement", "controller", "controller-suite", "all")]
     [string]$LiveScenario = "basic",
     [string]$ServiceUrl = "http://127.0.0.1:47319/",
     [string]$Workspace = "",
@@ -17,7 +17,8 @@ param(
     [switch]$KeepLiveAgents,
     [switch]$Coverage,
     [int]$CoverageThreshold = 80,
-    [string]$CoverageOutput = ""
+    [string]$CoverageOutput = "",
+    [string]$ReportPath = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -48,6 +49,7 @@ if ($PSVersionTable.PSEdition -ne "Core") {
         if ($Coverage) { $forward += "-Coverage" }
         $forward += @("-CoverageThreshold", $CoverageThreshold)
         if (-not [string]::IsNullOrWhiteSpace($CoverageOutput)) { $forward += @("-CoverageOutput", $CoverageOutput) }
+        if (-not [string]::IsNullOrWhiteSpace($ReportPath)) { $forward += @("-ReportPath", $ReportPath) }
         & $pwsh @forward
         exit $LASTEXITCODE
     }
@@ -82,6 +84,93 @@ if ([string]::IsNullOrWhiteSpace($ArtifactsPath)) {
 }
 
 $ArtifactsPath = [System.IO.Path]::GetFullPath($ArtifactsPath)
+if ([string]::IsNullOrWhiteSpace($ReportPath)) {
+    $reportName = "codexteamup-safety-" + (Get-Date -Format "yyyyMMdd-HHmmss") + ".md"
+    $ReportPath = Join-Path $repoRoot ".codexteamup\reports\$reportName"
+}
+
+$ReportPath = [System.IO.Path]::GetFullPath($ReportPath)
+$reportRows = [System.Collections.Generic.List[object]]::new()
+
+function Add-ReportRow {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Category,
+
+        [Parameter(Mandatory = $true)]
+        [string]$TestCase,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("passed", "failed", "skipped")]
+        [string]$Status,
+
+        [string]$Reason = "",
+
+        [string]$Details = ""
+    )
+
+    $script:reportRows.Add([pscustomobject]@{
+        Category = $Category
+        TestCase = $TestCase
+        Status = $Status
+        Reason = $Reason
+        Details = $Details
+    })
+}
+
+function Get-TestCategory {
+    param([string]$Name)
+
+    if ($Name -like "AgentBus*" -or $Name -like "*AgentBus*") { return "AgentBus protocol" }
+    if ($Name -like "Controller*" -or $Name -like "*continuation*" -or $Name -like "*guardian*" -or $Name -like "*delivery loop*") { return "Controller continuity" }
+    if ($Name -like "MCP*" -or $Name -like "*MCP*") { return "MCP surface" }
+    if ($Name -like "Wrapper*" -or $Name -like "*Wrapper*" -or $Name -like "*app-server*" -or $Name -like "*app server*") { return "Desktop adapter" }
+    if ($Name -like "Restart*" -or $Name -like "*Restart*" -or $Name -like "*startup*" -or $Name -like "*Exchange*") { return "Restart and exchange" }
+    if ($Name -like "*dashboard*" -or $Name -like "*Dashboard*") { return "Dashboard" }
+    if ($Name -like "*runtime*" -or $Name -like "*Runtime*") { return "Runtime settings" }
+    return "Core"
+}
+
+function Convert-ReportCell {
+    param([string]$Value)
+
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        return ""
+    }
+
+    ($Value -replace "\r?\n", " " -replace "\|", "\|").Trim()
+}
+
+function Write-SafetyReport {
+    $reportDirectory = Split-Path -Parent $ReportPath
+    if (-not [string]::IsNullOrWhiteSpace($reportDirectory)) {
+        New-Item -ItemType Directory -Force -Path $reportDirectory | Out-Null
+    }
+
+    $total = $reportRows.Count
+    $passed = @($reportRows | Where-Object { $_.Status -eq "passed" }).Count
+    $failed = @($reportRows | Where-Object { $_.Status -eq "failed" }).Count
+    $skipped = @($reportRows | Where-Object { $_.Status -eq "skipped" }).Count
+
+    $lines = [System.Collections.Generic.List[string]]::new()
+    $lines.Add("# CodexTeamUp Safety Report")
+    $lines.Add("")
+    $lines.Add("- generated: $(Get-Date -Format "yyyy-MM-dd HH:mm:ss zzz")")
+    $lines.Add("- workspace: $Workspace")
+    $lines.Add("- artifacts: $ArtifactsPath")
+    $lines.Add("- totals: $total total, $passed passed, $failed failed, $skipped skipped")
+    $lines.Add("")
+    $lines.Add("| Category | Test case | Status | Reason | Details |")
+    $lines.Add("| --- | --- | --- | --- | --- |")
+
+    foreach ($row in $reportRows) {
+        $lines.Add("| $(Convert-ReportCell $row.Category) | $(Convert-ReportCell $row.TestCase) | $(Convert-ReportCell $row.Status) | $(Convert-ReportCell $row.Reason) | $(Convert-ReportCell $row.Details) |")
+    }
+
+    Set-Content -LiteralPath $ReportPath -Value $lines -Encoding UTF8
+    Write-Host ""
+    Write-Host "Safety report: $ReportPath"
+}
 
 function Invoke-Checked {
     param(
@@ -210,14 +299,17 @@ if ($UseAcceptanceWorkspace -or $Workspace.EndsWith(".acceptance", [StringCompar
 Write-Host "CodexTeamUp safety net"
 Write-Host "  workspace: $Workspace"
 Write-Host "  artifacts: $ArtifactsPath"
+Write-Host "  report:    $ReportPath"
 Write-Host ""
 
 Write-Host "Running restore..."
 Invoke-Checked -Name "dotnet restore" -Command { dotnet restore --disable-parallel --artifacts-path $ArtifactsPath }
+Add-ReportRow -Category "Build" -TestCase "Restore solution packages" -Status "passed" -Details "dotnet restore --artifacts-path"
 Write-Host ""
 
 Write-Host "Running build..."
 Invoke-CheckedWithBuildRetry -Name "dotnet build" -Command { dotnet build --no-restore --disable-build-servers --artifacts-path $ArtifactsPath /p:UseSharedCompilation=false }
+Add-ReportRow -Category "Build" -TestCase "Build solution into isolated artifacts" -Status "passed" -Details "No src/bin or src/obj runtime dependency"
 
 Write-Host ""
 Write-Host "Running deterministic test suite..."
@@ -231,7 +323,29 @@ try {
     Set-Item -LiteralPath "Env:CTU_TEST_REPO_ROOT" -Value $repoRoot
     Remove-Item -LiteralPath "Env:CTU_CONTROLLER_PLUGIN_TYPE" -ErrorAction SilentlyContinue
 
-    Invoke-Checked -Name "deterministic test suite" -Command { dotnet $testDll }
+    $deterministicOutput = & dotnet $testDll 2>&1
+    $deterministicExitCode = $LASTEXITCODE
+    foreach ($lineObject in $deterministicOutput) {
+        $line = [string]$lineObject
+        Write-Host $line
+        if ($line -match "^PASS\s+(.+)$") {
+            $testName = $Matches[1].Trim()
+            Add-ReportRow -Category (Get-TestCategory $testName) -TestCase $testName -Status "passed"
+        } elseif ($line -match "^FAIL\s+([^:]+):\s*(.*)$") {
+            $testName = $Matches[1].Trim()
+            $reason = $Matches[2].Trim()
+            Add-ReportRow -Category (Get-TestCategory $testName) -TestCase $testName -Status "failed" -Reason $reason
+        }
+    }
+
+    if ($deterministicExitCode -ne 0) {
+        if (-not ($reportRows | Where-Object { $_.Category -ne "Build" })) {
+            Add-ReportRow -Category "Deterministic suite" -TestCase "Run deterministic test binary" -Status "failed" -Reason "dotnet $testDll exited with code $deterministicExitCode"
+        }
+
+        Write-SafetyReport
+        throw "deterministic test suite failed with exit code $deterministicExitCode."
+    }
 
     if ($Coverage) {
         Write-Host ""
@@ -256,6 +370,7 @@ try {
                 --threshold-type line `
                 --threshold-stat total
         }
+        Add-ReportRow -Category "Coverage" -TestCase "Line coverage gate" -Status "passed" -Details "Threshold $CoverageThreshold percent"
     }
 } finally {
     if ($null -eq $previousControllerPluginPath) {
@@ -280,13 +395,14 @@ try {
 if (-not $Live -and -not $LiveAll) {
     Write-Host ""
     Write-Host "PASS CodexTeamUp deterministic safety net"
+    Write-SafetyReport
     exit 0
 }
 
 $scenarios = if ($LiveAll) {
-    @("basic", "peer", "replacement")
+    @("controller-suite", "basic", "peer", "replacement")
 } elseif ($LiveScenario -eq "all") {
-    @("replacement")
+    @("controller-suite", "basic", "peer", "replacement")
 } else {
     @($LiveScenario)
 }
@@ -325,8 +441,24 @@ foreach ($scenario in $scenarios) {
         $powerShellRunner = (Get-Command powershell -ErrorAction Stop).Source
     }
 
-    Invoke-Checked -Name "live smoke $scenario" -Command { & $powerShellRunner @liveArgs }
+    $liveOutput = & $powerShellRunner @liveArgs 2>&1
+    $liveExitCode = $LASTEXITCODE
+    foreach ($lineObject in $liveOutput) {
+        Write-Host ([string]$lineObject)
+    }
+
+    $liveText = ($liveOutput | ForEach-Object { [string]$_ }) -join "`n"
+    if ($liveExitCode -eq 0) {
+        $details = if ($liveText -match "PASS live CTU .+ smoke run ([^\r\n]+)") { "run $($Matches[1].Trim())" } else { "scenario completed" }
+        Add-ReportRow -Category "Live smoke" -TestCase "$scenario scenario" -Status "passed" -Details $details
+    } else {
+        $reasonLines = @($liveOutput | Select-Object -Last 8 | ForEach-Object { [string]$_ })
+        Add-ReportRow -Category "Live smoke" -TestCase "$scenario scenario" -Status "failed" -Reason ($reasonLines -join " ")
+        Write-SafetyReport
+        throw "live smoke $scenario failed with exit code $liveExitCode."
+    }
 }
 
 Write-Host ""
 Write-Host "PASS CodexTeamUp safety net"
+Write-SafetyReport
