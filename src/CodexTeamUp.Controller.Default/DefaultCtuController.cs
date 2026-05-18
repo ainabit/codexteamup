@@ -17,6 +17,7 @@ public sealed class DefaultCtuController : ICtuController
     private static readonly SemaphoreSlim DesktopWakeupGate = new(1, 1);
     private static readonly TimeSpan StartupSweepLeaseDuration = TimeSpan.FromMinutes(2);
     private static readonly TimeSpan DeliverySweepWait = TimeSpan.FromMilliseconds(200);
+    private static readonly TimeSpan DirectDeliveryRetryDelay = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan ResultNotificationRetryDelay = TimeSpan.FromSeconds(3);
     private const int MaxResultNotifyRetryAttempts = 8;
     private readonly ReloadableCtuControllerPolicy _controllerPolicy;
@@ -122,7 +123,6 @@ public sealed class DefaultCtuController : ICtuController
         continuity.Initialize();
         var now = DateTimeOffset.Now;
         var staleClaimRecoveryDelay = TimeSpan.FromSeconds(_controllerPolicy.Policy.StaleClaimedTaskRecoverySeconds);
-        var directDeliveryRetryDelay = TimeSpan.FromSeconds(_controllerPolicy.Policy.StaleClaimedTaskRecoverySeconds);
         var recoverable = bus.ListTasks()
             .Where(task => string.Equals(task.Status, "open", StringComparison.OrdinalIgnoreCase)
                 || string.Equals(task.Status, "claimed", StringComparison.OrdinalIgnoreCase))
@@ -154,7 +154,7 @@ public sealed class DefaultCtuController : ICtuController
 
         var openTasks = bus.ListTasks(status: "open")
             .Where(task => task.Status.Equals("open", StringComparison.OrdinalIgnoreCase))
-            .Where(task => ShouldAttemptDirectDelivery(continuity.ReadLatest(task.Id), task, now, directDeliveryRetryDelay))
+            .Where(task => ShouldAttemptDirectDelivery(continuity.ReadLatest(task.Id), task, now, DirectDeliveryRetryDelay))
             .ToList();
         if (openTasks.Count == 0)
         {
@@ -367,6 +367,11 @@ public sealed class DefaultCtuController : ICtuController
                     continue;
                 }
 
+                if (IsUnchangedTaskContinuityObservation(existing, targetState, task))
+                {
+                    continue;
+                }
+
                 var nextState = BuildContinuityState(
                     task.Id,
                     existing,
@@ -512,7 +517,7 @@ public sealed class DefaultCtuController : ICtuController
             return ExecutionContinuityStateKind.BlockedNeedsHuman;
         }
 
-        if (string.Equals(result.Status, "completed", StringComparison.OrdinalIgnoreCase))
+        if (IsCompletedResultStatus(result.Status))
         {
             if (result.NotifyAttempts > 0 && result.LastNotifiedAt is null)
             {
@@ -524,7 +529,7 @@ public sealed class DefaultCtuController : ICtuController
                 : ExecutionContinuityStateKind.DelegatedNextTask;
         }
 
-        if (string.Equals(result.Status, "failed", StringComparison.OrdinalIgnoreCase))
+        if (IsFailedResultStatus(result.Status))
         {
             return ExecutionContinuityStateKind.BlockedNeedsHuman;
         }
@@ -535,6 +540,19 @@ public sealed class DefaultCtuController : ICtuController
     private static bool ShouldContinueFromResultState(string targetState)
     {
         return !ExecutionContinuityStateKind.TerminalStates.Contains(targetState);
+    }
+
+    private static bool IsCompletedResultStatus(string? status)
+    {
+        return string.Equals(status, "completed", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(status, "done", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(status, "succeeded", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsFailedResultStatus(string? status)
+    {
+        return string.Equals(status, "failed", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(status, "error", StringComparison.OrdinalIgnoreCase);
     }
 
     private (string id, string displayName) ContinuityGuardian()
@@ -569,6 +587,22 @@ public sealed class DefaultCtuController : ICtuController
             && !ExecutionContinuityStateKind.TerminalStates.Contains(existing.State)
             && string.Equals(existing.State, targetState, StringComparison.OrdinalIgnoreCase)
             && string.Equals(existing.LastOutcomeRef, outcomeRef, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsUnchangedTaskContinuityObservation(
+        ExecutionContinuityState? existing,
+        string targetState,
+        AgentBusTask task)
+    {
+        return existing is not null
+            && !ExecutionContinuityStateKind.TerminalStates.Contains(existing.State)
+            && string.Equals(existing.State, targetState, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(existing.LastOutcomeKind, "queued", StringComparison.OrdinalIgnoreCase)
+            && string.Equals(existing.LastOutcomeRef, task.Id, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(existing.NextActionKind, "task", StringComparison.OrdinalIgnoreCase)
+            && string.Equals(existing.NextActionRef, task.Id, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(existing.CurrentTargetAgentId, task.To, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(existing.CurrentTargetDisplayName, task.To, StringComparison.OrdinalIgnoreCase);
     }
 
     private async Task ProcessContinuityActionStatesAsync(AgentBusStore bus, ExecutionContinuityStateStore continuity, CancellationToken cancellationToken)
@@ -700,6 +734,14 @@ public sealed class DefaultCtuController : ICtuController
             return;
         }
 
+        if (task.LastDeliveryAttemptAt is not null
+            && task.DeliveryAttempts > 0
+            && ShouldRateLimitDeliveryRetry(task.LastDeliveryError)
+            && DateTimeOffset.Now - task.LastDeliveryAttemptAt.Value < DirectDeliveryRetryDelay)
+        {
+            return;
+        }
+
         bus.RecordEvent(new AgentBusEvent
         {
             Timestamp = DateTimeOffset.Now,
@@ -724,7 +766,18 @@ public sealed class DefaultCtuController : ICtuController
                 Message = $"Dispatch continuation from continuity state '{state.State}' failed for task {task.Id}.",
                 Payload = new { stateId = state.StateId, dispatch.Error }
             });
+            return;
         }
+
+        var dispatchedTask = bus.FindTask(task.Id) ?? task;
+        RecordContinuityDispatchSatisfied(
+            bus,
+            continuity,
+            state,
+            dispatchedTask,
+            ExecutionContinuityStateKind.WaitingOnWorker,
+            "task_dispatched",
+            "Task already has a successful delivery attempt.");
     }
 
     private void RecordContinuityDispatchSatisfied(
@@ -1201,12 +1254,29 @@ public sealed class DefaultCtuController : ICtuController
             return true;
         }
 
-        if (!string.IsNullOrWhiteSpace(task.LastDeliveryError))
+        if (string.IsNullOrWhiteSpace(task.LastDeliveryError))
+        {
+            return now - task.LastDeliveryAttemptAt.Value >= retryDelay;
+        }
+
+        if (!ShouldRateLimitDeliveryRetry(task.LastDeliveryError))
         {
             return true;
         }
 
         return now - task.LastDeliveryAttemptAt.Value >= retryDelay;
+    }
+
+    private static bool ShouldRateLimitDeliveryRetry(string? lastDeliveryError)
+    {
+        if (string.IsNullOrWhiteSpace(lastDeliveryError))
+        {
+            return false;
+        }
+
+        return lastDeliveryError.Contains("wakeup deferred", StringComparison.OrdinalIgnoreCase)
+            || lastDeliveryError.Contains("still busy", StringComparison.OrdinalIgnoreCase)
+            || lastDeliveryError.Contains("timed out", StringComparison.OrdinalIgnoreCase);
     }
 
     private async Task ProcessAgentContinuationsAsync(CancellationToken cancellationToken)
@@ -3336,7 +3406,7 @@ public sealed class DefaultCtuController : ICtuController
         }
 
         var normalized = status.Trim().ToLowerInvariant();
-        return normalized is "notloaded" or "not_loaded" or "unknown";
+        return normalized is "active" or "notloaded" or "not_loaded" or "unknown";
     }
 
     private static string? TryFindBusyTurnStatus(string json)
@@ -3540,8 +3610,7 @@ public sealed class DefaultCtuController : ICtuController
         }
 
         var normalized = status.Trim().ToLowerInvariant();
-        return normalized.Contains("active", StringComparison.Ordinal)
-            || normalized.Contains("running", StringComparison.Ordinal)
+        return normalized.Contains("running", StringComparison.Ordinal)
             || normalized.Contains("inprogress", StringComparison.Ordinal)
             || normalized.Contains("in_progress", StringComparison.Ordinal)
             || normalized.Contains("busy", StringComparison.Ordinal);

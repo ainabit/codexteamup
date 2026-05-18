@@ -65,11 +65,13 @@ var tests = new (string Name, Func<Task> Body)[]
     ("MCP registry persists agent runtime settings", () => Task.Run(McpRegistryPersistsAgentRuntimeSettings)),
     ("MCP registry sends strict task wakeup", () => Task.Run(McpRegistrySendsStrictTaskWakeup)),
     ("MCP registry ACKs deferred task dispatch", () => Task.Run(McpRegistryAcksDeferredTaskDispatch)),
-    ("Controller delivery loop retries queued team message when target becomes callable", () => Task.Run(ControllerDeliveryLoopRetriesQueuedMessageWhenTargetCallable)),
+    ("Controller delivery loop waits before retrying queued team message", () => Task.Run(ControllerDeliveryLoopWaitsBeforeRetryingQueuedMessage)),
     ("Controller delivery loop supersedes older queued tasks for same target", () => Task.Run(ControllerDeliveryLoopSupersedesOlderQueuedTasks)),
     ("Controller delivery loop recovers stale claimed task", () => Task.Run(ControllerDeliveryLoopRecoversStaleClaimedTask)),
     ("Controller result notify retry persists metadata and retries from startup sweep", () => Task.Run(ControllerResultNotifyRetryPersistsMetadataAndRetries)),
     ("Controller guardian evaluates result into continuity state", () => Task.Run(ControllerGuardianEvaluatesResultIntoContinuityState)),
+    ("Controller guardian treats done result status as completed", () => Task.Run(ControllerGuardianTreatsDoneResultStatusAsCompleted)),
+    ("Controller guardian skips unchanged queued task observation", () => Task.Run(ControllerGuardianSkipsUnchangedQueuedTaskObservation)),
     ("Controller guardian resumes dispatch from continuity state", () => Task.Run(ControllerGuardianResumesDispatchFromContinuityState)),
     ("Controller guardian does not redispatch claimed task", () => Task.Run(ControllerGuardianDoesNotRedispatchClaimedTask)),
     ("Controller guardian resumes notify from continuity state", () => Task.Run(ControllerGuardianResumesNotifyFromContinuityState)),
@@ -92,8 +94,8 @@ var tests = new (string Name, Func<Task> Body)[]
     ("MCP registry creates replacement when display name changes", () => Task.Run(McpRegistryCreatesReplacementWhenDisplayNameChanges)),
     ("MCP registry retries thread naming until created thread is visible", () => Task.Run(McpRegistryRetriesThreadNamingUntilCreatedThreadIsVisible)),
     ("MCP registry notifies result through service path", () => Task.Run(McpRegistryNotifiesResultThroughServicePath)),
-    ("MCP registry defers result notify while target active", () => Task.Run(McpRegistryDefersResultNotifyWhileTargetActive)),
-    ("MCP registry reads target status when list is notLoaded", () => Task.Run(McpRegistryReadsTargetStatusWhenListIsNotLoaded)),
+    ("MCP registry defers result notify when read thread shows busy turn", () => Task.Run(McpRegistryDefersResultNotifyWhenReadThreadShowsBusyTurn)),
+    ("MCP registry sends result notify when active thread has no busy turns", () => Task.Run(McpRegistrySendsResultNotifyWhenActiveThreadHasNoBusyTurns)),
     ("MCP registry resolves result notify target thread-id as agent-id", () => Task.Run(McpRegistryResolvesNotifyTargetThreadParamAsAgentId)),
     ("Agent thread matcher binds named team threads", () => Task.Run(AgentThreadMatcherBindsNamedTeamThreads)),
     ("Agent thread matcher binds exact preview names", () => Task.Run(AgentThreadMatcherBindsExactPreviewNames)),
@@ -2056,54 +2058,7 @@ static void McpRegistryNotifiesResultThroughServicePath()
     True(notifyEvent.Message?.Contains("targetStatus=idle", StringComparison.Ordinal) == true);
 }
 
-static void McpRegistryDefersResultNotifyWhileTargetActive()
-{
-    var root = NewTestDirectory();
-    var busRoot = Path.Combine(root, ".codexteamup", "agentbus");
-    var bus = new AgentBusStore(busRoot);
-    bus.Initialize();
-    bus.RegisterAgent(new AgentDefinition
-    {
-        Id = "ctu/foo",
-        Role = "Foo",
-        ThreadId = "thread-foo",
-        Cwd = root,
-        Status = "active"
-    });
-    bus.RegisterAgent(new AgentDefinition
-    {
-        Id = "ctu/bar",
-        Role = "Bar",
-        ThreadId = "thread-bar",
-        Cwd = root,
-        ReturnTo = "ctu/foo",
-        Status = "active"
-    });
-
-    var task = bus.CreateTask("ctu/foo", "ctu/bar", "Ping", "Please answer.", "demo", root, [], "ctu/foo");
-    bus.ClaimTask(task.Id, "ctu/bar");
-    var busResult = bus.WriteResult(task.Id, "Pong", "completed", "ctu/bar", "ctu/foo", null, [], []);
-
-    var appServer = new FakeAppServerClient("""{"data":[{"id":"thread-foo","name":"ctu/foo","cwd":"ROOT","status":{"type":"active"}}]}"""
-        .Replace("ROOT", JsonEscaped(root), StringComparison.Ordinal));
-    var registry = McpToolRegistry.CreateDefault(busRoot, appServer);
-    var args = JsonSerializer.Deserialize<JsonElement>($$"""
-    {
-      "busRoot": {{JsonSerializer.Serialize(busRoot)}},
-      "resultId": {{JsonSerializer.Serialize(busResult.Id)}}
-    }
-    """);
-
-    var response = registry.InvokeAsync("bridge_notify_result", args).GetAwaiter().GetResult();
-    Equal(0, appServer.SentTurns.Count);
-    var deferredEvent = bus.ListEvents().Single(evt => evt.Type == "result.notify_deferred" && evt.ResultId == busResult.Id);
-    True(deferredEvent.Message?.Contains("turn/start deferred", StringComparison.Ordinal) == true);
-    True(deferredEvent.Message?.Contains("targetStatus=active", StringComparison.Ordinal) == true);
-    using var doc = JsonDocument.Parse(JsonSerializer.Serialize(response, JsonFile.Options));
-    True(doc.RootElement.GetProperty("wakeup").GetProperty("deferred").GetBoolean());
-}
-
-static void McpRegistryReadsTargetStatusWhenListIsNotLoaded()
+static void McpRegistryDefersResultNotifyWhenReadThreadShowsBusyTurn()
 {
     var root = NewTestDirectory();
     var busRoot = Path.Combine(root, ".codexteamup", "agentbus");
@@ -2132,9 +2087,9 @@ static void McpRegistryReadsTargetStatusWhenListIsNotLoaded()
     var busResult = bus.WriteResult(task.Id, "Pong", "completed", "ctu/bar", "ctu/foo", null, [], []);
 
     var appServer = new FakeAppServerClient(
-        """{"data":[{"id":"thread-foo","name":"ctu/foo","cwd":"ROOT","status":{"type":"notLoaded"}}]}"""
+        """{"data":[{"id":"thread-foo","name":"ctu/foo","cwd":"ROOT","status":{"type":"active"}}]}"""
             .Replace("ROOT", JsonEscaped(root), StringComparison.Ordinal),
-        readThreadJson: """{"thread":{"id":"thread-foo","status":{"type":"active"},"turns":[]}}""");
+        readThreadJson: """{"thread":{"id":"thread-foo","status":{"type":"active"},"turns":[{"id":"turn-1","status":"in_progress"}]}}""");
     var registry = McpToolRegistry.CreateDefault(busRoot, appServer);
     var args = JsonSerializer.Deserialize<JsonElement>($$"""
     {
@@ -2146,9 +2101,60 @@ static void McpRegistryReadsTargetStatusWhenListIsNotLoaded()
     var response = registry.InvokeAsync("bridge_notify_result", args).GetAwaiter().GetResult();
     Equal(0, appServer.SentTurns.Count);
     var deferredEvent = bus.ListEvents().Single(evt => evt.Type == "result.notify_deferred" && evt.ResultId == busResult.Id);
-    True(deferredEvent.Message?.Contains("targetStatus=active", StringComparison.Ordinal) == true);
+    True(deferredEvent.Message?.Contains("turn/start deferred", StringComparison.Ordinal) == true);
+    True(deferredEvent.Message?.Contains("targetStatus=in_progress", StringComparison.Ordinal) == true);
+    using var doc = JsonDocument.Parse(JsonSerializer.Serialize(response, JsonFile.Options));
+    True(doc.RootElement.GetProperty("wakeup").GetProperty("deferred").GetBoolean());
+}
+
+static void McpRegistrySendsResultNotifyWhenActiveThreadHasNoBusyTurns()
+{
+    var root = NewTestDirectory();
+    var busRoot = Path.Combine(root, ".codexteamup", "agentbus");
+    var bus = new AgentBusStore(busRoot);
+    bus.Initialize();
+    bus.RegisterAgent(new AgentDefinition
+    {
+        Id = "ctu/foo",
+        Role = "Foo",
+        ThreadId = "thread-foo",
+        Cwd = root,
+        Status = "active"
+    });
+    bus.RegisterAgent(new AgentDefinition
+    {
+        Id = "ctu/bar",
+        Role = "Bar",
+        ThreadId = "thread-bar",
+        Cwd = root,
+        ReturnTo = "ctu/foo",
+        Status = "active"
+    });
+
+    var task = bus.CreateTask("ctu/foo", "ctu/bar", "Ping", "Please answer.", "demo", root, [], "ctu/foo");
+    bus.ClaimTask(task.Id, "ctu/bar");
+    var busResult = bus.WriteResult(task.Id, "Pong", "completed", "ctu/bar", "ctu/foo", null, [], []);
+
+    var appServer = new FakeAppServerClient(
+        """{"data":[{"id":"thread-foo","name":"ctu/foo","cwd":"ROOT","status":{"type":"active"}}]}"""
+            .Replace("ROOT", JsonEscaped(root), StringComparison.Ordinal),
+        readThreadJson: """{"thread":{"id":"thread-foo","status":{"type":"active"},"turns":[]}}""");
+    var registry = McpToolRegistry.CreateDefault(busRoot, appServer);
+    var args = JsonSerializer.Deserialize<JsonElement>($$"""
+    {
+      "busRoot": {{JsonSerializer.Serialize(busRoot)}},
+      "resultId": {{JsonSerializer.Serialize(busResult.Id)}}
+    }
+    """);
+
+    var response = registry.InvokeAsync("bridge_notify_result", args).GetAwaiter().GetResult();
+    Equal(1, appServer.SentTurns.Count);
+    var notifyEvent = bus.ListEvents().Single(evt => evt.Type == "result.notified" && evt.ResultId == busResult.Id);
+    True(notifyEvent.Message?.Contains("turn/start sent", StringComparison.Ordinal) == true);
+    True(notifyEvent.Message?.Contains("targetStatus=active", StringComparison.Ordinal) == true);
     using var doc = JsonDocument.Parse(JsonSerializer.Serialize(response, JsonFile.Options));
     True(doc.RootElement.GetProperty("target").GetProperty("initialStatus").GetString() == "active");
+    True(doc.RootElement.GetProperty("wakeup").GetProperty("deferred").GetBoolean() == false);
 }
 
 static void McpRegistryResolvesNotifyTargetThreadParamAsAgentId()
@@ -3051,7 +3057,7 @@ static void StartupSweepVerifiesKnownGoodCheckpointAfterDispatch()
     Equal("startup_sweep:continuation_dispatched", verified.VerificationSource);
 }
 
-static void ControllerDeliveryLoopRetriesQueuedMessageWhenTargetCallable()
+static void ControllerDeliveryLoopWaitsBeforeRetryingQueuedMessage()
 {
     var root = NewTestDirectory();
     var busRoot = Path.Combine(root, ".codexteamup", "agentbus");
@@ -3077,11 +3083,10 @@ static void ControllerDeliveryLoopRetriesQueuedMessageWhenTargetCallable()
         [],
         "ctu/architect");
 
-    var appServer = new ScriptedSendTurnAppServerClient(
-        "thread-worker",
-        "ctu/worker",
-        root,
-        sendTurnFailuresBeforeSuccess: 1);
+    var appServer = new FakeAppServerClient(
+        """{"data":[{"id":"thread-worker","name":"ctu/worker","cwd":"ROOT","status":{"type":"active"}}]}"""
+            .Replace("ROOT", JsonEscaped(root), StringComparison.Ordinal),
+        readThreadJson: """{"thread":{"id":"thread-worker","status":{"type":"active"},"turns":[{"id":"turn-1","status":"in_progress"}]}}""");
     var controller = new DefaultCtuController(busRoot, appServer);
     controller.RunStartupSweepAsync().GetAwaiter().GetResult();
 
@@ -3091,9 +3096,11 @@ static void ControllerDeliveryLoopRetriesQueuedMessageWhenTargetCallable()
 
     controller.RunStartupSweepAsync().GetAwaiter().GetResult();
 
-    Equal(1, appServer.SentTurns.Count);
-    True(appServer.SentTurns[0].Message.Contains(task.Id, StringComparison.Ordinal));
-    True(bus.ListEvents(100).Any(evt => evt.Type == "task.dispatched" && evt.TaskId == task.Id));
+    Equal(0, appServer.SentTurns.Count);
+    Equal("open", bus.FindTask(task.Id)?.Status);
+    Equal(
+        1,
+        bus.ListEvents(100).Count(evt => evt.Type == "task.delivery_failed" && evt.TaskId == task.Id));
 }
 
 static void ControllerDeliveryLoopSupersedesOlderQueuedTasks()
@@ -3322,6 +3329,96 @@ static void ControllerGuardianEvaluatesResultIntoContinuityState()
     Equal(task.Id, state?.CorrelationId);
     True(bus.ListEvents(300).Any(evt => evt.Type == "continuity.state_created"));
     True(bus.ListEvents(300).Any(evt => evt.TaskId == task.Id && evt.Type.StartsWith("continuity.state")));
+}
+
+static void ControllerGuardianTreatsDoneResultStatusAsCompleted()
+{
+    var root = NewTestDirectory();
+    var busRoot = Path.Combine(root, ".codexteamup", "agentbus");
+    var bus = new AgentBusStore(busRoot);
+    bus.Initialize();
+    bus.RegisterAgent(new AgentDefinition
+    {
+        Id = "ctu/architect",
+        Role = "Architect",
+        ThreadId = "thread-architect",
+        Cwd = root,
+        Status = "active"
+    });
+    bus.RegisterAgent(new AgentDefinition
+    {
+        Id = "ctu/worker",
+        Role = "Worker",
+        DisplayName = "ctu/worker",
+        ThreadId = "thread-worker",
+        Cwd = root,
+        ReturnTo = "ctu/architect",
+        Status = "active"
+    });
+
+    var task = bus.CreateTask(
+        "ctu/architect",
+        "ctu/worker",
+        "Return done state",
+        "Return done state.",
+        "codexteamup",
+        root,
+        [],
+        "ctu/architect");
+    bus.ClaimTask(task.Id, "ctu/worker");
+    var result = bus.WriteResult(task.Id, "Done", "done", "ctu/worker", "ctu/architect", null, [], []);
+
+    var appServer = new FakeAppServerClient("""{"data":[]}""");
+    var controller = new DefaultCtuController(busRoot, appServer);
+    controller.RunStartupSweepAsync().GetAwaiter().GetResult();
+
+    var continuity = new ExecutionContinuityStateStore(busRoot);
+    continuity.Initialize();
+    var state = continuity.ReadLatest(task.Id);
+    Equal(ExecutionContinuityStateKind.Completed, state?.State);
+    Equal(result.Id, state?.LastOutcomeRef);
+}
+
+static void ControllerGuardianSkipsUnchangedQueuedTaskObservation()
+{
+    var root = NewTestDirectory();
+    var busRoot = Path.Combine(root, ".codexteamup", "agentbus");
+    var bus = new AgentBusStore(busRoot);
+    bus.Initialize();
+    bus.RegisterAgent(new AgentDefinition
+    {
+        Id = "ctu/worker",
+        Role = "Worker",
+        DisplayName = "ctu/worker",
+        ThreadId = "thread-worker",
+        Cwd = root,
+        Status = "active"
+    });
+
+    var task = bus.CreateTask(
+        "ctu/architect",
+        "ctu/worker",
+        "Queued follow-up",
+        "Wait until the target is callable.",
+        "codexteamup",
+        root,
+        [],
+        "ctu/architect");
+
+    var appServer = new FakeAppServerClient(
+        """{"data":[{"id":"thread-worker","name":"ctu/worker","cwd":"ROOT","status":{"type":"active"}}]}"""
+            .Replace("ROOT", JsonEscaped(root), StringComparison.Ordinal),
+        readThreadJson: """{"thread":{"id":"thread-worker","status":{"type":"active"},"turns":[{"id":"turn-1","status":"in_progress"}]}}""");
+    var controller = new DefaultCtuController(busRoot, appServer);
+
+    controller.RunStartupSweepAsync().GetAwaiter().GetResult();
+    controller.RunStartupSweepAsync().GetAwaiter().GetResult();
+
+    Equal(0, appServer.SentTurns.Count);
+    Equal(
+        1,
+        bus.ListEvents(300)
+            .Count(evt => evt.TaskId == task.Id && evt.Type == "continuity.guardian_evaluated"));
 }
 
 static void ControllerGuardianResumesDispatchFromContinuityState()
@@ -3836,12 +3933,12 @@ static void ControllerGuardianEmitsCanonicalContinuityDecisionEvents()
 
     var continuity = new ExecutionContinuityStateStore(busRoot);
     var state = continuity.ReadLatest(task.Id);
-    Equal(2, state?.AttemptCount);
+    Equal(1, state?.AttemptCount);
 
     var events = bus.ListEvents(300).Where(evt => evt.TaskId == task.Id).ToList();
     True(events.Any(evt => evt.Type == "continuity.guardian_evaluated"));
     True(events.Any(evt => evt.Type == "continuity.dispatch_requested"));
-    True(events.Any(evt => evt.Type == "continuity.dispatch_retry_scheduled"));
+    True(events.All(evt => evt.Type != "continuity.dispatch_retry_scheduled"));
 }
 
 static void ControllerGuardianBlocksOnExhaustedNotifyRetries()
