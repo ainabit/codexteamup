@@ -43,6 +43,8 @@ var tests = new (string Name, Func<Task> Body)[]
     ("Policy app-server client executes configured wakeup steps", PolicyAppServerClientExecutesConfiguredWakeupSteps),
     ("MCP tool metadata covers known tools", () => Task.Run(McpToolMetadataCoversKnownTools)),
     ("MCP registry exposes core tools", () => Task.Run(McpRegistryExposesCoreTools)),
+    ("MCP registry returns CTU bootstrap info", () => Task.Run(McpRegistryReturnsCtuBootstrapInfo)),
+    ("MCP registry initializes CTU project", () => Task.Run(McpRegistryInitializesCtuProject)),
     ("MCP registry reloads app-server adapter", () => Task.Run(McpRegistryReloadsAppServerAdapter)),
     ("MCP registry loads default controller plugin", () => Task.Run(McpRegistryLoadsDefaultControllerPlugin)),
     ("MCP registry has no hardcoded controller fallback", () => Task.Run(McpRegistryHasNoHardcodedControllerFallback)),
@@ -875,11 +877,64 @@ static void McpRegistryExposesCoreTools()
     True(registry.ToolNames.Contains("codex_controller_reload"));
     True(registry.ToolNames.Contains("codex_controller_policy_status"));
     True(registry.ToolNames.Contains("codex_controller_policy_reload"));
+    True(registry.ToolNames.Contains("ctu_bootstrap_info"));
+    True(registry.ToolNames.Contains("ctu_project_init"));
     True(registry.ToolNames.Contains("bridge_dispatch_task"));
     True(registry.ToolNames.Contains("bridge_notify_result"));
     True(registry.ToolNames.Contains("team_discover_agents"));
     True(registry.ToolNames.Contains("team_send_message"));
     True(registry.ToolNames.Contains("team_dashboard_export"));
+}
+
+static void McpRegistryReturnsCtuBootstrapInfo()
+{
+    var root = NewTestDirectory();
+    var registry = McpToolRegistry.CreateDefault(Path.Combine(root, ".codexteamup/agentbus"), new WrapperPipeAppServerClient("unused"));
+    var args = JsonSerializer.Deserialize<JsonElement>("{}");
+
+    var result = registry.InvokeAsync("ctu_bootstrap_info", args).GetAwaiter().GetResult();
+
+    using var doc = JsonDocument.Parse(JsonSerializer.Serialize(result, JsonFile.Options));
+    Equal("ctu/bootstrap", doc.RootElement.GetProperty("role").GetString());
+    Equal("ctu/architect", doc.RootElement.GetProperty("architectAgent").GetString());
+    True(doc.RootElement.GetProperty("content").GetString()?.Contains("ctu/bootstrap", StringComparison.OrdinalIgnoreCase) == true);
+    True(doc.RootElement.GetProperty("bootstrapPrompt").GetString()?.Contains("ctu_project_init", StringComparison.OrdinalIgnoreCase) == true);
+    True(doc.RootElement.GetProperty("architectStartupPrompt").GetString()?.Contains("ctu/architect", StringComparison.OrdinalIgnoreCase) == true);
+}
+
+static void McpRegistryInitializesCtuProject()
+{
+    var root = NewTestDirectory();
+    var registry = McpToolRegistry.CreateDefault(Path.Combine(root, "default", ".codexteamup/agentbus"), new WrapperPipeAppServerClient("unused"));
+    var args = JsonSerializer.Deserialize<JsonElement>($$"""
+    {
+      "cwd": {{JsonSerializer.Serialize(root)}},
+      "project": "demo-project"
+    }
+    """);
+
+    var result = registry.InvokeAsync("ctu_project_init", args).GetAwaiter().GetResult();
+
+    var busRoot = Path.Combine(root, ".codexteamup", "agentbus");
+    var projectJsonPath = Path.Combine(root, ".codexteamup", "project.json");
+    True(Directory.Exists(busRoot));
+    True(File.Exists(Path.Combine(busRoot, "events.jsonl")));
+    True(File.Exists(projectJsonPath));
+    True(!File.Exists(Path.Combine(root, "AGENTS.md")));
+
+    using var resultDoc = JsonDocument.Parse(JsonSerializer.Serialize(result, JsonFile.Options));
+    Equal(true, resultDoc.RootElement.GetProperty("initialized").GetBoolean());
+    Equal("demo-project", resultDoc.RootElement.GetProperty("project").GetString());
+    Equal("ctu/bootstrap", resultDoc.RootElement.GetProperty("bootstrapAgent").GetString());
+    Equal("ctu/architect", resultDoc.RootElement.GetProperty("architectAgent").GetString());
+
+    using var projectDoc = JsonDocument.Parse(File.ReadAllText(projectJsonPath));
+    Equal("codexteamup.project.v1", projectDoc.RootElement.GetProperty("schema").GetString());
+    Equal("demo-project", projectDoc.RootElement.GetProperty("project").GetString());
+    Equal("ctu_bootstrap_info", projectDoc.RootElement.GetProperty("bootstrapInfoTool").GetString());
+
+    var bus = new AgentBusStore(busRoot);
+    True(bus.ListEvents(50).Any(evt => evt.Type == "project.initialized"));
 }
 
 static void McpRegistryReloadsAppServerAdapter()

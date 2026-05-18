@@ -20,6 +20,8 @@ public static class McpToolMetadata
             "agentbus_claim_task" => "Claim an open AgentBus task.",
             "agentbus_write_result" => "Write an AgentBus result.",
             "agentbus_wait_result" => "Wait for an AgentBus task result.",
+            "ctu_bootstrap_info" => "Return central CodexTeamUp bootstrap instructions for a new project initializer.",
+            "ctu_project_init" => "Initialize the minimal project-local CodexTeamUp directory and project metadata.",
             "codex_thread_list" => "List Codex Desktop threads through the wrapper.",
             "codex_thread_read" => "Read a Codex Desktop thread through the wrapper.",
             "codex_thread_archive" => "Archive a Codex Desktop thread through the wrapper.",
@@ -52,6 +54,7 @@ public static class McpToolMetadata
             "agentbus_list_events" or
             "agentbus_list_continuations" or
             "agentbus_wait_result" or
+            "ctu_bootstrap_info" or
             "codex_thread_list" or
             "codex_thread_read" or
             "codex_appserver_adapter_status" or
@@ -64,6 +67,7 @@ public static class McpToolMetadata
                 openWorldHint = false
             },
             "agentbus_init" or
+            "ctu_project_init" or
             "agentbus_register_agent" or
             "team_discover_agents" => new
             {
@@ -193,6 +197,17 @@ public static class McpToolMetadata
             {
                 ["taskId"] = StringSchema(),
                 ["timeoutSeconds"] = new { type = "integer" }
+            }),
+            "ctu_bootstrap_info" => WithBusContext(new Dictionary<string, object>
+            {
+                ["bootstrapInfoPath"] = StringSchema(),
+                ["path"] = StringSchema()
+            }),
+            "ctu_project_init" => WithBusContext(new Dictionary<string, object>
+            {
+                ["project"] = StringSchema(),
+                ["force"] = new { type = "boolean" },
+                ["writeAgentsFile"] = new { type = "boolean" }
             }),
             "codex_thread_list" => new Dictionary<string, object>
             {

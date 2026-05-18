@@ -15,6 +15,8 @@ public static class CtuControllerTools
         "agentbus_claim_task",
         "agentbus_write_result",
         "agentbus_wait_result",
+        "ctu_bootstrap_info",
+        "ctu_project_init",
         "codex_thread_list",
         "codex_thread_read",
         "codex_thread_archive",

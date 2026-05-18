@@ -12,6 +12,7 @@ Use it for:
 Files:
 
 - [startup.md](startup.md)
+- [ctu-bootstrap.md](ctu-bootstrap.md)
 - [testing-matrix.md](testing-matrix.md)
 - [recovery.md](recovery.md)
 - [bug-ledger.md](bug-ledger.md)
