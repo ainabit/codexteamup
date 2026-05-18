@@ -53,6 +53,9 @@ public sealed record AgentBusTask
     public bool ResultExpected { get; init; } = true;
     public string? Priority { get; init; }
     public TimeSpan? Timeout { get; init; }
+    public int DeliveryAttempts { get; init; }
+    public DateTimeOffset? LastDeliveryAttemptAt { get; init; }
+    public string? LastDeliveryError { get; init; }
 }
 
 /// <summary>
@@ -68,11 +71,53 @@ public sealed record AgentBusResult
     public required DateTimeOffset CompletedAt { get; init; }
     public required string Summary { get; init; }
     public string? Commit { get; init; }
+    public string? Outcome { get; init; }
+    public string? ContinuationId { get; init; }
+    public AgentBusContinuationRequest? Continuation { get; init; }
     public IReadOnlyList<string> ChangedFiles { get; init; } = [];
     public IReadOnlyList<string> Tests { get; init; } = [];
     public IReadOnlyList<string> Artifacts { get; init; } = [];
     public IReadOnlyList<string> OpenQuestions { get; init; } = [];
     public string? NextSuggestedAction { get; init; }
+    public int NotifyAttempts { get; init; }
+    public DateTimeOffset? LastNotifyAttemptAt { get; init; }
+    public DateTimeOffset? LastNotifiedAt { get; init; }
+    public string? LastNotifyError { get; init; }
+}
+
+/// <summary>
+/// Declares that an agent wants CTU to wake it later for the same work chain.
+/// </summary>
+public sealed record AgentBusContinuationRequest
+{
+    public string? Owner { get; init; }
+    public int WakeAfterSeconds { get; init; } = 60;
+    public string? DedupeKey { get; init; }
+    public string? Reason { get; init; }
+    public int MaxAttempts { get; init; } = 5;
+}
+
+/// <summary>
+/// Durable self-continuation scheduled from an agent-owned result outcome.
+/// </summary>
+public sealed record AgentBusContinuation
+{
+    public required string Id { get; init; }
+    public required string ResultId { get; init; }
+    public required string TaskId { get; init; }
+    public required string Owner { get; init; }
+    public required string Status { get; init; }
+    public required DateTimeOffset CreatedAt { get; init; }
+    public required DateTimeOffset DueAt { get; init; }
+    public string? DedupeKey { get; init; }
+    public string? Reason { get; init; }
+    public string? ReturnTo { get; init; }
+    public int Attempts { get; init; }
+    public int MaxAttempts { get; init; } = 5;
+    public DateTimeOffset? LastWakeAttemptAt { get; init; }
+    public string? LastWakeTaskId { get; init; }
+    public string? LastWakeError { get; init; }
+    public DateTimeOffset? CompletedAt { get; init; }
 }
 
 /// <summary>
@@ -89,3 +134,12 @@ public sealed record AgentBusEvent
     public string? Message { get; init; }
     public object? Payload { get; init; }
 }
+
+/// <summary>
+/// Summary returned after deleting AgentBus task state for test resets.
+/// </summary>
+public sealed record AgentBusClearResult(
+    int DeletedTasks,
+    int DeletedResults,
+    bool IncludedResults,
+    DateTimeOffset ClearedAt);

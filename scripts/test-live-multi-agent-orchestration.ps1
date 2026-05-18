@@ -3,13 +3,14 @@ param(
     [string]$Workspace = "",
     [string]$RunId = "",
     [string]$Prefix = "ctu-test",
-    [ValidateSet("basic", "peer", "replacement", "controller", "all")]
+    [ValidateSet("surface", "basic", "peer", "replacement", "controller", "controller-suite", "continuation", "error-paths", "queue-first", "stale-claimed", "all")]
     [string]$Scenario = "all",
     [string]$ControllerAgent = "ctu-test/architect",
     [int]$TimeoutSeconds = 900,
     [int]$ToolTimeoutSeconds = 10,
     [switch]$Cleanup,
     [switch]$CleanupOnly,
+    [switch]$CleanupAllTestAgents,
     [switch]$NoArchiveThreads,
     [switch]$ForceCleanup
 )
@@ -66,6 +67,23 @@ function Invoke-CtuTool {
         -ContentType "application/json; charset=utf-8" `
         -TimeoutSec $ToolTimeoutSeconds `
         -Body $json
+}
+
+function Invoke-CtuToolExpectFailure {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Name,
+
+        [hashtable]$Arguments = @{}
+    )
+
+    try {
+        Invoke-CtuTool -Name $Name -Arguments $Arguments | Out-Null
+    } catch {
+        return $_.Exception.Message
+    }
+
+    throw "Expected CTU tool $Name to fail, but it succeeded."
 }
 
 function Get-WakeupTimeoutSeconds {
@@ -182,6 +200,31 @@ function Wait-TeamMessageResult {
     throw "Timed out waiting for $Label result."
 }
 
+function Assert-ResultContains {
+    param(
+        [Parameter(Mandatory = $true)]
+        $Result,
+
+        [Parameter(Mandatory = $true)]
+        [string[]]$Markers,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Label
+    )
+
+    $haystack = @(
+        $Result.summary
+        $Result.outcome
+        $Result.tests
+        $Result.checks
+        $Result.nextSuggestedAction
+    ) -join "`n"
+
+    foreach ($marker in $Markers) {
+        Assert-True ($haystack -like "*$marker*") "Expected $Label result to contain evidence marker '$marker'."
+    }
+}
+
 function Wait-DeferredOperation {
     param(
         [Parameter(Mandatory = $true)]
@@ -249,6 +292,63 @@ function Wait-TaskDispatch {
     throw "Timed out waiting for dispatch event for task $TaskId."
 }
 
+function Wait-Event {
+    param(
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$Predicate,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Label,
+
+        [int]$Seconds = $TimeoutSeconds
+    )
+
+    $deadline = (Get-Date).AddSeconds($Seconds)
+    while ((Get-Date) -lt $deadline) {
+        $events = Invoke-CtuTool -Name "agentbus_list_events" -Arguments @{
+            cwd = $Workspace
+            limit = 1000
+        }
+
+        $match = @($events.events) | Where-Object $Predicate | Select-Object -Last 1
+        if ($null -ne $match) {
+            return $match
+        }
+
+        Start-Sleep -Seconds 1
+    }
+
+    throw "Timed out waiting for event: $Label."
+}
+
+function Wait-Task {
+    param(
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$Predicate,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Label,
+
+        [int]$Seconds = $TimeoutSeconds
+    )
+
+    $deadline = (Get-Date).AddSeconds($Seconds)
+    while ((Get-Date) -lt $deadline) {
+        $tasks = Invoke-CtuTool -Name "agentbus_list_tasks" -Arguments @{
+            cwd = $Workspace
+        }
+
+        $match = @($tasks.tasks) | Where-Object $Predicate | Select-Object -Last 1
+        if ($null -ne $match) {
+            return $match
+        }
+
+        Start-Sleep -Seconds 1
+    }
+
+    throw "Timed out waiting for task: $Label."
+}
+
 function Send-TeamMessageQueued {
     param(
         [hashtable]$Arguments,
@@ -288,6 +388,17 @@ function Assert-SafeCleanupPrefix {
 
 function Get-TestAgents {
     $agents = Invoke-CtuTool -Name "agentbus_list_agents" -Arguments @{ cwd = $Workspace }
+    if ($CleanupAllTestAgents) {
+        return @($agents.agents) | Where-Object {
+            (
+                $_.id -like "$Prefix/*" -or
+                $_.displayName -like "$Prefix/*"
+            ) -and
+            $_.id -ne "$Prefix/architect" -and
+            $_.displayName -ne "$Prefix/architect"
+        }
+    }
+
     @($agents.agents) | Where-Object {
         $_.id -like "$agentPrefix/*" -or $_.displayName -like "$agentPrefix/*"
     }
@@ -297,7 +408,8 @@ function Invoke-TestCleanup {
     Assert-SafeCleanupPrefix
     $agents = @(Get-TestAgents)
     if ($agents.Count -eq 0) {
-        Write-Host "Cleanup: no test agents found for $agentPrefix."
+        $cleanupLabel = if ($CleanupAllTestAgents) { "$Prefix/* except $Prefix/architect" } else { $agentPrefix }
+        Write-Host "Cleanup: no test agents found for $cleanupLabel."
         return
     }
 
@@ -328,7 +440,8 @@ function Invoke-TestCleanup {
         $retired += 1
     }
 
-    Write-Host "Cleanup: archived $archived thread(s), retired $retired agent binding(s) for $agentPrefix."
+    $cleanupLabel = if ($CleanupAllTestAgents) { "$Prefix/* except $Prefix/architect" } else { $agentPrefix }
+    Write-Host "Cleanup: archived $archived thread(s), retired $retired agent binding(s) for $cleanupLabel."
 }
 
 if ($CleanupOnly) {
@@ -337,7 +450,11 @@ if ($CleanupOnly) {
     Write-Host "  workspace: $Workspace"
     Write-Host "  run id:    $RunId"
     Write-Host "  scenario:  $Scenario"
-    Write-Host "  prefix:    $agentPrefix"
+    if ($CleanupAllTestAgents) {
+        Write-Host "  prefix:    $Prefix/* except $Prefix/architect"
+    } else {
+        Write-Host "  prefix:    $agentPrefix"
+    }
     Invoke-TestCleanup
     exit 0
 }
@@ -348,7 +465,7 @@ Write-Host "  workspace: $Workspace"
 Write-Host "  run id:    $RunId"
 Write-Host "  scenario:  $Scenario"
 Write-Host "  agents:    $agentA, $agentB, $agentC"
-if ($Scenario -eq "controller") {
+if ($Scenario -eq "controller" -or $Scenario -eq "controller-suite") {
     Write-Host "  controller: $ControllerAgent"
 }
 Write-Host "  tool wait: ${ToolTimeoutSeconds}s"
@@ -364,7 +481,7 @@ try {
         throw "Could not reach live Codex Desktop wrapper through CTU. Start Desktop with scripts/start-codexteamup.ps1 first. $($_.Exception.Message)"
     }
 
-    if ($Scenario -eq "controller") {
+    if ($Scenario -eq "controller" -or $Scenario -eq "controller-suite") {
         Write-Host "Checking manually provided controller agent..."
         $controller = Get-Agent -Id $ControllerAgent
         if ($null -eq $controller -or [string]::IsNullOrWhiteSpace($controller.threadId)) {
@@ -391,7 +508,61 @@ try {
 
         $controller = Require-Agent -Id $ControllerAgent
 
-        $controllerPrompt = @"
+        if ($Scenario -eq "controller-suite") {
+            $suiteAgentAName = "$agentPrefix/implementation-role"
+            $suiteAgentBName = "$agentPrefix/review-role"
+            $suiteAgentCName = "$agentPrefix/deep-role"
+            $controllerPrompt = @"
+Live CTU controller-suite run $RunId.
+
+You are the manually provided test controller $ControllerAgent in workspace $Workspace.
+
+This is a repeatable safety-net package. Use CodexTeamUp MCP only. Keep direct calls short:
+- enqueue work quickly;
+- wake queued tasks with bridge_dispatch_task;
+- poll AgentBus in short chunks;
+- do not turn this into one long blocking RPC.
+
+Create or bind these run-scoped worker agents with team_ensure_agents defer=true prime=true setName=false:
+- id=$agentA, displayName=$suiteAgentAName, role="Implementation role marker for controller-suite; this role is intentionally not the id.", speed=fast, model=gpt-5.4-mini, reasoningEffort=low.
+- id=$agentB, displayName=$suiteAgentBName, role="Review role marker for controller-suite; this role is intentionally not the id.", speed=fast, model=gpt-5.4-mini, reasoningEffort=low.
+- id=$agentC, displayName=$suiteAgentCName, role="Deep reasoning role marker for controller-suite; this role is intentionally not the id.", speed=standard, model=gpt-5.4, reasoningEffort=medium.
+
+Verify with agentbus_list_agents that all three agents have active thread ids, persisted displayName values, persisted roles, and the requested model/reasoning/speed. Only then include evidence marker runtime-ok and role-ok in your final result.
+
+Then exercise these result/stop outcomes through normal AgentBus tasks:
+1. Send a task to $agentA asking for exactly one result with outcome done. Wait for it. Include outcome-done-ok only if observed.
+2. Send a task to $agentB asking for exactly one result with outcome human and a short open question. Wait for it. Include outcome-human-ok only if observed.
+3. Send a task to $agentC asking for exactly one result with outcome failed and a short failure reason. Wait for it. Include outcome-failed-ok only if observed.
+4. Send a task to $agentA asking it to create one child task for $agentB, wake it, and then write outcome handed_off back to you with the child task id. Wait for $agentA result. Include outcome-handed-off-ok only if observed.
+5. Send a task to $agentC asking it to write outcome self_continue with a deduplicated continuation wakeup after 5 seconds, then handle the continuation by writing outcome done. Poll continuations/results in short chunks. Include self-continue-ok only if both the self_continue result and follow-up done result are observed.
+
+Finally write exactly one AgentBus result for your controller-suite task back to ctu-test/runner.
+Your final result summary/checks must include these exact evidence markers only when verified:
+- runtime-ok
+- role-ok
+- outcome-done-ok
+- outcome-human-ok
+- outcome-failed-ok
+- outcome-handed-off-ok
+- self-continue-ok
+
+Also include worker agent ids, worker task ids, worker result ids, continuation id if available, and any Desktop wakeup uncertainty.
+Use forward-slash cwd values in any Git app directives.
+"@
+            $controllerTitle = "Live smoke: controller suite"
+            $resultLabel = "$ControllerAgent controller suite"
+            $requiredMarkers = @(
+                "runtime-ok",
+                "role-ok",
+                "outcome-done-ok",
+                "outcome-human-ok",
+                "outcome-failed-ok",
+                "outcome-handed-off-ok",
+                "self-continue-ok"
+            )
+        } else {
+            $controllerPrompt = @"
 Live CTU in-app smoke test run $RunId.
 
 You are the manually provided test controller $ControllerAgent in workspace $Workspace.
@@ -415,13 +586,17 @@ Finally write exactly one AgentBus result for your controller task back to ctu-t
 
 Use forward-slash cwd values in any Git app directives.
 "@
+            $controllerTitle = "Live smoke: controller orchestration"
+            $resultLabel = "$ControllerAgent controller orchestration"
+            $requiredMarkers = @()
+        }
 
         Write-Host "Sending controller-orchestrated smoke task..."
         $phaseController = Send-TeamMessageQueued -Dispatch -Arguments @{
             cwd = $Workspace
             from = "ctu-test/runner"
             to = $ControllerAgent
-            title = "Live smoke: controller orchestration"
+            title = $controllerTitle
             message = $controllerPrompt
             returnTo = "ctu-test/runner"
             waitResult = $false
@@ -431,12 +606,461 @@ Use forward-slash cwd values in any Git app directives.
             throw "Controller thread $ControllerAgent is bound but not wakeable through Desktop turn/start: $($phaseController.dispatchEvent.message)"
         }
 
-        $controllerResult = Wait-TeamMessageResult -Response $phaseController -Label "$ControllerAgent controller orchestration"
+        $controllerResult = Wait-TeamMessageResult -Response $phaseController -Label $resultLabel
+        if ($requiredMarkers.Count -gt 0) {
+            Assert-ResultContains -Result $controllerResult -Markers $requiredMarkers -Label $resultLabel
+        }
 
         Write-Host ""
-        Write-Host "PASS live CTU controller smoke run $RunId"
+        Write-Host "PASS live CTU $Scenario smoke run $RunId"
         Write-Host "  controller: $ControllerAgent"
         Write-Host "  controller result: $($controllerResult.id)"
+        return
+    }
+
+    if ($Scenario -eq "queue-first") {
+        Write-Host "Checking queue-first UX..."
+        $queueAgent = "$agentPrefix/queue-agent"
+        $queueAgentJson = ConvertTo-Json -InputObject @(
+            @{
+                id = $queueAgent
+                displayName = $queueAgent
+                role = "Live queue-first probe agent. Claim dispatched tasks and write one short AgentBus result."
+                returnTo = $ControllerAgent
+                speed = "fast"
+                model = "gpt-5.4-mini"
+                reasoningEffort = "low"
+                initialPrompt = "You are $queueAgent. For live queue-first smoke tasks, claim the exact task and write one AgentBus result containing marker queue-first-dispatched-ok."
+            }
+        ) -Depth 40 -Compress
+
+        Ensure-CtuAgents -AgentsJson $queueAgentJson -Ids @($queueAgent) -Prime "true" -SetName "false" | Out-Null
+
+        $queued = Invoke-CtuTool -Name "team_send_message" -Arguments @{
+            cwd = $Workspace
+            from = $ControllerAgent
+            to = $queueAgent
+            title = "Live smoke: queue-first queued only"
+            message = "This is the queue-only half of live smoke run $RunId. Do not answer unless this task is explicitly dispatched later."
+            returnTo = $ControllerAgent
+            dispatchMode = "enqueue"
+            waitResult = $false
+        }
+        $queuedTaskId = $queued.task.id
+        Assert-True ($queued.accepted -eq $true) "team_send_message did not ACK queue-first enqueue."
+        Assert-True ($queued.dispatchMode -eq "enqueue") "team_send_message did not report dispatchMode=enqueue."
+        Assert-True ($null -eq $queued.wakeup) "team_send_message enqueue unexpectedly returned wakeup data."
+        $openTask = Invoke-CtuTool -Name "agentbus_list_tasks" -Arguments @{
+            cwd = $Workspace
+            status = "open"
+            to = $queueAgent
+        }
+        Assert-True (@($openTask.tasks | Where-Object { $_.id -eq $queuedTaskId }).Count -eq 1) "Queued task $queuedTaskId was not still open immediately after enqueue."
+        Invoke-CtuTool -Name "agentbus_claim_task" -Arguments @{
+            cwd = $Workspace
+            taskId = $queuedTaskId
+            owner = "ctu-test/runner"
+        } | Out-Null
+        Invoke-CtuTool -Name "agentbus_write_result" -Arguments @{
+            cwd = $Workspace
+            taskId = $queuedTaskId
+            from = "ctu-test/runner"
+            to = $ControllerAgent
+            status = "completed"
+            outcome = "done"
+            summary = "Queue-only task stayed queued until the runner closed it without Desktop dispatch."
+            tests = "queue-first enqueue-only proof"
+        } | Out-Null
+
+        $dispatched = Send-TeamMessageQueued -Dispatch -Arguments @{
+            cwd = $Workspace
+            from = $ControllerAgent
+            to = $queueAgent
+            title = "Live smoke: queue-first explicit dispatch"
+            message = "Claim this exact queue-first explicit-dispatch task for run $RunId and write one AgentBus result containing marker queue-first-dispatched-ok."
+            returnTo = $ControllerAgent
+            waitResult = $false
+        }
+        $dispatchResult = Wait-TeamMessageResult -Response $dispatched -Label "$queueAgent queue-first explicit dispatch"
+        Assert-True ($dispatchResult.from -eq $queueAgent) "Queue-first explicit dispatch result came from '$($dispatchResult.from)', expected '$queueAgent'."
+        Assert-True ($dispatchResult.status -eq "completed" -or $dispatchResult.status -eq "done") "Queue-first explicit dispatch result status was '$($dispatchResult.status)', expected completed or done."
+
+        Write-Host ""
+        Write-Host "PASS live CTU queue-first smoke run $RunId"
+        Write-Host "  queued-only task: $queuedTaskId"
+        Write-Host "  dispatched task: $($dispatched.task.id)"
+        Write-Host "  dispatched result: $($dispatchResult.id)"
+        return
+    }
+
+    if ($Scenario -eq "continuation") {
+        Write-Host "Checking live delayed self-continuation..."
+        $continuationAgent = "$agentPrefix/continuation-agent"
+        $continuationKey = "live-delayed-continuation-$RunId"
+        $continuationAgentJson = ConvertTo-Json -InputObject @(
+            @{
+                id = $continuationAgent
+                displayName = $continuationAgent
+                role = "Live delayed continuation probe agent. First result requests self_continue, follow-up result completes with done."
+                returnTo = $ControllerAgent
+                speed = "fast"
+                model = "gpt-5.4-mini"
+                reasoningEffort = "low"
+                initialPrompt = "You are $continuationAgent. In the first delayed-continuation task, write outcome self_continue with continuationOwner=$continuationAgent, continuationWakeAfterSeconds=5, continuationDedupeKey=$continuationKey, continuationMaxAttempts=2, and marker delayed-continuation-scheduled-ok. When CTU wakes you with a Self-continuation task, claim that task and write outcome done with marker delayed-continuation-followup-ok. Do not schedule another continuation in the follow-up."
+            }
+        ) -Depth 40 -Compress
+
+        Ensure-CtuAgents -AgentsJson $continuationAgentJson -Ids @($continuationAgent) -Prime "true" -SetName "false" | Out-Null
+
+        $phaseContinuation = Send-TeamMessageQueued -Dispatch -Arguments @{
+            cwd = $Workspace
+            from = $ControllerAgent
+            to = $continuationAgent
+            title = "Live smoke: delayed continuation"
+            message = @"
+Claim this exact task for live delayed-continuation run $RunId.
+
+Write exactly one AgentBus result for this task:
+- status=completed
+- outcome=self_continue
+- continuationOwner=$continuationAgent
+- continuationWakeAfterSeconds=5
+- continuationDedupeKey=$continuationKey
+- continuationReason=Live delayed continuation proof for $RunId.
+- continuationMaxAttempts=2
+- summary/checks include marker delayed-continuation-scheduled-ok
+
+When CTU later wakes you with a Self-continuation task for the same dedupe key, claim that follow-up task and write exactly one result:
+- status=completed
+- outcome=done
+- summary/checks include marker delayed-continuation-followup-ok
+- do not include continuation metadata in the follow-up result.
+"@
+            returnTo = $ControllerAgent
+            waitResult = $false
+        }
+
+        $firstResult = Wait-TeamMessageResult -Response $phaseContinuation -Label "$continuationAgent first self_continue result"
+        Assert-True ($firstResult.outcome -eq "self_continue") "Expected first continuation result outcome=self_continue, got '$($firstResult.outcome)'."
+        Assert-True ($firstResult.from -eq $continuationAgent) "Expected first continuation result from '$continuationAgent', got '$($firstResult.from)'."
+        Assert-True ($firstResult.continuation.dedupeKey -eq $continuationKey) "Expected continuation dedupe key '$continuationKey', got '$($firstResult.continuation.dedupeKey)'."
+
+        $continuationEvent = Wait-Event -Label "continuation wakeup for $continuationAgent" -Seconds $TimeoutSeconds -Predicate {
+            $_.type -eq "continuation.wakeup_enqueued" -and
+            $_.to -eq $continuationAgent -and
+            $_.payload.dedupeKey -eq $continuationKey
+        }
+        $followUpTaskId = $continuationEvent.taskId
+        Assert-True (-not [string]::IsNullOrWhiteSpace($followUpTaskId)) "Continuation wakeup event did not include a follow-up task id."
+
+        $followUpResult = $null
+        $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+        while ((Get-Date) -lt $deadline) {
+            $wait = Invoke-CtuTool -Name "agentbus_wait_result" -Arguments @{
+                cwd = $Workspace
+                taskId = $followUpTaskId
+                timeoutSeconds = (Get-PollTimeoutSeconds)
+            }
+            if ($wait.completed -eq $true) {
+                $followUpResult = $wait.result
+                break
+            }
+            Start-Sleep -Seconds 1
+        }
+        Assert-True ($null -ne $followUpResult) "Timed out waiting for delayed continuation follow-up result."
+        Assert-True ($followUpResult.outcome -eq "done") "Expected delayed continuation follow-up outcome=done, got '$($followUpResult.outcome)'."
+        Assert-True ($followUpResult.from -eq $continuationAgent) "Expected delayed continuation follow-up result from '$continuationAgent', got '$($followUpResult.from)'."
+
+        Write-Host ""
+        Write-Host "PASS live CTU continuation smoke run $RunId"
+        Write-Host "  first task: $($phaseContinuation.task.id)"
+        Write-Host "  first result: $($firstResult.id)"
+        Write-Host "  continuation task: $followUpTaskId"
+        Write-Host "  follow-up result: $($followUpResult.id)"
+        return
+    }
+
+    if ($Scenario -eq "error-paths") {
+        Write-Host "Checking live error paths..."
+        $missingError = Invoke-CtuToolExpectFailure -Name "bridge_dispatch_task" -Arguments @{
+            cwd = $Workspace
+            taskId = "task-missing-$RunId"
+        }
+        Assert-True ($missingError -like "*Task not found*" -or $missingError -like "*500*" -or $missingError -like "*Serverfehler*" -or $missingError -like "*Response status code does not indicate success*") "Missing-task dispatch failed with an unexpected error: $missingError"
+
+        $retiredAgent = "$agentPrefix/retired-agent"
+        Invoke-CtuTool -Name "agentbus_register_agent" -Arguments @{
+            cwd = $Workspace
+            id = $retiredAgent
+            displayName = $retiredAgent
+            role = "Retired live error-path probe agent."
+            threadId = "thread-retired-$RunId"
+            returnTo = $ControllerAgent
+            status = "retired"
+        } | Out-Null
+        $retiredTask = Invoke-CtuTool -Name "agentbus_create_task" -Arguments @{
+            cwd = $Workspace
+            from = $ControllerAgent
+            to = $retiredAgent
+            title = "Live smoke: retired dispatch must fail"
+            prompt = "This task must not be delivered because the target agent is retired."
+            returnTo = $ControllerAgent
+        }
+        $retiredDispatch = Invoke-CtuTool -Name "bridge_dispatch_task" -Arguments @{
+            cwd = $Workspace
+            taskId = $retiredTask.task.id
+        }
+        Assert-True ($retiredDispatch.succeeded -eq $false) "Dispatch to retired agent unexpectedly succeeded."
+        $retiredResult = Invoke-CtuTool -Name "agentbus_wait_result" -Arguments @{
+            cwd = $Workspace
+            taskId = $retiredTask.task.id
+            timeoutSeconds = (Get-PollTimeoutSeconds)
+        }
+        Assert-True ($retiredResult.completed -eq $true) "Retired dispatch did not write a failed AgentBus result."
+        Assert-True ($retiredResult.result.status -eq "failed") "Retired dispatch result status was '$($retiredResult.result.status)', expected failed."
+        Wait-Event -Label "retired dispatch blocked" -Seconds 10 -Predicate {
+            $_.type -eq "task.dispatch_blocked_retired_agent" -and $_.taskId -eq $retiredTask.task.id
+        } | Out-Null
+
+        $nonVisibleAgent = "$agentPrefix/non-visible-agent"
+        Invoke-CtuTool -Name "agentbus_register_agent" -Arguments @{
+            cwd = $Workspace
+            id = $nonVisibleAgent
+            displayName = $nonVisibleAgent
+            role = "Non-visible live error-path probe agent."
+            threadId = "thread-not-visible-$RunId"
+            returnTo = $ControllerAgent
+            status = "active"
+        } | Out-Null
+        $nonVisibleTask = Invoke-CtuTool -Name "agentbus_create_task" -Arguments @{
+            cwd = $Workspace
+            from = $ControllerAgent
+            to = $nonVisibleAgent
+            title = "Live smoke: non-visible dispatch must fail"
+            prompt = "This task must expose a missing visible thread error."
+            returnTo = $ControllerAgent
+        }
+        $nonVisibleDispatch = Invoke-CtuTool -Name "bridge_dispatch_task" -Arguments @{
+            cwd = $Workspace
+            taskId = $nonVisibleTask.task.id
+        }
+        Assert-True ($nonVisibleDispatch.succeeded -eq $false) "Dispatch to non-visible agent unexpectedly succeeded."
+        Wait-Event -Label "non-visible dispatch failed" -Seconds 10 -Predicate {
+            $_.type -eq "task.dispatch_failed" -and $_.taskId -eq $nonVisibleTask.task.id
+        } | Out-Null
+
+        Write-Host ""
+        Write-Host "PASS live CTU error-paths smoke run $RunId"
+        Write-Host "  missing task error observed"
+        Write-Host "  retired task: $($retiredTask.task.id)"
+        Write-Host "  non-visible task: $($nonVisibleTask.task.id)"
+        return
+    }
+
+    if ($Scenario -eq "stale-claimed") {
+        Write-Host "Checking live stale claimed-task recovery..."
+        $staleAgent = "$agentPrefix/stale-agent"
+        $policyStatus = Invoke-CtuTool -Name "codex_controller_policy_status"
+        $originalPolicyPath = [string]$policyStatus.policyPath
+        $policyDirectory = Join-Path $repoRoot ".codexteamup/reports"
+        New-Item -ItemType Directory -Path $policyDirectory -Force | Out-Null
+        $fastPolicyPath = (Join-Path $policyDirectory "live-stale-policy-$RunId.json").Replace('\', '/')
+        @{
+            teamSendMessageDefaultDispatchMode = "enqueue"
+            wakeupTimeoutSeconds = 8
+            waitResultTimeoutCapSeconds = 10
+            ensureThreadNameBeforePrime = $true
+            primePromptStartsWithAgentId = $true
+            staleClaimedTaskRecoverySeconds = 5
+        } | ConvertTo-Json -Depth 10 | Set-Content -Path $fastPolicyPath -Encoding UTF8
+
+        try {
+            Write-Host "  temporarily lowering stale-claimed recovery policy to 5s"
+            Invoke-CtuTool -Name "codex_controller_policy_reload" -Arguments @{
+                policyPath = $fastPolicyPath
+            } | Out-Null
+
+            $staleAgentJson = ConvertTo-Json -InputObject @(
+                @{
+                    id = $staleAgent
+                    displayName = $staleAgent
+                    role = "Live stale claimed-task recovery probe agent."
+                    returnTo = $ControllerAgent
+                    speed = "fast"
+                    model = "gpt-5.4-mini"
+                    reasoningEffort = "low"
+                    initialPrompt = "You are $staleAgent. If CTU dispatches a recovered stale-claimed task, claim it if needed and write one AgentBus result containing marker stale-claimed-recovered-ok."
+                }
+            ) -Depth 40 -Compress
+            Ensure-CtuAgents -AgentsJson $staleAgentJson -Ids @($staleAgent) -Prime "true" -SetName "false" | Out-Null
+
+            $staleTask = Invoke-CtuTool -Name "agentbus_create_task" -Arguments @{
+                cwd = $Workspace
+                from = $ControllerAgent
+                to = $staleAgent
+                title = "Live smoke: stale claimed recovery"
+                prompt = "After CTU recovers this deliberately stale claimed task, write one AgentBus result containing marker stale-claimed-recovered-ok."
+                returnTo = $ControllerAgent
+            }
+            Invoke-CtuTool -Name "agentbus_claim_task" -Arguments @{
+                cwd = $Workspace
+                taskId = $staleTask.task.id
+                owner = $staleAgent
+            } | Out-Null
+
+            Wait-Event -Label "stale claimed task recovery" -Seconds $TimeoutSeconds -Predicate {
+                $_.type -eq "task.recovered_claimed" -and $_.taskId -eq $staleTask.task.id
+            } | Out-Null
+
+            $staleResult = $null
+            $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+            while ((Get-Date) -lt $deadline) {
+                $wait = Invoke-CtuTool -Name "agentbus_wait_result" -Arguments @{
+                    cwd = $Workspace
+                    taskId = $staleTask.task.id
+                    timeoutSeconds = (Get-PollTimeoutSeconds)
+                }
+                if ($wait.completed -eq $true) {
+                    $staleResult = $wait.result
+                    break
+                }
+                Start-Sleep -Seconds 1
+            }
+            Assert-True ($null -ne $staleResult) "Timed out waiting for recovered stale-claimed task result."
+            Assert-True ($staleResult.from -eq $staleAgent) "Expected stale claimed recovery result from '$staleAgent', got '$($staleResult.from)'."
+            Assert-True ($staleResult.status -eq "completed" -or $staleResult.status -eq "done") "Expected stale claimed recovery result status=completed or done, got '$($staleResult.status)'."
+
+            Write-Host ""
+            Write-Host "PASS live CTU stale-claimed smoke run $RunId"
+            Write-Host "  recovered task: $($staleTask.task.id)"
+            Write-Host "  result: $($staleResult.id)"
+            return
+        } finally {
+            if (-not [string]::IsNullOrWhiteSpace($originalPolicyPath)) {
+                try {
+                    Write-Host "  restoring controller policy $originalPolicyPath"
+                    Invoke-CtuTool -Name "codex_controller_policy_reload" -Arguments @{
+                        policyPath = $originalPolicyPath
+                    } | Out-Null
+                } catch {
+                    Write-Warning "Could not restore controller policy '$originalPolicyPath': $($_.Exception.Message)"
+                }
+            }
+        }
+    }
+
+    if ($Scenario -eq "surface") {
+        Write-Host "Checking live CTU MCP surface..."
+        $surfaceAgent = "$agentPrefix/surface-agent"
+        $dashboardPath = "$Workspace/.codexteamup/reports/live-dashboard-$RunId.html"
+
+        Invoke-CtuTool -Name "codex_appserver_adapter_status" | Out-Null
+        Invoke-CtuTool -Name "codex_controller_status" | Out-Null
+        Invoke-CtuTool -Name "codex_controller_policy_status" | Out-Null
+
+        $controller = Get-Agent -Id $ControllerAgent
+        if ($null -eq $controller -or [string]::IsNullOrWhiteSpace($controller.threadId)) {
+            Write-Host "Controller is not bound yet; binding an existing visible Desktop thread named $ControllerAgent."
+            Invoke-CtuTool -Name "team_ensure_agents" -Arguments @{
+                cwd = $Workspace
+                agentsJson = (ConvertTo-Json -InputObject @(
+                    @{
+                        id = $ControllerAgent
+                        displayName = $ControllerAgent
+                        role = "Live smoke test controller. Receives CTU surface notifications."
+                        returnTo = $ControllerAgent
+                        speed = "standard"
+                        reasoningEffort = "medium"
+                    }
+                ) -Depth 40 -Compress)
+                createMissing = "false"
+                prime = "false"
+                setName = "false"
+            } | Out-Null
+        }
+
+        $controller = Require-Agent -Id $ControllerAgent
+
+        Invoke-CtuTool -Name "agentbus_register_agent" -Arguments @{
+            cwd = $Workspace
+            id = $surfaceAgent
+            displayName = $surfaceAgent
+            role = "Live CTU MCP surface probe agent."
+            returnTo = $ControllerAgent
+            status = "active"
+        } | Out-Null
+
+        $taskResponse = Invoke-CtuTool -Name "agentbus_create_task" -Arguments @{
+            cwd = $Workspace
+            from = "ctu-test/runner"
+            to = $surfaceAgent
+            title = "Live smoke: MCP surface task"
+            prompt = "Claim this task, write a result, notify the controller, and export dashboard evidence through the runner."
+            returnTo = $ControllerAgent
+        }
+        $taskId = $taskResponse.task.id
+        Assert-True (-not [string]::IsNullOrWhiteSpace($taskId)) "agentbus_create_task did not return a task id."
+
+        $claimResponse = Invoke-CtuTool -Name "agentbus_claim_task" -Arguments @{
+            cwd = $Workspace
+            taskId = $taskId
+            owner = $surfaceAgent
+        }
+        Assert-True ($claimResponse.task.status -eq "claimed") "agentbus_claim_task did not mark task $taskId as claimed."
+
+        $writeResponse = Invoke-CtuTool -Name "agentbus_write_result" -Arguments @{
+            cwd = $Workspace
+            taskId = $taskId
+            from = $surfaceAgent
+            to = $ControllerAgent
+            status = "completed"
+            outcome = "done"
+            summary = "Live surface probe completed for $RunId."
+            tests = "agentbus_create_task,agentbus_claim_task,agentbus_write_result,agentbus_wait_result,bridge_notify_result,team_dashboard_export"
+        }
+        $resultId = $writeResponse.result.id
+        Assert-True (-not [string]::IsNullOrWhiteSpace($resultId)) "agentbus_write_result did not return a result id."
+
+        $waitResponse = Invoke-CtuTool -Name "agentbus_wait_result" -Arguments @{
+            cwd = $Workspace
+            taskId = $taskId
+            timeoutSeconds = (Get-PollTimeoutSeconds)
+        }
+        Assert-True ($waitResponse.completed -eq $true) "agentbus_wait_result did not find result $resultId."
+
+        $notifyResponse = Invoke-CtuTool -Name "bridge_notify_result" -Arguments @{
+            cwd = $Workspace
+            resultId = $resultId
+            toAgent = $ControllerAgent
+        }
+        Assert-True ($notifyResponse.result.id -eq $resultId) "bridge_notify_result returned a different result id."
+        Assert-True (-not [string]::IsNullOrWhiteSpace($notifyResponse.target.threadId)) "bridge_notify_result did not resolve a target thread."
+
+        $dashboardResponse = Invoke-CtuTool -Name "team_dashboard_export" -Arguments @{
+            cwd = $Workspace
+            outputPath = $dashboardPath
+        }
+        Assert-True (-not [string]::IsNullOrWhiteSpace($dashboardResponse.path)) "team_dashboard_export did not return a path."
+        Assert-True (Test-Path -LiteralPath $dashboardResponse.path) "team_dashboard_export did not write '$($dashboardResponse.path)'."
+
+        $tasksResponse = Invoke-CtuTool -Name "agentbus_list_tasks" -Arguments @{
+            cwd = $Workspace
+            status = "done"
+            to = $surfaceAgent
+        }
+        $listedSurfaceTask = @($tasksResponse.tasks) | Where-Object { $_.id -eq $taskId } | Select-Object -First 1
+        Assert-True ($null -ne $listedSurfaceTask) "agentbus_list_tasks did not include completed surface task $taskId."
+
+        Invoke-CtuTool -Name "agentbus_list_events" -Arguments @{
+            cwd = $Workspace
+            limit = 50
+        } | Out-Null
+
+        Write-Host ""
+        Write-Host "PASS live CTU surface smoke run $RunId"
+        Write-Host "  task: $taskId"
+        Write-Host "  result: $resultId"
+        Write-Host "  dashboard: $($dashboardResponse.path)"
         return
     }
 

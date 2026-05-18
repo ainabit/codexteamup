@@ -3,5 +3,6 @@
   "wakeupTimeoutSeconds": 8,
   "waitResultTimeoutCapSeconds": 10,
   "ensureThreadNameBeforePrime": true,
-  "primePromptStartsWithAgentId": true
+  "primePromptStartsWithAgentId": true,
+  "staleClaimedTaskRecoverySeconds": 300
 }

@@ -5,12 +5,13 @@ This feature needs a real Codex Desktop smoke path because the risky behavior li
 The target live scenario is:
 
 1. assume a manually created first controller agent such as `ctu-test/architect` exists in the test project,
-2. optionally ask that controller to create or bind `ctu-test/<run-id>/agent-a`,
+2. optionally ask that controller to create or bind run-scoped workers such as `ctu-test/<run-id>/agent-a`,
 3. have `agent-a` or the controller create or wake `agent-b` and `agent-c`,
 3. verify `agent-b` and `agent-c` can communicate through AgentBus,
 4. take the `agent-b` binding out of service and create or bind a replacement,
 5. verify `model`, `speed`, and `reasoningEffort` are persisted and passed into wakeups,
-6. archive the temporary test chats and mark their AgentBus bindings as retired when cleanup is requested.
+6. verify agent-owned continuation and terminal outcome behavior when the controller-suite scenario is used,
+7. archive the temporary test chats and mark their AgentBus bindings as retired when cleanup is requested.
 
 ## Test Agent Prefix
 
@@ -34,9 +35,15 @@ powershell -ExecutionPolicy Bypass -File .\scripts\test-codexteamup.ps1 -UseTest
 
 After changing CTU service, wrapper, or MCP tool registration code, restart Desktop through `scripts/start-codexteamup.ps1` before live smoke tests. The running service must expose the branch's current MCP tools.
 
-The three repeatable smoke tests are:
+The repeatable smoke tests are:
 
 - `controller`: send one task to the manually provided `ctu-test/architect`; the controller performs the run-scoped orchestration from inside Codex Desktop.
+- `controller-suite`: send one packaged safety-net task to `ctu-test/architect`; the controller creates workers with distinct display names, roles, models, and reasoning depths, then verifies terminal outcomes and self-continuation evidence.
+- `surface`: exercise live CTU MCP and AgentBus surfaces in `codexteamup.test`, including status tools, create/claim/write/wait result flow, result notification to `ctu-test/architect`, and dashboard export.
+- `queue-first`: prove `team_send_message dispatchMode=enqueue` returns a pure queue ACK with no inline wakeup, then prove explicit `bridge_dispatch_task` wakes a worker and produces a result.
+- `continuation`: prove a real worker writes `self_continue`, CTU waits until the continuation is due, creates a self-continuation task, wakes the same worker, and receives a follow-up `done` result.
+- `error-paths`: exercise live negative paths such as missing task dispatch, retired target dispatch, and stale/non-visible thread binding.
+- `stale-claimed`: deliberately claim a worker task without a result, wait for controller stale-claim recovery, and verify the recovered task is delivered and completed.
 - `basic`: create or bind `agent-a`, wake it, and wait for one AgentBus result.
 - `peer`: run `basic`, have `agent-a` create `agent-b` and `agent-c`, and verify `agent-b -> agent-c` communication.
 - `replacement`: run `peer`, mark `agent-b` stale, create or bind a replacement, and verify the replacement handles a task.
@@ -46,6 +53,12 @@ Useful commands:
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\test-codexteamup.ps1
 powershell -ExecutionPolicy Bypass -File .\scripts\test-codexteamup.ps1 -UseTestWorkspace -Live -LiveScenario controller
+powershell -ExecutionPolicy Bypass -File .\scripts\test-codexteamup.ps1 -UseTestWorkspace -Live -LiveScenario controller-suite
+powershell -ExecutionPolicy Bypass -File .\scripts\test-codexteamup.ps1 -UseTestWorkspace -Live -LiveScenario surface
+powershell -ExecutionPolicy Bypass -File .\scripts\test-codexteamup.ps1 -UseTestWorkspace -Live -LiveScenario queue-first
+powershell -ExecutionPolicy Bypass -File .\scripts\test-codexteamup.ps1 -UseTestWorkspace -Live -LiveScenario continuation
+powershell -ExecutionPolicy Bypass -File .\scripts\test-codexteamup.ps1 -UseTestWorkspace -Live -LiveScenario error-paths
+powershell -ExecutionPolicy Bypass -File .\scripts\test-codexteamup.ps1 -UseTestWorkspace -Live -LiveScenario stale-claimed
 powershell -ExecutionPolicy Bypass -File .\scripts\test-codexteamup.ps1 -UseTestWorkspace -Live -LiveScenario basic
 powershell -ExecutionPolicy Bypass -File .\scripts\test-codexteamup.ps1 -UseTestWorkspace -Live -LiveScenario peer
 powershell -ExecutionPolicy Bypass -File .\scripts\test-codexteamup.ps1 -UseTestWorkspace -Live -LiveScenario replacement
@@ -54,6 +67,12 @@ powershell -ExecutionPolicy Bypass -File .\scripts\test-live-multi-agent-orchest
 ```
 
 `test-codexteamup.ps1` always runs `dotnet build` and the deterministic suite first. With `-UseTestWorkspace`, it creates or validates the sibling `codexteamup.test` workspace and keeps live AgentBus state out of the main repo. Live smoke runs clean up temporary test chats by default. Use `-KeepLiveAgents` only when the visible test threads need manual inspection.
+
+Every `test-codexteamup.ps1` run writes a Markdown safety report under `.codexteamup/reports` unless `-ReportPath` is provided. The report lists each high-level testcase with category, status, failure reason, and details so the run is inspectable without reading the full console log. Use `-LiveAll` as the repeatable "all current CTU features except fresh-clone acceptance" package.
+
+At the end of `-LiveAll`, the runner archives and retires all `ctu-test/*` smoke agents except the manually maintained `ctu-test/architect`, unless `-KeepLiveAgents` is set. This keeps `codexteamup.test` small after full safety-net runs while preserving AgentBus audit files.
+
+During execution, deterministic tests print progress as `RUN <current>/<total> <testcase>` before each testcase and live smoke scenarios print `Running live smoke <current>/<total>: <scenario>`. The goal is that a human can see which capability is being checked even while the run is still active.
 
 Live smoke tool calls use a short per-call timeout, defaulting to 10 seconds, so Desktop/app-server stalls fail with a clear phase instead of blocking the runner for many minutes. Override with `-ToolTimeoutSeconds` only for diagnostics.
 
@@ -67,10 +86,20 @@ The live smoke runner checks:
 
 - CTU service health,
 - wrapper reachability through `codex_thread_list`,
+- live status checks for the app-server adapter, controller runtime, and controller policy,
+- direct AgentBus create/claim/write/wait flow,
+- result notification to the manually provided `ctu-test/architect`,
+- dashboard export against the live `codexteamup.test` AgentBus,
+- queue-first enqueue acknowledgement versus explicit task dispatch,
 - optional controller orchestration through a manually provided `ctu-test/architect`,
+- controller-driven agent creation with display names and roles that are intentionally not tied to the agent id,
 - creation and priming of `agent-a`,
 - `agent-a` creating agents, enqueuing tasks for `agent-b` and `agent-c`, and dispatching those tasks separately,
 - runtime settings on `agent-b` and `agent-c`,
+- controller-suite evidence markers for `done`, `human`, `failed`, `handed_off`, and agent-owned `self_continue`,
+- delayed agent-owned `self_continue` wakeup and follow-up `done` result,
+- missing-task, retired-agent, and non-visible-thread negative dispatch paths,
+- stale claimed-task recovery through the controller delivery loop,
 - peer communication from `agent-b` to `agent-c`,
 - replacement of a stale `agent-b` binding,
 - replacement wakeup and result.
@@ -90,6 +119,8 @@ The tester should choose the smallest useful set:
 - normal fixes: `test-codexteamup.ps1`
 - wakeup, binding, runtime, MCP, AgentBus, service, or wrapper changes: deterministic safety net plus one live scenario
 - broad orchestration changes: deterministic safety net plus `-LiveAll`
+
+Use `controller-suite` as the frequent packaged CTU-in-Desktop proof when the goal is to verify the whole coordination loop through `ctu-test/architect` rather than through the architect chat that is currently developing CTU.
 
 The tester result must include the commands used, pass/fail status, live run id, cleanup status, and any blockers.
 
@@ -118,6 +149,40 @@ Assertions:
 - explicit runtime values win over speed defaults,
 - each prime prompt includes role, allowed paths, instruction files, runtime settings, and strict AgentBus task handling rules,
 - events include `agent.created` and `agent.primed`.
+
+### 6. Restart Orchestration Slice 1 (Deterministic)
+
+Use `ctu_restart_request` and `ctu_restart_status` checks through deterministic fake adapters, exercising the production restart model in
+`src/CodexTeamUp.AgentBus/RestartOperations.cs` directly.
+
+Required assertions for the first slice:
+
+- restart operation records are written to `.codexteamup/restart/operations/<operationId>.json`.
+- required fields are present for `ctu.desktop-restart` records (`requestedByAgentId`, `sourceCwd`, `targetCwd`, `targetAgentId`, `continueTitle`, `continuePrompt`).
+- invalid target checkout requests fail with deterministic errors (`targetCwd` missing, same as source).
+- status transitions are durable and idempotent for legal paths:
+  `prepared -> helper_started -> stopping_source -> starting_target -> target_healthy -> continuation_enqueued -> continuation_dispatched -> completed`.
+- terminal states (`completed`, `rolled_back`, `failed`) are stable on repeated transition writes and set completion metadata.
+- fallback config is preserved in the record (`fallbackCwd`, `fallbackBusRoot`).
+
+### 7. Restart Live Proof Contract (Not in deterministic suite)
+
+The first live proof remains manual and should be limited in scope:
+
+1. start source orchestration checkout on `codexteamup`,
+2. request restart into a prepared target checkout (`codexteamup.acceptance`),
+3. verify `ctu/architect` receives `Continue after restart` result/task with `ctu_continue` intent,
+4. run `scripts/test-codexteamup.ps1` smoke for the target to verify continuation health,
+5. request restart back into `codexteamup`,
+6. verify architect receives and can continue the run from the previous continuation point.
+
+Evidence bundle expected in the tester result:
+
+- commands run,
+- operation ids and their final status,
+- continuation task id,
+- target assistant confirmation message captured in AgentBus events,
+- pass/fail + cleanup status.
 
 ### 2. Agent A Enqueues Work For B And C
 

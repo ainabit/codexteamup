@@ -7,15 +7,19 @@ using CodexTeamUp.Mcp;
 using CodexTeamUp.Service;
 using System.Diagnostics;
 using System.IO.Pipes;
+using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
 
 var tests = new (string Name, Func<Task> Body)[]
 {
     ("AgentBus lifecycle", () => Task.Run(AgentBusLifecycle)),
+    ("Execution continuity state store reads and writes", () => Task.Run(ExecutionContinuityStoreReadsAndWrites)),
     ("AgentBus normalizes agent names", () => Task.Run(AgentBusNormalizesAgentNames)),
     ("AgentBus registry and result wait", () => Task.Run(AgentBusRegistryAndResultWait)),
+    ("AgentBus clear tasks deletes task queues", () => Task.Run(AgentBusClearTasksDeletesTaskQueues)),
     ("AgentBus tiny result wait does not throw", () => Task.Run(AgentBusTinyResultWaitDoesNotThrow)),
+    ("AgentBus event append is safe under parallel writes", () => Task.Run(AgentBusEventAppendIsSafeUnderParallelWrites)),
     ("Codex state reader parses rollout metadata", () => Task.Run(CodexStateReaderParsesRollouts)),
     ("SafeText redacts obvious secrets", () => Task.Run(SafeTextRedactsSecrets)),
     ("CTU JSON logger writes redacted machine and human logs", () => Task.Run(CtuJsonLoggerWritesRedactedMachineAndHumanLogs)),
@@ -50,6 +54,9 @@ var tests = new (string Name, Func<Task> Body)[]
     ("MCP registry preserves existing thread binding on re-register", () => Task.Run(McpRegistryPreservesExistingThreadBindingOnReregister)),
     ("MCP registry accepts chatName as agent display name", () => Task.Run(McpRegistryAcceptsChatNameAsAgentDisplayName)),
     ("MCP registry writes result file metadata", () => Task.Run(McpRegistryWritesResultFileMetadata)),
+    ("AgentBus terminal outcome ignores continuation request", () => Task.Run(AgentBusTerminalOutcomeIgnoresContinuationRequest)),
+    ("Controller continuation follow-up inherits dedupe key", () => Task.Run(ControllerContinuationFollowUpInheritsDedupeKey)),
+    ("Controller continuation follow-up rejects loop beyond prompt limit", () => Task.Run(ControllerContinuationFollowUpRejectsLoopBeyondPromptLimit)),
     ("MCP registry ensures explicit ctu agents", () => Task.Run(McpRegistryEnsuresExplicitCtuAgents)),
     ("MCP registry primes agents without fallback tasks", () => Task.Run(McpRegistryPrimesAgentsWithoutFallbackTasks)),
     ("MCP registry ACKs deferred agent ensure", () => Task.Run(McpRegistryAcksDeferredAgentEnsure)),
@@ -59,6 +66,26 @@ var tests = new (string Name, Func<Task> Body)[]
     ("MCP registry persists agent runtime settings", () => Task.Run(McpRegistryPersistsAgentRuntimeSettings)),
     ("MCP registry sends strict task wakeup", () => Task.Run(McpRegistrySendsStrictTaskWakeup)),
     ("MCP registry ACKs deferred task dispatch", () => Task.Run(McpRegistryAcksDeferredTaskDispatch)),
+    ("Controller delivery loop waits before retrying queued team message", () => Task.Run(ControllerDeliveryLoopWaitsBeforeRetryingQueuedMessage)),
+    ("Controller delivery loop supersedes older queued tasks for same target", () => Task.Run(ControllerDeliveryLoopSupersedesOlderQueuedTasks)),
+    ("Controller delivery loop fails open task for retired agent", () => Task.Run(ControllerDeliveryLoopFailsOpenTaskForRetiredAgent)),
+    ("Controller delivery loop recovers stale claimed task", () => Task.Run(ControllerDeliveryLoopRecoversStaleClaimedTask)),
+    ("Controller result notify retry persists metadata and retries from startup sweep", () => Task.Run(ControllerResultNotifyRetryPersistsMetadataAndRetries)),
+    ("Controller guardian evaluates result into continuity state", () => Task.Run(ControllerGuardianEvaluatesResultIntoContinuityState)),
+    ("Controller guardian treats done result status as completed", () => Task.Run(ControllerGuardianTreatsDoneResultStatusAsCompleted)),
+    ("Controller guardian skips unchanged queued task observation", () => Task.Run(ControllerGuardianSkipsUnchangedQueuedTaskObservation)),
+    ("Controller guardian resumes dispatch from continuity state", () => Task.Run(ControllerGuardianResumesDispatchFromContinuityState)),
+    ("Controller guardian does not redispatch claimed task", () => Task.Run(ControllerGuardianDoesNotRedispatchClaimedTask)),
+    ("Controller guardian resumes notify from continuity state", () => Task.Run(ControllerGuardianResumesNotifyFromContinuityState)),
+    ("Controller guardian blocks on orphan continuity dispatch", () => Task.Run(ControllerGuardianBlocksOnOrphanDispatchFromContinuityState)),
+    ("Controller guardian blocks on orphan continuity notify", () => Task.Run(ControllerGuardianBlocksOnOrphanNotifyFromContinuityState)),
+    ("Controller guardian resumes external continuity via correlation", () => Task.Run(ControllerGuardianResumesExternalContinuityViaCorrelation)),
+    ("Execution continuity state store supports configured directory", () => Task.Run(ExecutionContinuityStoreSupportsConfiguredDirectory)),
+    ("Controller guardian evaluates continuity with configurable identity", () => Task.Run(ControllerGuardianRespectsConfiguredContinuityPolicy)),
+    ("Controller guardian emits canonical decision events", () => Task.Run(ControllerGuardianEmitsCanonicalContinuityDecisionEvents)),
+    ("Controller guardian blocks when notify retries are exhausted", () => Task.Run(ControllerGuardianBlocksOnExhaustedNotifyRetries)),
+    ("Controller agent continuation wakes idle owner", () => Task.Run(ControllerAgentContinuationWakesIdleOwner)),
+    ("Controller startup sweep covers MCP-discovered bus roots", () => Task.Run(ControllerStartupSweepCoversMcpDiscoveredBusRoots)),
     ("MCP registry rebinds stale agent before team message", () => Task.Run(McpRegistryRebindsStaleAgentBeforeTeamMessage)),
     ("MCP registry waits for AgentBus result", () => Task.Run(McpRegistryWaitsForAgentBusResult)),
     ("MCP registry clamps invalid AgentBus wait timeout", () => Task.Run(McpRegistryClampsInvalidAgentBusWaitTimeout)),
@@ -66,21 +93,45 @@ var tests = new (string Name, Func<Task> Body)[]
     ("MCP team send message enqueues by default", () => Task.Run(McpTeamSendMessageEnqueuesByDefault)),
     ("MCP team send message waits for result", () => Task.Run(McpTeamSendMessageWaitsForResult)),
     ("MCP team send message defers stalled wakeup quickly", () => Task.Run(McpTeamSendMessageDefersStalledWakeupQuickly)),
+    ("Bridge dispatch to retired agent is blocked", () => Task.Run(McpBridgeDispatchTaskBlocksRetiredTarget)),
     ("MCP registry recreates stale ctu agent threads", () => Task.Run(McpRegistryRecreatesStaleCtuAgentThreads)),
     ("MCP registry creates replacement when display name changes", () => Task.Run(McpRegistryCreatesReplacementWhenDisplayNameChanges)),
     ("MCP registry retries thread naming until created thread is visible", () => Task.Run(McpRegistryRetriesThreadNamingUntilCreatedThreadIsVisible)),
     ("MCP registry notifies result through service path", () => Task.Run(McpRegistryNotifiesResultThroughServicePath)),
-    ("MCP registry defers result notify while target active", () => Task.Run(McpRegistryDefersResultNotifyWhileTargetActive)),
-    ("MCP registry reads target status when list is notLoaded", () => Task.Run(McpRegistryReadsTargetStatusWhenListIsNotLoaded)),
+    ("MCP registry defers result notify when read thread shows busy turn", () => Task.Run(McpRegistryDefersResultNotifyWhenReadThreadShowsBusyTurn)),
+    ("MCP registry sends result notify when active thread has no busy turns", () => Task.Run(McpRegistrySendsResultNotifyWhenActiveThreadHasNoBusyTurns)),
+    ("MCP registry resolves result notify target thread-id as agent-id", () => Task.Run(McpRegistryResolvesNotifyTargetThreadParamAsAgentId)),
     ("Agent thread matcher binds named team threads", () => Task.Run(AgentThreadMatcherBindsNamedTeamThreads)),
     ("Agent thread matcher binds exact preview names", () => Task.Run(AgentThreadMatcherBindsExactPreviewNames)),
     ("AgentBus dashboard creates snapshot", () => Task.Run(AgentBusDashboardCreatesSnapshot)),
-    ("AgentBus dashboard renders communication", () => Task.Run(AgentBusDashboardRendersCommunication))
+    ("AgentBus dashboard renders communication", () => Task.Run(AgentBusDashboardRendersCommunication)),
+    ("Restart orchestration record lifecycle", () => Task.Run(RestartOperationLifecycleAndPersistence)),
+    ("Restart orchestration validation rejects missing target", () => Task.Run(RestartOperationRejectsInvalidTargetCwd)),
+    ("Restart operation status updates are idempotent", () => Task.Run(RestartOperationStatusUpdateIsIdempotent)),
+    ("Restart operation preserves imported continuation task id", () => Task.Run(RestartOperationPreservesImportedContinuationTaskId)),
+    ("Restart operation records checkpoint id", () => Task.Run(RestartOperationPersistsStartupHandoffAndKnownGood)),
+    ("Startup script records CTU session manifest", () => Task.Run(StartupScriptRecordsCtuSessionManifest)),
+    ("Restart supervisor replaces manifest session and keeps target startup transient", () => Task.Run(RestartSupervisorUsesSessionManifestAndTransientTargetStartup)),
+    ("Restart helper supervisor console is transient", () => Task.Run(RestartHelperSupervisorConsoleIsTransient)),
+    ("Service-only startup does not target desktop session processes", () => Task.Run(ServiceOnlyStartupDoesNotTargetDesktopSessionProcesses)),
+    ("Exchange restart handoff supports lease and completion flow", () => Task.Run(ExchangeHandoffLeaseAndCompletionFlow)),
+    ("Exchange restart handoff accepts PowerShell casing", () => Task.Run(ExchangeHandoffAcceptsPowerShellCasing)),
+    ("Exchange startup sweep isolates malformed envelopes", () => Task.Run(ExchangeStartupSweepIsolatesMalformedEnvelope)),
+    ("Known-good checkpoint store records runtime", () => Task.Run(KnownGoodRuntimeCheckpointStoreRecordsRuntime)),
+    ("Known-good checkpoint requires explicit verification", () => Task.Run(KnownGoodCheckpointRequiresExplicitVerification)),
+    ("Startup sweep verifies known-good checkpoint on successful continuation dispatch", () => Task.Run(StartupSweepVerifiesKnownGoodCheckpointAfterDispatch)),
+    ("Controller startup sweep imports target-side restart handoff", () => Task.Run(ControllerStartupSweepImportsRestartHandoff)),
+    ("Controller startup sweep persists restart continuation as resume pending external", () => Task.Run(ControllerStartupSweepPersistsRestartContinuationAsResumePendingExternal)),
+    ("Controller continuity guardian resumes restart continuation from external correlation", () => Task.Run(ControllerContinuityGuardianResumesRestartContinuationFromExternalCorrelation))
 };
 
 var failed = 0;
+var testIndex = 0;
+var testTotal = tests.Length;
 foreach (var test in tests)
 {
+    testIndex++;
+    Console.WriteLine($"RUN {testIndex}/{testTotal} {test.Name}");
     try
     {
         await test.Body().ConfigureAwait(false);
@@ -124,6 +175,101 @@ static void AgentBusLifecycle()
     True(File.Exists(Path.Combine(bus.TasksDoneDirectory, $"{task.Id}.json")));
     True(bus.ListEvents().Count >= 4);
 }
+
+static void ExecutionContinuityStoreReadsAndWrites()
+{
+    var root = NewTestDirectory();
+    var continuity = new ExecutionContinuityStateStore(Path.Combine(root, ".codexteamup/agentbus"));
+    continuity.Initialize();
+
+    var created = continuity.Upsert(new ExecutionContinuityState
+    {
+        StateId = continuity.CreateStateId(),
+        CorrelationId = "corr-task-1",
+        InitiativeId = "initiative-1",
+        TaskChainId = "task-chain-1",
+        ShouldContinue = true,
+        State = ExecutionContinuityStateKind.QueuedForDispatch,
+        EnteredAt = DateTimeOffset.Now,
+        UpdatedAt = DateTimeOffset.Now,
+        GuardianAgentId = "ctu/architect",
+        GuardianDisplayName = "ctu/architect",
+        LastOutcomeKind = "queued",
+        LastOutcomeRef = "task-queued-1",
+        NextActionKind = "task",
+        NextActionRef = "task-queued-1",
+        CurrentTargetAgentId = "ctu/architect",
+        CurrentTargetDisplayName = "ctu/architect",
+        AttemptCount = 1,
+        MaxAttempts = 8,
+        LastAttemptAt = DateTimeOffset.Now
+    });
+
+    var updated = continuity.Upsert(created with
+    {
+        State = ExecutionContinuityStateKind.Completed,
+        ShouldContinue = false,
+        LastOutcomeKind = "completed",
+        LastOutcomeRef = "result-1",
+        EnteredAt = created.EnteredAt
+    });
+
+    var latest = continuity.ReadLatest("corr-task-1");
+    Equal(updated.StateId, latest?.StateId);
+    Equal(ExecutionContinuityStateKind.Completed, latest?.State);
+    Equal("result-1", latest?.LastOutcomeRef);
+    Equal(2, continuity.ListStates("corr-task-1").Count);
+    Equal(1, latest?.AttemptCount);
+}
+
+static void ExecutionContinuityStoreSupportsConfiguredDirectory()
+{
+    var root = NewTestDirectory();
+    var busRoot = Path.Combine(root, ".codexteamup/agentbus");
+    var relativeDirectory = ".ctu-continuity";
+    var continuity = new ExecutionContinuityStateStore(busRoot, relativeDirectory);
+    continuity.Initialize();
+
+    var created = continuity.Upsert(new ExecutionContinuityState
+    {
+        StateId = continuity.CreateStateId(),
+        CorrelationId = "corr-task-2",
+        InitiativeId = "initiative-2",
+        TaskChainId = "task-chain-2",
+        ShouldContinue = true,
+        State = ExecutionContinuityStateKind.QueuedForDispatch,
+        EnteredAt = DateTimeOffset.Now,
+        UpdatedAt = DateTimeOffset.Now,
+        GuardianAgentId = "ctu/reviewer",
+        GuardianDisplayName = "ctu/reviewer",
+        LastOutcomeKind = "queued",
+        LastOutcomeRef = "task-2",
+        NextActionKind = "task",
+        NextActionRef = "task-2",
+        CurrentTargetAgentId = "ctu/worker",
+        CurrentTargetDisplayName = "ctu/worker",
+        AttemptCount = 1,
+        MaxAttempts = 8,
+        LastAttemptAt = DateTimeOffset.Now
+    });
+
+    Equal(Path.Combine(root, relativeDirectory), continuity.StatesDirectory);
+    Equal(1, continuity.ReadLatest("corr-task-2")?.AttemptCount);
+
+    var absolute = Path.Combine(root, "custom-continuity");
+    var absoluteContinuity = new ExecutionContinuityStateStore(busRoot, absolute);
+    absoluteContinuity.Initialize();
+    var absoluteCreated = absoluteContinuity.Upsert(created with
+    {
+        CorrelationId = "corr-task-3",
+        StateId = absoluteContinuity.CreateStateId(),
+        LastOutcomeRef = "task-3"
+    });
+
+    Equal(absolute, absoluteContinuity.StatesDirectory);
+    Equal(absoluteCreated.StateId, absoluteContinuity.ReadLatest("corr-task-3")?.StateId);
+}
+
 
 static void AgentBusNormalizesAgentNames()
 {
@@ -184,6 +330,59 @@ static void AgentBusTinyResultWaitDoesNotThrow()
 
     var result = bus.WaitForResult(task.Id, TimeSpan.FromMilliseconds(1));
     True(result is null);
+}
+
+static void AgentBusEventAppendIsSafeUnderParallelWrites()
+{
+    var root = NewTestDirectory();
+    var bus = new AgentBusStore(Path.Combine(root, ".codexteamup/agentbus"));
+    bus.Initialize();
+
+    const int writes = 240;
+    var startingCount = bus.ListEvents().Count;
+
+    var tasks = Enumerable.Range(0, writes)
+        .Select(i => Task.Run(() => bus.RecordEvent(new AgentBusEvent
+        {
+            Timestamp = DateTimeOffset.Now,
+            Type = "agentbus.test.event_append",
+            Message = $"parallel-{i}"
+        })))
+        .ToArray();
+
+    Task.WaitAll(tasks);
+
+    var lines = File.ReadAllLines(Path.Combine(root, ".codexteamup/agentbus/events.jsonl"))
+        .Where(line => !string.IsNullOrWhiteSpace(line))
+        .ToList();
+    var parsed = bus.ListEvents(5000)
+        .Where(evt => string.Equals(evt.Type, "agentbus.test.event_append", StringComparison.Ordinal))
+        .ToList();
+
+    Equal(startingCount + writes, lines.Count);
+    Equal(writes, parsed.Count);
+}
+
+static void AgentBusClearTasksDeletesTaskQueues()
+{
+    var root = NewTestDirectory();
+    var bus = new AgentBusStore(Path.Combine(root, ".codexteamup/agentbus"));
+    bus.Initialize();
+
+    var open = bus.CreateTask("ctu/architect", "ctu/worker", "Open", "Open task.", "codexteamup", root, [], "ctu/architect");
+    var claimed = bus.CreateTask("ctu/architect", "ctu/worker", "Claimed", "Claimed task.", "codexteamup", root, [], "ctu/architect");
+    bus.ClaimTask(claimed.Id, "ctu/worker");
+    var done = bus.CreateTask("ctu/architect", "ctu/worker", "Done", "Done task.", "codexteamup", root, [], "ctu/architect");
+    bus.WriteResult(done.Id, "Done", "completed", "ctu/worker", "ctu/architect", null, [], []);
+
+    var reset = bus.ClearTasks(includeResults: true);
+
+    Equal(3, reset.DeletedTasks);
+    Equal(1, reset.DeletedResults);
+    Equal(0, bus.ListTasks().Count);
+    Equal(0, bus.ListResults().Count);
+    True(bus.ListEvents(100).Any(evt => evt.Type == "agentbus.tasks_cleared"));
+    True(bus.FindTask(open.Id) is null);
 }
 
 static void CodexStateReaderParsesRollouts()
@@ -947,7 +1146,13 @@ static void McpRegistryWritesResultFileMetadata()
       "checks": "manual browser check",
       "artifacts": "app/index.html",
       "openQuestions": "None",
-      "nextSuggestedAction": "Review in browser"
+      "nextSuggestedAction": "Review in browser",
+      "outcome": "self_continue",
+      "continuationOwner": "ctu/developer",
+      "continuationWakeAfterSeconds": 30,
+      "continuationReason": "Continue local polish after review.",
+      "continuationDedupeKey": "sample-page-polish",
+      "continuationMaxAttempts": 3
     }
     """);
 
@@ -958,6 +1163,216 @@ static void McpRegistryWritesResultFileMetadata()
     Equal("manual browser check", result.Tests.Single());
     Equal("app/index.html", result.Artifacts.Single());
     Equal("Review in browser", result.NextSuggestedAction);
+    Equal("self_continue", result.Outcome);
+    True(!string.IsNullOrWhiteSpace(result.ContinuationId));
+    var continuation = bus.ListContinuations().Single();
+    Equal("ctu/developer", continuation.Owner);
+    Equal("sample-page-polish", continuation.DedupeKey);
+    Equal("open", continuation.Status);
+    Equal(3, continuation.MaxAttempts);
+}
+
+static void AgentBusTerminalOutcomeIgnoresContinuationRequest()
+{
+    var root = NewTestDirectory();
+    var busRoot = Path.Combine(root, ".codexteamup", "agentbus");
+    var bus = new AgentBusStore(busRoot);
+    bus.Initialize();
+    var task = bus.CreateTask(
+        "ctu/architect",
+        "ctu/worker",
+        "Terminal outcome check",
+        "Return explicit terminal outcome.",
+        "codexteamup",
+        root,
+        [],
+        "ctu/architect");
+    bus.ClaimTask(task.Id, "ctu/worker");
+    var registry = McpToolRegistry.CreateDefault(busRoot, new FakeAppServerClient("""{"data":[]}"""));
+    var args = JsonSerializer.Deserialize<JsonElement>($$"""
+    {
+      "taskId": {{JsonSerializer.Serialize(task.Id)}},
+      "summary": "No continuation needed.",
+      "status": "completed",
+      "from": "ctu/worker",
+      "to": "ctu/architect",
+      "outcome": "done",
+      "continuationOwner": "ctu/worker",
+      "continuationDedupeKey": "should-not-persist",
+      "continuationReason": "Explicit done outcome should cancel continuation."
+    }
+    """);
+    var resultObject = registry.InvokeAsync("agentbus_write_result", args).GetAwaiter().GetResult();
+    var result = (AgentBusResult?)resultObject.GetType().GetProperty("result")?.GetValue(resultObject);
+    Equal("done", result?.Outcome);
+    True(result?.Continuation is null);
+    Equal(0, bus.ListContinuations(status: "open").Count);
+}
+
+static void ControllerContinuationFollowUpInheritsDedupeKey()
+{
+    var root = NewTestDirectory();
+    var busRoot = Path.Combine(root, ".codexteamup", "agentbus");
+    var bus = new AgentBusStore(busRoot);
+    bus.Initialize();
+    bus.RegisterAgent(new AgentDefinition
+    {
+        Id = "ctu/designer",
+        Role = "Designer",
+        DisplayName = "ctu/designer",
+        ThreadId = "thread-designer",
+        Cwd = root,
+        ReturnTo = "ctu/architect",
+        Status = "active"
+    });
+
+    var task = bus.CreateTask(
+        "ctu/architect",
+        "ctu/designer",
+        "Design slice",
+        "Continue until self-reported done.",
+        "codexteamup",
+        root,
+        [],
+        "ctu/architect");
+    bus.ClaimTask(task.Id, "ctu/designer");
+
+    var firstResult = bus.WriteResult(
+        task.Id,
+        "Need one more pass after local cooldown.",
+        "completed",
+        "ctu/designer",
+        "ctu/architect",
+        null,
+        [],
+        [],
+        outcome: "self_continue",
+        continuation: new AgentBusContinuationRequest
+        {
+            Owner = "ctu/designer",
+            WakeAfterSeconds = 0,
+            MaxAttempts = 2,
+            DedupeKey = "design-review",
+            Reason = "Continue the design review loop."
+        });
+    Equal("self_continue", firstResult.Outcome);
+
+    var firstContinuation = bus.ListContinuations("ctu/designer", "open").Single();
+    Equal("design-review", firstContinuation.DedupeKey);
+
+    var appServer = new ScriptedSendTurnAppServerClient(
+        "thread-designer",
+        "ctu/designer",
+        root);
+    var controller = new DefaultCtuController(busRoot, appServer);
+    controller.RunStartupSweepAsync().GetAwaiter().GetResult();
+
+    var followUpTask = bus.ListTasks("ctu/designer", "open")
+        .Single(t => string.Equals(t.Title, $"Self-continuation: ctu/designer", StringComparison.Ordinal));
+    True(followUpTask.Prompt.Contains("Continuation dedupe key:", StringComparison.Ordinal));
+    True(followUpTask.Prompt.Contains("design-review", StringComparison.Ordinal));
+    True(followUpTask.Prompt.Contains("1 of 2", StringComparison.Ordinal));
+
+    bus.ClaimTask(followUpTask.Id, "ctu/designer");
+    var registry = McpToolRegistry.CreateDefault(busRoot, appServer);
+    var secondArgs = JsonSerializer.Deserialize<JsonElement>($$"""
+    {
+      "taskId": {{JsonSerializer.Serialize(followUpTask.Id)}},
+      "summary": "Need another follow-up pass.",
+      "status": "completed",
+      "from": "ctu/designer",
+      "to": "ctu/architect",
+      "outcome": "self_continue",
+      "continuationOwner": "ctu/designer",
+      "continuationWakeAfterSeconds": 0,
+      "continuationReason": "Continue the design review loop."
+    }
+    """);
+    var secondResultObject = registry.InvokeAsync("agentbus_write_result", secondArgs).GetAwaiter().GetResult();
+    var secondResult = (AgentBusResult?)secondResultObject.GetType().GetProperty("result")?.GetValue(secondResultObject);
+    Equal("self_continue", secondResult?.Outcome);
+    var secondContinuation = bus.ListContinuations("ctu/designer", "open").Single();
+    Equal(firstContinuation.DedupeKey, secondContinuation.DedupeKey);
+    Equal(2, secondContinuation.MaxAttempts);
+}
+
+static void ControllerContinuationFollowUpRejectsLoopBeyondPromptLimit()
+{
+    var root = NewTestDirectory();
+    var busRoot = Path.Combine(root, ".codexteamup", "agentbus");
+    var bus = new AgentBusStore(busRoot);
+    bus.Initialize();
+    bus.RegisterAgent(new AgentDefinition
+    {
+        Id = "ctu/designer",
+        Role = "Designer",
+        DisplayName = "ctu/designer",
+        ThreadId = "thread-designer",
+        Cwd = root,
+        ReturnTo = "ctu/architect",
+        Status = "active"
+    });
+
+    var appServer = new ScriptedSendTurnAppServerClient(
+        "thread-designer",
+        "ctu/designer",
+        root);
+    var controller = new DefaultCtuController(busRoot, appServer);
+
+    var task = bus.CreateTask(
+        "ctu/architect",
+        "ctu/designer",
+        "Design slice",
+        "Continue until self-reported done.",
+        "codexteamup",
+        root,
+        [],
+        "ctu/architect");
+    bus.ClaimTask(task.Id, "ctu/designer");
+
+    bus.WriteResult(
+        task.Id,
+        "Need one more pass after local cooldown.",
+        "completed",
+        "ctu/designer",
+        "ctu/architect",
+        null,
+        [],
+        [],
+        outcome: "self_continue",
+        continuation: new AgentBusContinuationRequest
+        {
+            Owner = "ctu/designer",
+            WakeAfterSeconds = 0,
+            MaxAttempts = 1,
+            DedupeKey = "design-review",
+            Reason = "Continue the design review loop."
+        });
+
+    controller.RunStartupSweepAsync().GetAwaiter().GetResult();
+    var followUpTask = bus.ListTasks("ctu/designer", "open")
+        .Single(t => string.Equals(t.Title, $"Self-continuation: ctu/designer", StringComparison.Ordinal));
+    True(followUpTask.Prompt.Contains("1 of 1", StringComparison.Ordinal));
+    bus.ClaimTask(followUpTask.Id, "ctu/designer");
+    var registry = McpToolRegistry.CreateDefault(busRoot, appServer);
+    var rejectedArgs = JsonSerializer.Deserialize<JsonElement>($$"""
+    {
+      "taskId": {{JsonSerializer.Serialize(followUpTask.Id)}},
+      "summary": "This would loop forever without a guard.",
+      "status": "completed",
+      "from": "ctu/designer",
+      "to": "ctu/architect",
+      "outcome": "self_continue",
+      "continuationOwner": "ctu/designer",
+      "continuationWakeAfterSeconds": 0,
+      "continuationReason": "Continue the design review loop."
+    }
+    """);
+    var rejectedResultObject = registry.InvokeAsync("agentbus_write_result", rejectedArgs).GetAwaiter().GetResult();
+    var rejectedResult = (AgentBusResult?)rejectedResultObject.GetType().GetProperty("result")?.GetValue(rejectedResultObject);
+    Equal("failed", rejectedResult?.Outcome);
+    Equal(0, bus.ListContinuations("ctu/designer", "open").Count);
+    Equal(0, bus.ListContinuations("ctu/designer", "failed").Count);
 }
 
 static void McpRegistryEnsuresExplicitCtuAgents()
@@ -1530,6 +1945,52 @@ static void McpTeamSendMessageDefersStalledWakeupQuickly()
     True(bus.ListEvents().Any(evt => evt.Type == "team.message.deferred"));
 }
 
+static void McpBridgeDispatchTaskBlocksRetiredTarget()
+{
+    var root = NewTestDirectory();
+    var busRoot = Path.Combine(root, ".codexteamup", "agentbus");
+    var bus = new AgentBusStore(busRoot);
+    bus.Initialize();
+    bus.RegisterAgent(new AgentDefinition
+    {
+        Id = "ctu/wrapper",
+        Role = "Wrapper",
+        ThreadId = "thread-wrapper",
+        Cwd = root,
+        Status = "retired",
+        ReturnTo = "ctu/architect"
+    });
+
+    var task = bus.CreateTask(
+        "ctu/architect",
+        "ctu/wrapper",
+        "Retired agent task",
+        "Do not dispatch to retired agent.",
+        "codexteamup",
+        root,
+        [],
+        "ctu/architect");
+
+    var appServer = new FakeAppServerClient("""{"data":[{"id":"thread-wrapper","name":"ctu/wrapper","cwd":"ROOT","status":"idle"}]}"""
+        .Replace("ROOT", JsonEscaped(root), StringComparison.Ordinal));
+    var registry = McpToolRegistry.CreateDefault(busRoot, appServer);
+    var args = JsonSerializer.Deserialize<JsonElement>($$"""
+    {
+      "busRoot": {{JsonSerializer.Serialize(busRoot)}},
+      "taskId": {{JsonSerializer.Serialize(task.Id)}}
+    }
+    """);
+
+    _ = registry.InvokeAsync("bridge_dispatch_task", args).GetAwaiter().GetResult();
+
+    Equal(0, appServer.SentTurns.Count);
+    Equal(0, bus.ListTasks("ctu/wrapper", "open").Count());
+    var failedResult = bus.WaitForResult(task.Id, TimeSpan.FromMilliseconds(100));
+    Equal("failed", failedResult?.Status);
+    Equal("ctu/controller", failedResult?.From);
+    True(bus.ListEvents(300).Any(evt => evt.TaskId == task.Id && evt.Type == "task.dispatch_blocked_retired_agent"));
+}
+
 static void McpRegistryRecreatesStaleCtuAgentThreads()
 {
     var root = NewTestDirectory();
@@ -1683,54 +2144,7 @@ static void McpRegistryNotifiesResultThroughServicePath()
     True(notifyEvent.Message?.Contains("targetStatus=idle", StringComparison.Ordinal) == true);
 }
 
-static void McpRegistryDefersResultNotifyWhileTargetActive()
-{
-    var root = NewTestDirectory();
-    var busRoot = Path.Combine(root, ".codexteamup", "agentbus");
-    var bus = new AgentBusStore(busRoot);
-    bus.Initialize();
-    bus.RegisterAgent(new AgentDefinition
-    {
-        Id = "ctu/foo",
-        Role = "Foo",
-        ThreadId = "thread-foo",
-        Cwd = root,
-        Status = "active"
-    });
-    bus.RegisterAgent(new AgentDefinition
-    {
-        Id = "ctu/bar",
-        Role = "Bar",
-        ThreadId = "thread-bar",
-        Cwd = root,
-        ReturnTo = "ctu/foo",
-        Status = "active"
-    });
-
-    var task = bus.CreateTask("ctu/foo", "ctu/bar", "Ping", "Please answer.", "demo", root, [], "ctu/foo");
-    bus.ClaimTask(task.Id, "ctu/bar");
-    var busResult = bus.WriteResult(task.Id, "Pong", "completed", "ctu/bar", "ctu/foo", null, [], []);
-
-    var appServer = new FakeAppServerClient("""{"data":[{"id":"thread-foo","name":"ctu/foo","cwd":"ROOT","status":{"type":"active"}}]}"""
-        .Replace("ROOT", JsonEscaped(root), StringComparison.Ordinal));
-    var registry = McpToolRegistry.CreateDefault(busRoot, appServer);
-    var args = JsonSerializer.Deserialize<JsonElement>($$"""
-    {
-      "busRoot": {{JsonSerializer.Serialize(busRoot)}},
-      "resultId": {{JsonSerializer.Serialize(busResult.Id)}}
-    }
-    """);
-
-    var response = registry.InvokeAsync("bridge_notify_result", args).GetAwaiter().GetResult();
-    Equal(0, appServer.SentTurns.Count);
-    var deferredEvent = bus.ListEvents().Single(evt => evt.Type == "result.notify_deferred" && evt.ResultId == busResult.Id);
-    True(deferredEvent.Message?.Contains("turn/start deferred", StringComparison.Ordinal) == true);
-    True(deferredEvent.Message?.Contains("targetStatus=active", StringComparison.Ordinal) == true);
-    using var doc = JsonDocument.Parse(JsonSerializer.Serialize(response, JsonFile.Options));
-    True(doc.RootElement.GetProperty("wakeup").GetProperty("deferred").GetBoolean());
-}
-
-static void McpRegistryReadsTargetStatusWhenListIsNotLoaded()
+static void McpRegistryDefersResultNotifyWhenReadThreadShowsBusyTurn()
 {
     var root = NewTestDirectory();
     var busRoot = Path.Combine(root, ".codexteamup", "agentbus");
@@ -1759,9 +2173,9 @@ static void McpRegistryReadsTargetStatusWhenListIsNotLoaded()
     var busResult = bus.WriteResult(task.Id, "Pong", "completed", "ctu/bar", "ctu/foo", null, [], []);
 
     var appServer = new FakeAppServerClient(
-        """{"data":[{"id":"thread-foo","name":"ctu/foo","cwd":"ROOT","status":{"type":"notLoaded"}}]}"""
+        """{"data":[{"id":"thread-foo","name":"ctu/foo","cwd":"ROOT","status":{"type":"active"}}]}"""
             .Replace("ROOT", JsonEscaped(root), StringComparison.Ordinal),
-        readThreadJson: """{"thread":{"id":"thread-foo","status":{"type":"active"},"turns":[]}}""");
+        readThreadJson: """{"thread":{"id":"thread-foo","status":{"type":"active"},"turns":[{"id":"turn-1","status":"in_progress"}]}}""");
     var registry = McpToolRegistry.CreateDefault(busRoot, appServer);
     var args = JsonSerializer.Deserialize<JsonElement>($$"""
     {
@@ -1773,9 +2187,107 @@ static void McpRegistryReadsTargetStatusWhenListIsNotLoaded()
     var response = registry.InvokeAsync("bridge_notify_result", args).GetAwaiter().GetResult();
     Equal(0, appServer.SentTurns.Count);
     var deferredEvent = bus.ListEvents().Single(evt => evt.Type == "result.notify_deferred" && evt.ResultId == busResult.Id);
-    True(deferredEvent.Message?.Contains("targetStatus=active", StringComparison.Ordinal) == true);
+    True(deferredEvent.Message?.Contains("turn/start deferred", StringComparison.Ordinal) == true);
+    True(deferredEvent.Message?.Contains("targetStatus=in_progress", StringComparison.Ordinal) == true);
+    using var doc = JsonDocument.Parse(JsonSerializer.Serialize(response, JsonFile.Options));
+    True(doc.RootElement.GetProperty("wakeup").GetProperty("deferred").GetBoolean());
+}
+
+static void McpRegistrySendsResultNotifyWhenActiveThreadHasNoBusyTurns()
+{
+    var root = NewTestDirectory();
+    var busRoot = Path.Combine(root, ".codexteamup", "agentbus");
+    var bus = new AgentBusStore(busRoot);
+    bus.Initialize();
+    bus.RegisterAgent(new AgentDefinition
+    {
+        Id = "ctu/foo",
+        Role = "Foo",
+        ThreadId = "thread-foo",
+        Cwd = root,
+        Status = "active"
+    });
+    bus.RegisterAgent(new AgentDefinition
+    {
+        Id = "ctu/bar",
+        Role = "Bar",
+        ThreadId = "thread-bar",
+        Cwd = root,
+        ReturnTo = "ctu/foo",
+        Status = "active"
+    });
+
+    var task = bus.CreateTask("ctu/foo", "ctu/bar", "Ping", "Please answer.", "demo", root, [], "ctu/foo");
+    bus.ClaimTask(task.Id, "ctu/bar");
+    var busResult = bus.WriteResult(task.Id, "Pong", "completed", "ctu/bar", "ctu/foo", null, [], []);
+
+    var appServer = new FakeAppServerClient(
+        """{"data":[{"id":"thread-foo","name":"ctu/foo","cwd":"ROOT","status":{"type":"active"}}]}"""
+            .Replace("ROOT", JsonEscaped(root), StringComparison.Ordinal),
+        readThreadJson: """{"thread":{"id":"thread-foo","status":{"type":"active"},"turns":[]}}""");
+    var registry = McpToolRegistry.CreateDefault(busRoot, appServer);
+    var args = JsonSerializer.Deserialize<JsonElement>($$"""
+    {
+      "busRoot": {{JsonSerializer.Serialize(busRoot)}},
+      "resultId": {{JsonSerializer.Serialize(busResult.Id)}}
+    }
+    """);
+
+    var response = registry.InvokeAsync("bridge_notify_result", args).GetAwaiter().GetResult();
+    Equal(1, appServer.SentTurns.Count);
+    var notifyEvent = bus.ListEvents().Single(evt => evt.Type == "result.notified" && evt.ResultId == busResult.Id);
+    True(notifyEvent.Message?.Contains("turn/start sent", StringComparison.Ordinal) == true);
+    True(notifyEvent.Message?.Contains("targetStatus=active", StringComparison.Ordinal) == true);
     using var doc = JsonDocument.Parse(JsonSerializer.Serialize(response, JsonFile.Options));
     True(doc.RootElement.GetProperty("target").GetProperty("initialStatus").GetString() == "active");
+    True(doc.RootElement.GetProperty("wakeup").GetProperty("deferred").GetBoolean() == false);
+}
+
+static void McpRegistryResolvesNotifyTargetThreadParamAsAgentId()
+{
+    var root = NewTestDirectory();
+    var busRoot = Path.Combine(root, ".codexteamup", "agentbus");
+    var bus = new AgentBusStore(busRoot);
+    bus.Initialize();
+    bus.RegisterAgent(new AgentDefinition
+    {
+        Id = "ctu/architect",
+        Role = "Architect / Coordinator",
+        ThreadId = "thread-architect",
+        Cwd = root,
+        Status = "active"
+    });
+    bus.RegisterAgent(new AgentDefinition
+    {
+        Id = "ctu/bar",
+        Role = "Bar",
+        ThreadId = "thread-bar",
+        Cwd = root,
+        ReturnTo = "ctu/architect",
+        Status = "active"
+    });
+
+    var task = bus.CreateTask("ctu/bar", "ctu/architect", "Ping", "Please answer.", "demo", root, [], "ctu/bar");
+    bus.ClaimTask(task.Id, "ctu/architect");
+    var busResult = bus.WriteResult(task.Id, "Pong", "completed", "ctu/bar", "ctu/architect", null, [], []);
+
+    var appServer = new FakeAppServerClient("""{"data":[{"id":"thread-architect","name":"ctu/architect","cwd":"ROOT","status":{"type":"idle"}}]}"""
+        .Replace("ROOT", JsonEscaped(root), StringComparison.Ordinal));
+    var registry = McpToolRegistry.CreateDefault(busRoot, appServer);
+    var args = JsonSerializer.Deserialize<JsonElement>($$"""
+    {
+      "busRoot": {{JsonSerializer.Serialize(busRoot)}},
+      "resultId": {{JsonSerializer.Serialize(busResult.Id)}},
+      "toThread": "ctu/architect"
+    }
+    """);
+
+    _ = registry.InvokeAsync("bridge_notify_result", args).GetAwaiter().GetResult();
+    True(appServer.SentTurns.Count >= 1);
+    Equal("thread-architect", appServer.SentTurns[0].ThreadId);
+    True(appServer.SentTurns[0].Message.Contains(busResult.Id, StringComparison.Ordinal));
+    var resolutionEvent = bus.ListEvents().Single(evt => evt.Type == "result.notify_target_resolved" && evt.ResultId == busResult.Id);
+    True(resolutionEvent.Message?.Contains("agent-id", StringComparison.Ordinal) == true);
 }
 
 static void AgentThreadMatcherBindsNamedTeamThreads()
@@ -1879,9 +2391,1889 @@ static void AgentBusDashboardCreatesSnapshot()
     Equal(1, snapshot.Stats.DoneTasks);
     Equal(0, snapshot.Stats.FailedTasks);
     Equal(1, snapshot.Stats.Results);
+    Equal(0, snapshot.Stats.OpenContinuations);
     True(snapshot.Tasks.Single().Title.Contains("Build editor", StringComparison.Ordinal));
     True(snapshot.Results.Single().Summary.Contains("Implemented", StringComparison.Ordinal));
     True(snapshot.Events.Count > 0);
+}
+
+static void StartupScriptRecordsCtuSessionManifest()
+{
+    var text = File.ReadAllText(Path.Combine(TestRepoRoot(), "scripts", "start-codexteamup.ps1"));
+
+    True(text.Contains(".ctu\\sessions", StringComparison.Ordinal));
+    True(text.Contains("Write-CtuSessionManifest", StringComparison.Ordinal));
+    True(text.Contains("launcherPid = $PID", StringComparison.Ordinal));
+    True(text.Contains("desktopPid = $desktopPid", StringComparison.Ordinal));
+    True(text.Contains("servicePid = $servicePid", StringComparison.Ordinal));
+    True(text.Contains("wrapperPids = @(Get-CtuWrapperProcessIds)", StringComparison.Ordinal));
+    True(text.Contains("Add-CtuSessionProcessCandidates", StringComparison.Ordinal));
+    True(text.Contains("ServiceProcessId", StringComparison.Ordinal));
+}
+
+static void RestartSupervisorUsesSessionManifestAndTransientTargetStartup()
+{
+    var text = File.ReadAllText(Path.Combine(TestRepoRoot(), "scripts", "restart-supervisor.ps1"));
+
+    True(text.Contains("Read-SourceSessionManifest", StringComparison.Ordinal));
+    True(text.Contains("Stop-SourceSessionProcesses", StringComparison.Ordinal));
+    True(text.Contains("launcherPid", StringComparison.Ordinal));
+    True(text.Contains("startup-console", StringComparison.Ordinal));
+    True(!text.Contains("\"-NoExit\"", StringComparison.Ordinal));
+    True(text.Contains("-WindowStyle Normal", StringComparison.Ordinal));
+    True(text.Contains("Stop-SourceSessionProcesses -sourceCwd", StringComparison.Ordinal));
+}
+
+static void RestartHelperSupervisorConsoleIsTransient()
+{
+    var text = File.ReadAllText(Path.Combine(TestRepoRoot(), "src", "CodexTeamUp.Controller.Default", "DefaultCtuController.cs"));
+
+    True(text.Contains("var command = $\"-ExecutionPolicy Bypass -File", StringComparison.Ordinal));
+    True(!text.Contains("var command = $\"-NoExit -ExecutionPolicy Bypass -File", StringComparison.Ordinal));
+}
+
+static void ServiceOnlyStartupDoesNotTargetDesktopSessionProcesses()
+{
+    var text = File.ReadAllText(Path.Combine(TestRepoRoot(), "scripts", "start-codexteamup.ps1"));
+
+    True(text.Contains("Enabled = (-not $NoService -or $RestartService)", StringComparison.Ordinal));
+    True(text.Contains("Enabled = (-not $NoLaunch -and -not $AllowExistingDesktop)", StringComparison.Ordinal));
+    True(text.Contains("if (-not $NoLaunch -and -not $AllowExistingDesktop) {", StringComparison.Ordinal));
+}
+
+static void RestartOperationLifecycleAndPersistence()
+{
+    var root = NewTestDirectory();
+    var sourceCwd = Path.Combine(root, "source-checkout");
+    var targetCwd = Path.Combine(root, "target-checkout");
+    var fallbackCwd = Path.Combine(root, "fallback-checkout");
+    SeedRestartCheckout(sourceCwd);
+    SeedRestartCheckout(targetCwd);
+    SeedRestartCheckout(fallbackCwd);
+
+    var store = new RestartOperationStore(Path.Combine(root, ".codexteamup", "agentbus"));
+    var op = store.Create(
+        requestedByAgentId: "ctu/architect",
+        sourceCwd: sourceCwd,
+        sourceBusRoot: Path.Combine(sourceCwd, ".codexteamup", "agentbus"),
+        targetCwd: targetCwd,
+        targetBusRoot: Path.Combine(targetCwd, ".codexteamup", "agentbus"),
+        targetAgentId: "ctu/architect",
+        fallbackCwd: fallbackCwd,
+        fallbackBusRoot: Path.Combine(fallbackCwd, ".codexteamup", "agentbus"),
+        continueTitle: "Continue after restart",
+        continuePrompt: "Validate restart handoff.",
+        expectedTargetBranch: null);
+
+    Equal(RestartOperationStatus.Prepared, op.Status);
+    True(!string.IsNullOrWhiteSpace(op.Id));
+    var path = store.OperationPath(op.Id);
+    True(File.Exists(path));
+    var read = store.Find(op.Id);
+    Equal(op.Id, read?.Id);
+    Equal(op.Status, read?.Status);
+    Equal("ctu.desktop-restart", read?.Kind);
+    Equal(sourceCwd, read?.SourceCwd);
+    Equal(targetCwd, read?.TargetCwd);
+    Equal("ctu/architect", read?.TargetAgentId);
+    Equal("Continue after restart", read?.ContinueTitle);
+    Equal(fallbackCwd, read?.FallbackCwd);
+
+    Equal(RestartOperationStatus.HelperStarted, store.UpdateStatus(op.Id, RestartOperationStatus.HelperStarted, helperPid: "555").Status);
+    Equal(RestartOperationStatus.StoppingSource, store.UpdateStatus(op.Id, RestartOperationStatus.StoppingSource).Status);
+    Equal(RestartOperationStatus.StartingTarget, store.UpdateStatus(op.Id, RestartOperationStatus.StartingTarget).Status);
+    Equal(RestartOperationStatus.TargetHealthy, store.UpdateStatus(op.Id, RestartOperationStatus.TargetHealthy).Status);
+    Equal(RestartOperationStatus.ContinuationEnqueued, store.UpdateStatus(op.Id, RestartOperationStatus.ContinuationEnqueued).Status);
+    Equal(RestartOperationStatus.ContinuationDispatched, store.UpdateStatus(op.Id, RestartOperationStatus.ContinuationDispatched).Status);
+
+    var completed = store.UpdateStatus(op.Id, RestartOperationStatus.Completed);
+    Equal(RestartOperationStatus.Completed, completed.Status);
+    True(completed.CompletedAt is not null);
+}
+
+static void RestartOperationRejectsInvalidTargetCwd()
+{
+    var root = NewTestDirectory();
+    var store = new RestartOperationStore(Path.Combine(root, ".codexteamup", "agentbus"));
+    var sourceCwd = Path.Combine(root, "source");
+    SeedRestartCheckout(sourceCwd);
+
+    try
+    {
+        _ = store.Create(
+            "ctu/architect",
+            sourceCwd,
+            Path.Combine(sourceCwd, ".codexteamup", "agentbus"),
+            Path.Combine(root, "missing-target"),
+            Path.Combine(root, "missing-target", ".codexteamup", "agentbus"),
+            "ctu/architect",
+            null,
+            null,
+            "Continue after restart",
+            "Continue from next agent.",
+            null);
+        throw new InvalidOperationException("Expected missing target checkout failure.");
+    }
+    catch (DirectoryNotFoundException)
+    {
+        // expected.
+    }
+
+    var sameCwd = Path.Combine(root, "same");
+    Directory.CreateDirectory(sameCwd);
+    try
+    {
+        _ = store.Create(
+            "ctu/architect",
+            sameCwd,
+            Path.Combine(sameCwd, ".codexteamup", "agentbus"),
+            sameCwd,
+            Path.Combine(sameCwd, ".codexteamup", "agentbus"),
+            "ctu/architect",
+            null,
+            null,
+            "Continue after restart",
+            "Continue from same path.",
+            null);
+        throw new InvalidOperationException("Expected same-checkout failure.");
+    }
+    catch (InvalidOperationException)
+    {
+        // expected.
+    }
+}
+
+static void RestartOperationStatusUpdateIsIdempotent()
+{
+    var root = NewTestDirectory();
+    var sourceCwd = Path.Combine(root, "source");
+    var targetCwd = Path.Combine(root, "target");
+    SeedRestartCheckout(sourceCwd);
+    SeedRestartCheckout(targetCwd);
+    var store = new RestartOperationStore(Path.Combine(root, ".codexteamup", "agentbus"));
+
+    var op = store.Create(
+        "ctu/architect",
+        sourceCwd,
+        Path.Combine(sourceCwd, ".codexteamup", "agentbus"),
+        targetCwd,
+        Path.Combine(targetCwd, ".codexteamup", "agentbus"),
+        "ctu/architect",
+        null,
+        null,
+        "Continue after restart",
+        "Continue from prior work.",
+        null);
+
+    var first = store.UpdateStatus(op.Id, RestartOperationStatus.HelperStarted, helperPid: "111");
+    var second = store.UpdateStatus(op.Id, RestartOperationStatus.HelperStarted);
+    Equal(first.Id, second.Id);
+    Equal(RestartOperationStatus.HelperStarted, second.Status);
+    Equal(first.CompletedAt, second.CompletedAt);
+    Equal("111", second.HelperPid);
+
+    var stopping = store.UpdateStatus(op.Id, RestartOperationStatus.StoppingSource);
+    Equal(RestartOperationStatus.StoppingSource, stopping.Status);
+    var rollback = store.UpdateStatus(op.Id, RestartOperationStatus.RollbackStarting);
+    Equal(RestartOperationStatus.RollbackStarting, rollback.Status);
+    var rolledBack = store.UpdateStatus(op.Id, RestartOperationStatus.RolledBack);
+    Equal(RestartOperationStatus.RolledBack, rolledBack.Status);
+    True(rolledBack.CompletedAt >= rolledBack.RequestedAt);
+    var replay = store.UpdateStatus(op.Id, RestartOperationStatus.RolledBack);
+    Equal(rolledBack.CompletedAt, replay.CompletedAt);
+
+    var completed = store.Create(
+        "ctu/architect",
+        sourceCwd,
+        Path.Combine(sourceCwd, ".codexteamup", "agentbus"),
+        targetCwd,
+        Path.Combine(targetCwd, ".codexteamup", "agentbus"),
+        "ctu/architect",
+        null,
+        null,
+        "Continue after restart",
+        "Continue second scenario.",
+        null);
+
+    completed = store.UpdateStatus(completed.Id, RestartOperationStatus.HelperStarted);
+    completed = store.UpdateStatus(completed.Id, RestartOperationStatus.StoppingSource);
+    completed = store.UpdateStatus(completed.Id, RestartOperationStatus.StartingTarget);
+    completed = store.UpdateStatus(completed.Id, RestartOperationStatus.TargetHealthy);
+    completed = store.UpdateStatus(completed.Id, RestartOperationStatus.ContinuationEnqueued);
+    var completedViaTerminal = store.UpdateStatus(completed.Id, RestartOperationStatus.Completed);
+    Equal(RestartOperationStatus.Completed, completedViaTerminal.Status);
+    var terminalReplay = store.UpdateStatus(completed.Id, RestartOperationStatus.Completed);
+    Equal(completedViaTerminal.CompletedAt, terminalReplay.CompletedAt);
+}
+
+static void RestartOperationPreservesImportedContinuationTaskId()
+{
+    var root = NewTestDirectory();
+    var sourceCwd = Path.Combine(root, "source");
+    var targetCwd = Path.Combine(root, "target");
+    SeedRestartCheckout(sourceCwd);
+    SeedRestartCheckout(targetCwd);
+    var store = new RestartOperationStore(Path.Combine(sourceCwd, ".codexteamup", "agentbus"));
+
+    var operation = store.Create(
+        "ctu/architect",
+        sourceCwd,
+        Path.Combine(sourceCwd, ".codexteamup", "agentbus"),
+        targetCwd,
+        Path.Combine(targetCwd, ".codexteamup", "agentbus"),
+        "ctu/architect",
+        null,
+        null,
+        "Continue after restart",
+        "Continue with imported task.",
+        null);
+
+    operation = store.UpdateStatus(
+        operation,
+        RestartOperationStatus.ContinuationEnqueued,
+        startupHandoffMessageId: "restart-handoff-1");
+    Equal("restart-handoff-1", operation.StartupHandoffMessageId);
+    Equal(null, operation.ContinuationTaskId);
+
+    operation = store.UpdateStatus(
+        operation,
+        RestartOperationStatus.ContinuationDispatched,
+        continuationTaskId: "task-actual-1",
+        startupHandoffMessageId: "restart-handoff-1");
+    Equal("task-actual-1", operation.ContinuationTaskId);
+    Equal("restart-handoff-1", operation.StartupHandoffMessageId);
+
+    operation = store.UpdateStatus(
+        operation,
+        RestartOperationStatus.Completed,
+        startupHandoffMessageId: "restart-handoff-1",
+        lastError: "phase=completed");
+    Equal("task-actual-1", operation.ContinuationTaskId);
+    Equal("restart-handoff-1", operation.StartupHandoffMessageId);
+}
+
+static void RestartOperationPersistsStartupHandoffAndKnownGood()
+{
+    var root = NewTestDirectory();
+    var sourceCwd = Path.Combine(root, "source-checkout");
+    var targetCwd = Path.Combine(root, "target-checkout");
+    SeedRestartCheckout(sourceCwd);
+    SeedRestartCheckout(targetCwd);
+    var sourceBusRoot = Path.Combine(sourceCwd, ".codexteamup", "agentbus");
+
+    var knownGoodStore = new KnownGoodRuntimeCheckpointStore(sourceBusRoot);
+    var knownGood = knownGoodStore.WriteHealthy(
+        sourceCwd,
+        sourceBusRoot,
+        null,
+        nameof(DefaultCtuController),
+        null,
+        "pipe");
+
+    var store = new RestartOperationStore(sourceBusRoot);
+    var operation = store.Create(
+        requestedByAgentId: "ctu/architect",
+        sourceCwd: sourceCwd,
+        sourceBusRoot: sourceBusRoot,
+        targetCwd: targetCwd,
+        targetBusRoot: Path.Combine(targetCwd, ".codexteamup", "agentbus"),
+        targetAgentId: "ctu/architect",
+        fallbackCwd: null,
+        fallbackBusRoot: null,
+        continueTitle: "Continue after restart",
+        continuePrompt: "Validate restart handoff.",
+        expectedTargetBranch: null,
+        knownGoodCheckpointId: knownGood.Id);
+
+    Equal(knownGood.Id, operation.KnownGoodCheckpointId);
+    var reloaded = store.Find(operation.Id);
+    Equal(RestartOperationStatus.Prepared, reloaded?.Status);
+    Equal(knownGood.Id, reloaded?.KnownGoodCheckpointId);
+}
+
+static void ExchangeHandoffLeaseAndCompletionFlow()
+{
+    var root = NewTestDirectory();
+    var sourceCwd = Path.Combine(root, "source-checkout");
+    var targetCwd = Path.Combine(root, "target-checkout");
+    SeedRestartCheckout(sourceCwd);
+    SeedRestartCheckout(targetCwd);
+    var sourceBusRoot = Path.Combine(sourceCwd, ".codexteamup", "agentbus");
+    var targetBusRoot = Path.Combine(targetCwd, ".codexteamup", "agentbus");
+    var exchangeRoot = Path.Combine(Path.GetDirectoryName(targetBusRoot)!, "exchange");
+
+    var sourceExchange = new ExchangeStore(sourceBusRoot);
+    True(sourceExchange.ListPendingStartupSystemMessages(ExchangeEnvelopeKind.Restart, 10).Count == 0);
+
+    var operationStore = new RestartOperationStore(sourceBusRoot);
+    var operation = operationStore.Create(
+        requestedByAgentId: "ctu/architect",
+        sourceCwd: sourceCwd,
+        sourceBusRoot: sourceBusRoot,
+        targetCwd: targetCwd,
+        targetBusRoot: Path.Combine(targetCwd, ".codexteamup", "agentbus"),
+        targetAgentId: "ctu/architect",
+        fallbackCwd: null,
+        fallbackBusRoot: null,
+        continueTitle: "Continue after restart",
+        continuePrompt: "Validate restart handoff.",
+        expectedTargetBranch: null);
+
+    var exchange = new ExchangeStore(targetBusRoot);
+    var envelope = exchange.CreateRestartHandoff(operationStore.OperationPath(operation.Id), operation);
+    var startupExpectedPath = Path.Combine(
+        exchangeRoot,
+        "startup",
+        ExchangeTargetScope.System,
+        ExchangeEnvelopeKind.Restart,
+        $"{envelope.MessageId}.json");
+    var pending = exchange.ListPendingStartupSystemMessages(ExchangeEnvelopeKind.Restart, 10);
+    Equal(1, pending.Count);
+    Equal(startupExpectedPath, pending.Single().Path);
+    True(!File.Exists(Path.Combine(exchangeRoot, "inbox", ExchangeTargetScope.System, ExchangeEnvelopeKind.Restart, $"{envelope.MessageId}.json")));
+
+    using var lease = exchange.TryAcquireLease(pending[0].Path, "ctu-controller", TimeSpan.FromMinutes(1));
+    True(lease is not null);
+
+    exchange.Complete(pending[0].Path, lease!.Envelope);
+    pending = exchange.ListPendingStartupSystemMessages(ExchangeEnvelopeKind.Restart, 10);
+    Equal(0, pending.Count);
+}
+
+static void ExchangeHandoffAcceptsPowerShellCasing()
+{
+    var root = NewTestDirectory();
+    var sourceCwd = Path.Combine(root, "source-checkout");
+    var targetCwd = Path.Combine(root, "target-checkout");
+    SeedRestartCheckout(sourceCwd);
+    SeedRestartCheckout(targetCwd);
+    var targetBusRoot = Path.Combine(targetCwd, ".codexteamup", "agentbus");
+    var exchange = new ExchangeStore(targetBusRoot);
+    exchange.Initialize();
+
+    var expiresAt = DateTimeOffset.UtcNow.AddHours(1).ToString("O");
+    var startupDirectory = Path.Combine(
+        Path.GetDirectoryName(targetBusRoot)!,
+        "exchange",
+        "startup",
+        ExchangeTargetScope.System,
+        ExchangeEnvelopeKind.Restart);
+    Directory.CreateDirectory(startupDirectory);
+    var messagePath = Path.Combine(startupDirectory, "restart-handoff-pwsh.json");
+    File.WriteAllText(messagePath, $$"""
+        {
+          "MessageId": "restart-handoff-pwsh",
+          "Kind": "restart",
+          "TargetScope": "system",
+          "TargetProject": "target-checkout",
+          "TargetAgentId": "ctu/architect",
+          "TargetThreadName": "ctu/architect",
+          "CorrelationId": "restart-test",
+          "CausationId": "restart-test",
+          "CreatedAt": "2026-05-18T12:00:00+00:00",
+          "ExpiresAt": "{{expiresAt}}",
+          "PayloadType": "application/json",
+          "Payload": {
+            "operationId": "restart-test",
+            "operationPath": "S:\\tmp\\operation.json",
+            "targetAgentId": "ctu/architect"
+          },
+          "AttemptCount": 0,
+          "Status": "pending"
+        }
+        """);
+
+    var pending = exchange.ListPendingStartupSystemMessages(ExchangeEnvelopeKind.Restart, 10);
+    Equal(1, pending.Count);
+    Equal("restart-handoff-pwsh", pending.Single().Envelope.MessageId);
+
+    using var lease = exchange.TryAcquireLease(messagePath, "ctu-controller", TimeSpan.FromMinutes(1));
+    True(lease is not null);
+    Equal("restart-handoff-pwsh", lease!.Envelope.MessageId);
+}
+
+static void ExchangeStartupSweepIsolatesMalformedEnvelope()
+{
+    var root = NewTestDirectory();
+    var targetCwd = Path.Combine(root, "target-checkout");
+    SeedRestartCheckout(targetCwd);
+    var targetBusRoot = Path.Combine(targetCwd, ".codexteamup", "agentbus");
+    var exchange = new ExchangeStore(targetBusRoot);
+    exchange.Initialize();
+
+    var startupDirectory = Path.Combine(
+        Path.GetDirectoryName(targetBusRoot)!,
+        "exchange",
+        "startup",
+        ExchangeTargetScope.System,
+        ExchangeEnvelopeKind.Restart);
+    Directory.CreateDirectory(startupDirectory);
+    var malformedPath = Path.Combine(startupDirectory, "broken.json");
+    File.WriteAllText(malformedPath, """{ "messageId": "broken" }""");
+
+    var pending = exchange.ListPendingStartupSystemMessages(ExchangeEnvelopeKind.Restart, 10);
+    Equal(0, pending.Count);
+    True(!File.Exists(malformedPath));
+    True(Directory.GetFiles(Path.Combine(Path.GetDirectoryName(targetBusRoot)!, "exchange", "deadletter"), "invalid-*-broken.json").Length == 1);
+}
+
+static void KnownGoodRuntimeCheckpointStoreRecordsRuntime()
+{
+    var root = NewTestDirectory();
+    var checkout = Path.Combine(root, "checkout");
+    Directory.CreateDirectory(checkout);
+    var busRoot = Path.Combine(checkout, ".codexteamup", "agentbus");
+
+    var store = new KnownGoodRuntimeCheckpointStore(busRoot);
+    var checkpoint = store.WriteHealthy(
+        checkout,
+        busRoot,
+        Path.Combine(root, "controller.dll"),
+        nameof(DefaultCtuController),
+        Path.Combine(root, "server.dll"),
+        nameof(CodexTeamUp.AppServer.WrapperPipeAppServerClient));
+
+    True(File.Exists(store.CheckpointPath));
+    Equal(checkout, checkpoint.CheckoutCwd);
+    var read = store.Read();
+    True(read is not null);
+    Equal(read?.Id, checkpoint.Id);
+    Equal(checkpoint.Id, read!.Id);
+}
+
+static void KnownGoodCheckpointRequiresExplicitVerification()
+{
+    var root = NewTestDirectory();
+    var checkout = Path.Combine(root, "checkout");
+    Directory.CreateDirectory(checkout);
+    var busRoot = Path.Combine(checkout, ".codexteamup", "agentbus");
+
+    var store = new KnownGoodRuntimeCheckpointStore(busRoot);
+    store.WriteHealthy(
+        checkout,
+        busRoot,
+        Path.Combine(root, "controller.dll"),
+        nameof(DefaultCtuController),
+        Path.Combine(root, "server.dll"),
+        nameof(CodexTeamUp.AppServer.WrapperPipeAppServerClient));
+
+    var bootOnly = store.Read();
+    True(bootOnly is not null);
+    Equal(false, bootOnly!.IsVerified);
+    True(store.ReadVerified() is null);
+
+    var verified = store.WriteHealthy(
+        checkout,
+        busRoot,
+        Path.Combine(root, "controller.dll"),
+        nameof(DefaultCtuController),
+        Path.Combine(root, "server.dll"),
+        nameof(CodexTeamUp.AppServer.WrapperPipeAppServerClient),
+        isVerified: true,
+        verificationSource: "startup_sweep");
+
+    var verifiedRead = store.Read();
+    True(verifiedRead?.IsVerified == true);
+    var verifiedOnly = store.ReadVerified();
+    True(verifiedOnly is not null);
+    Equal(verified.Id, verifiedOnly?.Id);
+}
+
+static void ControllerStartupSweepImportsRestartHandoff()
+{
+    var root = NewTestDirectory();
+    var sourceCwd = Path.Combine(root, "source-checkout");
+    var targetCwd = Path.Combine(root, "target-checkout");
+    SeedRestartCheckout(sourceCwd);
+    SeedRestartCheckout(targetCwd);
+
+    var sourceBusRoot = Path.Combine(sourceCwd, ".codexteamup", "agentbus");
+    var targetBusRoot = Path.Combine(targetCwd, ".codexteamup", "agentbus");
+    var exchangeRoot = Path.Combine(Path.GetDirectoryName(targetBusRoot)!, "exchange");
+
+    var targetBus = new AgentBusStore(targetBusRoot);
+    targetBus.Initialize();
+    targetBus.RegisterAgent(new AgentDefinition
+    {
+        Id = "ctu/architect",
+        Role = "Architect",
+        DisplayName = "ctu/architect",
+        ThreadId = "thread-architect",
+        Cwd = targetCwd,
+        ReturnTo = null,
+        Status = "active"
+    });
+
+    var operationStore = new RestartOperationStore(sourceBusRoot);
+    var targetExchange = new ExchangeStore(targetBusRoot);
+    var operation = operationStore.Create(
+        requestedByAgentId: "ctu/architect",
+        sourceCwd: sourceCwd,
+        sourceBusRoot: sourceBusRoot,
+        targetCwd: targetCwd,
+        targetBusRoot: targetBusRoot,
+        targetAgentId: "ctu/architect",
+        fallbackCwd: null,
+        fallbackBusRoot: null,
+        continueTitle: "Continue after restart",
+        continuePrompt: "Resume from restart handoff.",
+        expectedTargetBranch: null);
+
+    var envelope = targetExchange.CreateRestartHandoff(operationStore.OperationPath(operation.Id), operation);
+    Equal(1, targetExchange.ListPendingStartupSystemMessages(ExchangeEnvelopeKind.Restart, 10).Count);
+    Equal(0, targetExchange.ListPendingSystemMessages(ExchangeEnvelopeKind.Restart, 10).Count);
+    True(!File.Exists(Path.Combine(exchangeRoot, "inbox", ExchangeTargetScope.System, ExchangeEnvelopeKind.Restart, $"{envelope.MessageId}.json")));
+    True(File.Exists(Path.Combine(exchangeRoot, "startup", ExchangeTargetScope.System, ExchangeEnvelopeKind.Restart, $"{envelope.MessageId}.json")));
+
+    var appServer = new FakeAppServerClient(
+        $$"""
+        {
+          "data":[{"id":"thread-architect","name":"ctu/architect","cwd":{{JsonSerializer.Serialize(targetCwd)}}, "status":"idle"}]
+        }
+        """);
+
+    var controller = new DefaultCtuController(targetBusRoot, appServer);
+    controller.RunStartupSweepAsync().GetAwaiter().GetResult();
+
+    Equal(0, targetExchange.ListPendingStartupSystemMessages(ExchangeEnvelopeKind.Restart, 10).Count);
+    var reloaded = operationStore.Find(operation.Id);
+    Equal(RestartOperationStatus.ContinuationDispatched, reloaded?.Status);
+    Equal(envelope.MessageId, reloaded?.StartupHandoffMessageId);
+    True(!string.IsNullOrWhiteSpace(reloaded?.ContinuationTaskId));
+
+    var importedTask = targetBus.FindTask(reloaded!.ContinuationTaskId!);
+    True(importedTask is not null);
+    Equal("Continue after restart", importedTask!.Title);
+}
+
+static void ControllerStartupSweepPersistsRestartContinuationAsResumePendingExternal()
+{
+    var root = NewTestDirectory();
+    var sourceCwd = Path.Combine(root, "source-checkout");
+    var targetCwd = Path.Combine(root, "target-checkout");
+    SeedRestartCheckout(sourceCwd);
+    SeedRestartCheckout(targetCwd);
+
+    var sourceBusRoot = Path.Combine(sourceCwd, ".codexteamup", "agentbus");
+    var targetBusRoot = Path.Combine(targetCwd, ".codexteamup", "agentbus");
+    var exchangeRoot = Path.Combine(Path.GetDirectoryName(targetBusRoot)!, "exchange");
+
+    var targetBus = new AgentBusStore(targetBusRoot);
+    targetBus.Initialize();
+    targetBus.RegisterAgent(new AgentDefinition
+    {
+        Id = "ctu/architect",
+        Role = "Architect",
+        DisplayName = "ctu/architect",
+        ThreadId = null,
+        Cwd = targetCwd,
+        ReturnTo = null,
+        Status = "active"
+    });
+
+    var operationStore = new RestartOperationStore(sourceBusRoot);
+    var targetExchange = new ExchangeStore(targetBusRoot);
+    var operation = operationStore.Create(
+        requestedByAgentId: "ctu/architect",
+        sourceCwd: sourceCwd,
+        sourceBusRoot: sourceBusRoot,
+        targetCwd: targetCwd,
+        targetBusRoot: targetBusRoot,
+        targetAgentId: "ctu/architect",
+        fallbackCwd: null,
+        fallbackBusRoot: null,
+        continueTitle: "Continue after restart",
+        continuePrompt: "Resume from restart handoff.",
+        expectedTargetBranch: null);
+
+    var handoff = targetExchange.CreateRestartHandoff(operationStore.OperationPath(operation.Id), operation);
+    var startupMessage = targetExchange.ListPendingStartupSystemMessages(ExchangeEnvelopeKind.Restart, 10).Single();
+    Equal(1, targetExchange.ListPendingStartupSystemMessages(ExchangeEnvelopeKind.Restart, 10).Count);
+    Equal(handoff.MessageId, startupMessage.Envelope.MessageId);
+    True(!File.Exists(Path.Combine(exchangeRoot, "inbox", ExchangeTargetScope.System, ExchangeEnvelopeKind.Restart, $"{handoff.MessageId}.json")));
+    True(File.Exists(startupMessage.Path));
+
+    var appServer = new FakeAppServerClient("""{"data":[]}""");
+    var controller = new DefaultCtuController(targetBusRoot, appServer);
+    controller.RunStartupSweepAsync().GetAwaiter().GetResult();
+
+    var reloaded = operationStore.Find(operation.Id);
+    Equal(RestartOperationStatus.ContinuationEnqueued, reloaded?.Status);
+
+    var continuity = new ExecutionContinuityStateStore(targetBusRoot);
+    continuity.Initialize();
+    var state = continuity.ReadLatest(operation.Id);
+    Equal(ExecutionContinuityStateKind.ResumePendingExternal, state?.State);
+    Equal(true, state?.ShouldContinue ?? false);
+    True(!string.IsNullOrWhiteSpace(state?.ResumeCorrelationId));
+
+    var continuationTask = targetBus.FindTask(reloaded!.ContinuationTaskId!);
+    True(continuationTask is not null);
+    Equal(continuationTask!.Id, state?.ResumeCorrelationId);
+}
+
+static void ControllerContinuityGuardianResumesRestartContinuationFromExternalCorrelation()
+{
+    var root = NewTestDirectory();
+    var sourceCwd = Path.Combine(root, "source-checkout");
+    var targetCwd = Path.Combine(root, "target-checkout");
+    SeedRestartCheckout(sourceCwd);
+    SeedRestartCheckout(targetCwd);
+
+    var sourceBusRoot = Path.Combine(sourceCwd, ".codexteamup", "agentbus");
+    var targetBusRoot = Path.Combine(targetCwd, ".codexteamup", "agentbus");
+
+    var targetBus = new AgentBusStore(targetBusRoot);
+    targetBus.Initialize();
+    targetBus.RegisterAgent(new AgentDefinition
+    {
+        Id = "ctu/architect",
+        Role = "Architect",
+        DisplayName = "ctu/architect",
+        ThreadId = null,
+        Cwd = targetCwd,
+        ReturnTo = null,
+        Status = "active"
+    });
+
+    var operationStore = new RestartOperationStore(sourceBusRoot);
+    var targetExchange = new ExchangeStore(targetBusRoot);
+    var operation = operationStore.Create(
+        requestedByAgentId: "ctu/architect",
+        sourceCwd: sourceCwd,
+        sourceBusRoot: sourceBusRoot,
+        targetCwd: targetCwd,
+        targetBusRoot: targetBusRoot,
+        targetAgentId: "ctu/architect",
+        fallbackCwd: null,
+        fallbackBusRoot: null,
+        continueTitle: "Continue after restart",
+        continuePrompt: "Resume from restart handoff.",
+        expectedTargetBranch: null);
+
+    targetExchange.CreateRestartHandoff(operationStore.OperationPath(operation.Id), operation);
+    var firstController = new DefaultCtuController(targetBusRoot, new FakeAppServerClient("""{"data":[]}"""));
+    firstController.RunStartupSweepAsync().GetAwaiter().GetResult();
+
+    var reloaded = operationStore.Find(operation.Id);
+    var continuationTask = targetBus.FindTask(reloaded!.ContinuationTaskId!);
+    True(continuationTask is not null);
+
+    targetBus.RegisterAgent(new AgentDefinition
+    {
+        Id = "ctu/architect",
+        Role = "Architect",
+        DisplayName = "ctu/architect",
+        ThreadId = "thread-architect",
+        Cwd = targetCwd,
+        ReturnTo = null,
+        Status = "active"
+    });
+
+    var appServer = new FakeAppServerClient(
+        $$"""
+        {
+          "data":[{"id":"thread-architect","name":"ctu/architect","cwd":{{JsonSerializer.Serialize(targetCwd)}}, "status":"idle"}]
+        }
+        """);
+    var secondController = new DefaultCtuController(targetBusRoot, appServer);
+    secondController.RunStartupSweepAsync().GetAwaiter().GetResult();
+
+    Equal(1, appServer.SentTurns.Count);
+    Equal("thread-architect", appServer.SentTurns[0].ThreadId);
+    True(appServer.SentTurns.Single().Message.Contains(continuationTask.Id));
+    True(targetBus.ListEvents(300).Any(evt => evt.Type == "continuity.dispatch_from_state" && evt.TaskId == continuationTask.Id));
+}
+
+static void StartupSweepVerifiesKnownGoodCheckpointAfterDispatch()
+{
+    var root = NewTestDirectory();
+    var sourceCwd = Path.Combine(root, "source-checkout");
+    var targetCwd = Path.Combine(root, "target-checkout");
+    SeedRestartCheckout(sourceCwd);
+    SeedRestartCheckout(targetCwd);
+
+    var sourceBusRoot = Path.Combine(sourceCwd, ".codexteamup", "agentbus");
+    var targetBusRoot = Path.Combine(targetCwd, ".codexteamup", "agentbus");
+
+    var targetBus = new AgentBusStore(targetBusRoot);
+    targetBus.Initialize();
+    targetBus.RegisterAgent(new AgentDefinition
+    {
+        Id = "ctu/architect",
+        Role = "Architect",
+        DisplayName = "ctu/architect",
+        ThreadId = "thread-architect",
+        Cwd = targetCwd,
+        ReturnTo = null,
+        Status = "active"
+    });
+
+    var sourceKnownGoodStore = new KnownGoodRuntimeCheckpointStore(sourceBusRoot);
+    var knownGood = sourceKnownGoodStore.WriteHealthy(
+        sourceCwd,
+        sourceBusRoot,
+        null,
+        nameof(DefaultCtuController),
+        null,
+        nameof(CodexTeamUp.AppServer.WrapperPipeAppServerClient));
+
+    var operationStore = new RestartOperationStore(sourceBusRoot);
+    var operation = operationStore.Create(
+        requestedByAgentId: "ctu/architect",
+        sourceCwd: sourceCwd,
+        sourceBusRoot: sourceBusRoot,
+        targetCwd: targetCwd,
+        targetBusRoot: targetBusRoot,
+        targetAgentId: "ctu/architect",
+        fallbackCwd: null,
+        fallbackBusRoot: null,
+        continueTitle: "Continue after restart",
+        continuePrompt: "Resume from restart handoff.",
+        expectedTargetBranch: null,
+        knownGoodCheckpointId: knownGood.Id);
+
+    var targetExchange = new ExchangeStore(targetBusRoot);
+    targetExchange.CreateRestartHandoff(operationStore.OperationPath(operation.Id), operation);
+
+    var appServer = new FakeAppServerClient(
+        $$"""
+        {
+          "data":[{"id":"thread-architect","name":"ctu/architect","cwd":{{JsonSerializer.Serialize(targetCwd)}}, "status":"idle"}]
+        }
+        """);
+
+    var controller = new DefaultCtuController(targetBusRoot, appServer);
+    controller.RunStartupSweepAsync().GetAwaiter().GetResult();
+
+    var verified = sourceKnownGoodStore.ReadVerified();
+    True(verified is not null);
+    Equal(knownGood.Id, verified!.Id);
+    True(verified.IsVerified);
+    Equal("startup_sweep:continuation_dispatched", verified.VerificationSource);
+}
+
+static void ControllerDeliveryLoopWaitsBeforeRetryingQueuedMessage()
+{
+    var root = NewTestDirectory();
+    var busRoot = Path.Combine(root, ".codexteamup", "agentbus");
+    var bus = new AgentBusStore(busRoot);
+    bus.Initialize();
+    bus.RegisterAgent(new AgentDefinition
+    {
+        Id = "ctu/worker",
+        Role = "Worker",
+        DisplayName = "ctu/worker",
+        ThreadId = "thread-worker",
+        Cwd = root,
+        Status = "active"
+    });
+
+    var task = bus.CreateTask(
+        "ctu/architect",
+        "ctu/worker",
+        "Queued follow-up",
+        "Retry this when callable.",
+        "codexteamup",
+        root,
+        [],
+        "ctu/architect");
+
+    var appServer = new FakeAppServerClient(
+        """{"data":[{"id":"thread-worker","name":"ctu/worker","cwd":"ROOT","status":{"type":"active"}}]}"""
+            .Replace("ROOT", JsonEscaped(root), StringComparison.Ordinal),
+        readThreadJson: """{"thread":{"id":"thread-worker","status":{"type":"active"},"turns":[{"id":"turn-1","status":"in_progress"}]}}""");
+    var controller = new DefaultCtuController(busRoot, appServer);
+    controller.RunStartupSweepAsync().GetAwaiter().GetResult();
+
+    True(bus.ListEvents(100).Any(evt => evt.Type == "task.delivery_failed" && evt.TaskId == task.Id));
+    Equal("open", bus.FindTask(task.Id)?.Status);
+    Equal(0, appServer.SentTurns.Count);
+
+    controller.RunStartupSweepAsync().GetAwaiter().GetResult();
+
+    Equal(0, appServer.SentTurns.Count);
+    Equal("open", bus.FindTask(task.Id)?.Status);
+    Equal(
+        1,
+        bus.ListEvents(100).Count(evt => evt.Type == "task.delivery_failed" && evt.TaskId == task.Id));
+}
+
+static void ControllerDeliveryLoopSupersedesOlderQueuedTasks()
+{
+    var root = NewTestDirectory();
+    var busRoot = Path.Combine(root, ".codexteamup", "agentbus");
+    var bus = new AgentBusStore(busRoot);
+    bus.Initialize();
+    bus.RegisterAgent(new AgentDefinition
+    {
+        Id = "ctu/worker",
+        Role = "Worker",
+        DisplayName = "ctu/worker",
+        ThreadId = "thread-worker",
+        Cwd = root,
+        Status = "active"
+    });
+
+    var older = bus.CreateTask(
+        "ctu/architect",
+        "ctu/worker",
+        "Queued first",
+        "Send first (stale).",
+        "codexteamup",
+        root,
+        [],
+        "ctu/architect");
+    Thread.Sleep(10);
+    var newer = bus.CreateTask(
+        "ctu/architect",
+        "ctu/worker",
+        "Queued latest",
+        "Send latest only.",
+        "codexteamup",
+        root,
+        [],
+        "ctu/architect");
+
+    var appServer = new ScriptedSendTurnAppServerClient(
+        "thread-worker",
+        "ctu/worker",
+        root);
+    var controller = new DefaultCtuController(busRoot, appServer);
+    controller.RunStartupSweepAsync().GetAwaiter().GetResult();
+
+    Equal(1, appServer.SentTurns.Count);
+    True(appServer.SentTurns[0].Message.Contains(newer.Id, StringComparison.Ordinal));
+    Equal("open", bus.FindTask(newer.Id)?.Status);
+    Equal("superseded", bus.FindTask(older.Id)?.Status);
+    True(bus.ListEvents(100).Any(evt => evt.Type == "task.superseded" && evt.TaskId == older.Id));
+}
+
+static void ControllerDeliveryLoopRecoversStaleClaimedTask()
+{
+    var root = NewTestDirectory();
+    var busRoot = Path.Combine(root, ".codexteamup", "agentbus");
+    var bus = new AgentBusStore(busRoot);
+    bus.Initialize();
+    bus.RegisterAgent(new AgentDefinition
+    {
+        Id = "ctu/worker",
+        Role = "Worker",
+        DisplayName = "ctu/worker",
+        ThreadId = "thread-worker",
+        Cwd = root,
+        Status = "active"
+    });
+
+    var task = bus.CreateTask(
+        "ctu/architect",
+        "ctu/worker",
+        "Queued stale claim",
+        "Recover this claim.",
+        "codexteamup",
+        root,
+        [],
+        "ctu/architect");
+    var claimed = bus.ClaimTask(task.Id, "ctu/worker");
+    bus.UpdateTask(claimed.Id, existing => existing with
+    {
+        ClaimedAt = DateTimeOffset.Now - TimeSpan.FromMinutes(10)
+    });
+
+    var appServer = new ScriptedSendTurnAppServerClient(
+        "thread-worker",
+        "ctu/worker",
+        root);
+    var controller = new DefaultCtuController(busRoot, appServer);
+    controller.RunStartupSweepAsync().GetAwaiter().GetResult();
+
+    var recovered = bus.FindTask(task.Id);
+    Equal("open", recovered?.Status);
+    Equal(1, recovered?.DeliveryAttempts);
+    True(recovered?.LastDeliveryAttemptAt is not null);
+    True(recovered?.LastDeliveryError is null);
+    Equal(1, appServer.SentTurns.Count);
+    Equal("thread-worker", appServer.SentTurns.Single().ThreadId);
+    True(bus.ListEvents(200).Any(evt => evt.Type == "task.recovered_claimed" && evt.TaskId == task.Id));
+}
+
+static void ControllerResultNotifyRetryPersistsMetadataAndRetries()
+{
+    var root = NewTestDirectory();
+    var busRoot = Path.Combine(root, ".codexteamup", "agentbus");
+    var bus = new AgentBusStore(busRoot);
+    bus.Initialize();
+    bus.RegisterAgent(new AgentDefinition
+    {
+        Id = "ctu/architect",
+        Role = "Architect",
+        ThreadId = "thread-architect",
+        Cwd = root,
+        Status = "active"
+    });
+    bus.RegisterAgent(new AgentDefinition
+    {
+        Id = "ctu/worker",
+        Role = "Worker",
+        DisplayName = "ctu/worker",
+        ThreadId = "thread-worker",
+        Cwd = root,
+        ReturnTo = "ctu/architect",
+        Status = "active"
+    });
+
+    var task = bus.CreateTask(
+        "ctu/architect",
+        "ctu/worker",
+        "Retry result notify",
+        "Notify once when ready.",
+        "codexteamup",
+        root,
+        [],
+        "ctu/architect");
+    bus.ClaimTask(task.Id, "ctu/worker");
+    var result = bus.WriteResult(task.Id, "Done", "completed", "ctu/worker", "ctu/architect", null, [], []);
+
+    var appServer = new ScriptedSendTurnAppServerClient(
+        "thread-architect",
+        "ctu/architect",
+        root,
+        sendTurnFailuresBeforeSuccess: 1);
+    var registry = McpToolRegistry.CreateDefault(busRoot, appServer);
+    var args = JsonSerializer.Deserialize<JsonElement>($$"""
+    {
+      "busRoot": {{JsonSerializer.Serialize(busRoot)}},
+      "resultId": {{JsonSerializer.Serialize(result.Id)}},
+      "toAgent": "ctu/architect"
+    }
+    """);
+
+    _ = registry.InvokeAsync("bridge_notify_result", args).GetAwaiter().GetResult();
+    var afterFirst = bus.FindResult(result.Id);
+    Equal(1, afterFirst?.NotifyAttempts);
+    Equal(0, appServer.SentTurns.Count);
+    True(afterFirst?.LastNotifiedAt is null);
+    True(!string.IsNullOrWhiteSpace(afterFirst?.LastNotifyError));
+
+    bus.UpdateResult(result.Id, existing => existing with
+    {
+        LastNotifyAttemptAt = DateTimeOffset.Now - TimeSpan.FromSeconds(4),
+        LastNotifyError = null
+    });
+    var controller = new DefaultCtuController(busRoot, appServer);
+    controller.RunStartupSweepAsync().GetAwaiter().GetResult();
+
+    var afterSecond = bus.FindResult(result.Id);
+    Equal(2, afterSecond?.NotifyAttempts);
+    True(afterSecond?.LastNotifiedAt is not null);
+    True(afterSecond?.LastNotifyError is null);
+    Equal(1, appServer.SentTurns.Count);
+    Equal("thread-architect", appServer.SentTurns.Single().ThreadId);
+    True(bus.ListEvents(300).Any(evt =>
+        (evt.Type == "result.notify_deferred" || evt.Type == "result.notify_failed")
+        && evt.ResultId == result.Id));
+    True(bus.ListEvents(300).Any(evt => evt.Type == "result.notified" && evt.ResultId == result.Id));
+}
+
+static void ControllerGuardianEvaluatesResultIntoContinuityState()
+{
+    var root = NewTestDirectory();
+    var busRoot = Path.Combine(root, ".codexteamup", "agentbus");
+    var bus = new AgentBusStore(busRoot);
+    bus.Initialize();
+    bus.RegisterAgent(new AgentDefinition
+    {
+        Id = "ctu/architect",
+        Role = "Architect",
+        ThreadId = "thread-architect",
+        Cwd = root,
+        Status = "active"
+    });
+    bus.RegisterAgent(new AgentDefinition
+    {
+        Id = "ctu/worker",
+        Role = "Worker",
+        DisplayName = "ctu/worker",
+        ThreadId = "thread-worker",
+        Cwd = root,
+        ReturnTo = "ctu/architect",
+        Status = "active"
+    });
+
+    var task = bus.CreateTask(
+        "ctu/architect",
+        "ctu/worker",
+        "Continue slice",
+        "Return completion state.",
+        "codexteamup",
+        root,
+        [],
+        "ctu/architect");
+    bus.ClaimTask(task.Id, "ctu/worker");
+    var result = bus.WriteResult(task.Id, "Done", "completed", "ctu/worker", "ctu/architect", null, [], []);
+
+    var appServer = new FakeAppServerClient("""{"data":[]}""");
+    var controller = new DefaultCtuController(busRoot, appServer);
+    controller.RunStartupSweepAsync().GetAwaiter().GetResult();
+
+    var continuity = new ExecutionContinuityStateStore(busRoot);
+    continuity.Initialize();
+    var state = continuity.ReadLatest(task.Id);
+    Equal(ExecutionContinuityStateKind.Completed, state?.State);
+    Equal(false, state?.ShouldContinue);
+    Equal(result.Id, state?.LastOutcomeRef);
+    Equal(task.Id, state?.CorrelationId);
+    True(bus.ListEvents(300).Any(evt => evt.Type == "continuity.state_created"));
+    True(bus.ListEvents(300).Any(evt => evt.TaskId == task.Id && evt.Type.StartsWith("continuity.state")));
+}
+
+static void ControllerGuardianTreatsDoneResultStatusAsCompleted()
+{
+    var root = NewTestDirectory();
+    var busRoot = Path.Combine(root, ".codexteamup", "agentbus");
+    var bus = new AgentBusStore(busRoot);
+    bus.Initialize();
+    bus.RegisterAgent(new AgentDefinition
+    {
+        Id = "ctu/architect",
+        Role = "Architect",
+        ThreadId = "thread-architect",
+        Cwd = root,
+        Status = "active"
+    });
+    bus.RegisterAgent(new AgentDefinition
+    {
+        Id = "ctu/worker",
+        Role = "Worker",
+        DisplayName = "ctu/worker",
+        ThreadId = "thread-worker",
+        Cwd = root,
+        ReturnTo = "ctu/architect",
+        Status = "active"
+    });
+
+    var task = bus.CreateTask(
+        "ctu/architect",
+        "ctu/worker",
+        "Return done state",
+        "Return done state.",
+        "codexteamup",
+        root,
+        [],
+        "ctu/architect");
+    bus.ClaimTask(task.Id, "ctu/worker");
+    var result = bus.WriteResult(task.Id, "Done", "done", "ctu/worker", "ctu/architect", null, [], []);
+
+    var appServer = new FakeAppServerClient("""{"data":[]}""");
+    var controller = new DefaultCtuController(busRoot, appServer);
+    controller.RunStartupSweepAsync().GetAwaiter().GetResult();
+
+    var continuity = new ExecutionContinuityStateStore(busRoot);
+    continuity.Initialize();
+    var state = continuity.ReadLatest(task.Id);
+    Equal(ExecutionContinuityStateKind.Completed, state?.State);
+    Equal(result.Id, state?.LastOutcomeRef);
+}
+
+static void ControllerGuardianSkipsUnchangedQueuedTaskObservation()
+{
+    var root = NewTestDirectory();
+    var busRoot = Path.Combine(root, ".codexteamup", "agentbus");
+    var bus = new AgentBusStore(busRoot);
+    bus.Initialize();
+    bus.RegisterAgent(new AgentDefinition
+    {
+        Id = "ctu/worker",
+        Role = "Worker",
+        DisplayName = "ctu/worker",
+        ThreadId = "thread-worker",
+        Cwd = root,
+        Status = "active"
+    });
+
+    var task = bus.CreateTask(
+        "ctu/architect",
+        "ctu/worker",
+        "Queued follow-up",
+        "Wait until the target is callable.",
+        "codexteamup",
+        root,
+        [],
+        "ctu/architect");
+
+    var appServer = new FakeAppServerClient(
+        """{"data":[{"id":"thread-worker","name":"ctu/worker","cwd":"ROOT","status":{"type":"active"}}]}"""
+            .Replace("ROOT", JsonEscaped(root), StringComparison.Ordinal),
+        readThreadJson: """{"thread":{"id":"thread-worker","status":{"type":"active"},"turns":[{"id":"turn-1","status":"in_progress"}]}}""");
+    var controller = new DefaultCtuController(busRoot, appServer);
+
+    controller.RunStartupSweepAsync().GetAwaiter().GetResult();
+    controller.RunStartupSweepAsync().GetAwaiter().GetResult();
+
+    Equal(0, appServer.SentTurns.Count);
+    Equal(
+        1,
+        bus.ListEvents(300)
+            .Count(evt => evt.TaskId == task.Id && evt.Type == "continuity.guardian_evaluated"));
+}
+
+static void ControllerGuardianResumesDispatchFromContinuityState()
+{
+    var root = NewTestDirectory();
+    var busRoot = Path.Combine(root, ".codexteamup", "agentbus");
+    var bus = new AgentBusStore(busRoot);
+    bus.Initialize();
+    bus.RegisterAgent(new AgentDefinition
+    {
+        Id = "ctu/architect",
+        Role = "Architect",
+        ThreadId = "thread-architect",
+        Cwd = root,
+        Status = "active"
+    });
+    bus.RegisterAgent(new AgentDefinition
+    {
+        Id = "ctu/worker",
+        Role = "Worker",
+        DisplayName = "ctu/worker",
+        ThreadId = "thread-worker",
+        Cwd = root,
+        ReturnTo = "ctu/architect",
+        Status = "active"
+    });
+
+    var task = bus.CreateTask(
+        "ctu/architect",
+        "ctu/worker",
+        "Resume from continuity",
+        "Dispatch from continuity state on startup.",
+        "codexteamup",
+        root,
+        [],
+        "ctu/architect");
+    var continuity = new ExecutionContinuityStateStore(busRoot);
+    continuity.Initialize();
+    continuity.Upsert(new ExecutionContinuityState
+    {
+        StateId = continuity.CreateStateId(),
+        CorrelationId = task.Id,
+        TaskChainId = task.Id,
+        ShouldContinue = true,
+        State = ExecutionContinuityStateKind.QueuedForDispatch,
+        EnteredAt = DateTimeOffset.UtcNow,
+        UpdatedAt = DateTimeOffset.UtcNow,
+        GuardianAgentId = "ctu/continuity-reviewer",
+        GuardianDisplayName = "Continuity Reviewer",
+        LastOutcomeKind = "task",
+        LastOutcomeRef = task.Id,
+        NextActionKind = "task",
+        NextActionRef = task.Id,
+        CurrentTargetAgentId = "ctu/worker",
+        CurrentTargetDisplayName = "ctu/worker",
+        AttemptCount = 1,
+        MaxAttempts = 8,
+        LastAttemptAt = DateTimeOffset.UtcNow
+    });
+
+    var appServer = new FakeAppServerClient("""{"data":[]}""");
+    var controller = new DefaultCtuController(busRoot, appServer);
+    controller.RunStartupSweepAsync().GetAwaiter().GetResult();
+
+    Equal(1, appServer.SentTurns.Count);
+    Equal("thread-worker", appServer.SentTurns.Single().ThreadId);
+    True(bus.ListEvents(300).Any(evt => evt.Type == "continuity.dispatch_from_state"));
+}
+
+static void ControllerGuardianDoesNotRedispatchClaimedTask()
+{
+    var root = NewTestDirectory();
+    var busRoot = Path.Combine(root, ".codexteamup", "agentbus");
+    var bus = new AgentBusStore(busRoot);
+    bus.Initialize();
+    bus.RegisterAgent(new AgentDefinition
+    {
+        Id = "ctu/worker",
+        Role = "Worker",
+        DisplayName = "ctu/worker",
+        ThreadId = "thread-worker",
+        Cwd = root,
+        Status = "active"
+    });
+
+    var task = bus.CreateTask(
+        "ctu/guardian",
+        "ctu/worker",
+        "Already claimed",
+        "Do not redispatch a claimed worker task.",
+        "codexteamup",
+        root,
+        [],
+        "ctu/guardian");
+    bus.ClaimTask(task.Id, "ctu/worker");
+
+    var continuity = new ExecutionContinuityStateStore(busRoot);
+    continuity.Initialize();
+    continuity.Upsert(new ExecutionContinuityState
+    {
+        StateId = continuity.CreateStateId(),
+        CorrelationId = task.Id,
+        TaskChainId = task.Id,
+        ShouldContinue = true,
+        State = ExecutionContinuityStateKind.QueuedForDispatch,
+        EnteredAt = DateTimeOffset.UtcNow,
+        UpdatedAt = DateTimeOffset.UtcNow,
+        GuardianAgentId = "ctu/guardian",
+        GuardianDisplayName = "ctu/guardian",
+        LastOutcomeKind = "task",
+        LastOutcomeRef = task.Id,
+        NextActionKind = "task",
+        NextActionRef = task.Id,
+        CurrentTargetAgentId = "ctu/worker",
+        CurrentTargetDisplayName = "ctu/worker",
+        AttemptCount = 1,
+        MaxAttempts = 8,
+        LastAttemptAt = DateTimeOffset.UtcNow
+    });
+
+    var appServer = new FakeAppServerClient("""{"data":[]}""");
+    var controller = new DefaultCtuController(busRoot, appServer);
+    controller.RunStartupSweepAsync().GetAwaiter().GetResult();
+
+    Equal(0, appServer.SentTurns.Count);
+    var state = continuity.ReadLatest(task.Id);
+    Equal(ExecutionContinuityStateKind.WaitingOnWorker, state?.State);
+    Equal(false, state?.ShouldContinue);
+    True(bus.ListEvents(300).Any(evt => evt.Type == "continuity.dispatch_satisfied"));
+}
+
+static void ControllerDeliveryLoopFailsOpenTaskForRetiredAgent()
+{
+    var root = NewTestDirectory();
+    var busRoot = Path.Combine(root, ".codexteamup", "agentbus");
+    var bus = new AgentBusStore(busRoot);
+    bus.Initialize();
+    bus.RegisterAgent(new AgentDefinition
+    {
+        Id = "ctu/wrapper",
+        Role = "Wrapper",
+        DisplayName = "ctu/wrapper",
+        ThreadId = "thread-wrapper",
+        Cwd = root,
+        ReturnTo = "ctu/architect",
+        Status = "retired"
+    });
+
+    var task = bus.CreateTask(
+        "ctu/architect",
+        "ctu/wrapper",
+        "Should not dispatch",
+        "Do not deliver work to retired agents.",
+        "codexteamup",
+        root,
+        [],
+        "ctu/architect");
+
+    var appServer = new FakeAppServerClient("""{"data":[]}""");
+    var controller = new DefaultCtuController(busRoot, appServer);
+    controller.RunStartupSweepAsync().GetAwaiter().GetResult();
+
+    Equal(0, appServer.SentTurns.Count);
+    Equal(0, bus.ListTasks(status: "open").Count);
+    Equal(1, bus.ListTasks(status: "failed").Count(taskItem => taskItem.Id == task.Id));
+    var result = bus.WaitForResult(task.Id, TimeSpan.FromMilliseconds(50));
+    Equal("failed", result?.Status);
+    Equal("ctu/controller", result?.From);
+    True(bus.ListEvents(300).Any(evt => evt.TaskId == task.Id && evt.Type == "task.dispatch_blocked_retired_agent"));
+}
+
+static void ControllerGuardianResumesNotifyFromContinuityState()
+{
+    var root = NewTestDirectory();
+    var busRoot = Path.Combine(root, ".codexteamup", "agentbus");
+    var bus = new AgentBusStore(busRoot);
+    bus.Initialize();
+    bus.RegisterAgent(new AgentDefinition
+    {
+        Id = "ctu/architect",
+        Role = "Architect",
+        ThreadId = "thread-architect",
+        Cwd = root,
+        Status = "active"
+    });
+    bus.RegisterAgent(new AgentDefinition
+    {
+        Id = "ctu/worker",
+        Role = "Worker",
+        DisplayName = "ctu/worker",
+        ThreadId = "thread-worker",
+        Cwd = root,
+        ReturnTo = "ctu/architect",
+        Status = "active"
+    });
+
+    var task = bus.CreateTask(
+        "ctu/architect",
+        "ctu/worker",
+        "Resume notify",
+        "Notify from continuity state.",
+        "codexteamup",
+        root,
+        [],
+        "ctu/architect");
+    bus.ClaimTask(task.Id, "ctu/worker");
+    var result = bus.WriteResult(task.Id, "Done", "completed", "ctu/worker", "ctu/architect", null, [], []);
+    bus.UpdateResult(result.Id, existing => existing with
+    {
+        NotifyAttempts = 3,
+        LastNotifyAttemptAt = DateTimeOffset.Now,
+        LastNotifiedAt = null
+    });
+
+    var continuity = new ExecutionContinuityStateStore(busRoot);
+    continuity.Initialize();
+    continuity.Upsert(new ExecutionContinuityState
+    {
+        StateId = continuity.CreateStateId(),
+        CorrelationId = task.Id,
+        TaskChainId = task.Id,
+        ShouldContinue = true,
+        State = ExecutionContinuityStateKind.NotifyRetryPending,
+        EnteredAt = DateTimeOffset.UtcNow,
+        UpdatedAt = DateTimeOffset.UtcNow,
+        GuardianAgentId = "ctu/continuity-reviewer",
+        GuardianDisplayName = "Continuity Reviewer",
+        LastOutcomeKind = "completed",
+        LastOutcomeRef = result.Id,
+        NextActionKind = "result",
+        NextActionRef = result.Id,
+        CurrentTargetAgentId = "ctu/architect",
+        CurrentTargetDisplayName = "ctu/architect",
+        AttemptCount = 1,
+        MaxAttempts = 8,
+        LastAttemptAt = DateTimeOffset.UtcNow
+    });
+
+    var appServer = new FakeAppServerClient("""{"data":[]}""");
+    var controller = new DefaultCtuController(busRoot, appServer);
+    controller.RunStartupSweepAsync().GetAwaiter().GetResult();
+
+    Equal(1, appServer.SentTurns.Count);
+    Equal("thread-architect", appServer.SentTurns.Single().ThreadId);
+    True(bus.ListEvents(300).Any(evt => evt.Type == "continuity.notify_from_state"));
+}
+
+static void ControllerGuardianBlocksOnOrphanDispatchFromContinuityState()
+{
+    var root = NewTestDirectory();
+    var busRoot = Path.Combine(root, ".codexteamup", "agentbus");
+    var bus = new AgentBusStore(busRoot);
+    bus.Initialize();
+    bus.RegisterAgent(new AgentDefinition
+    {
+        Id = "ctu/architect",
+        Role = "Architect",
+        ThreadId = "thread-architect",
+        Cwd = root,
+        Status = "active"
+    });
+    bus.RegisterAgent(new AgentDefinition
+    {
+        Id = "ctu/worker",
+        Role = "Worker",
+        DisplayName = "ctu/worker",
+        ThreadId = "thread-worker",
+        Cwd = root,
+        ReturnTo = "ctu/architect",
+        Status = "active"
+    });
+
+    var appServer = new FakeAppServerClient("""{"data":[]}""");
+    var continuity = new ExecutionContinuityStateStore(busRoot);
+    continuity.Initialize();
+    continuity.Upsert(new ExecutionContinuityState
+    {
+        StateId = continuity.CreateStateId(),
+        CorrelationId = "orphan-task-id",
+        TaskChainId = "orphan-task-id",
+        ShouldContinue = true,
+        State = ExecutionContinuityStateKind.QueuedForDispatch,
+        EnteredAt = DateTimeOffset.UtcNow,
+        UpdatedAt = DateTimeOffset.UtcNow,
+        GuardianAgentId = "ctu/continuity-reviewer",
+        GuardianDisplayName = "Continuity Reviewer",
+        LastOutcomeKind = "task",
+        LastOutcomeRef = "orphan-task-id",
+        NextActionKind = "task",
+        NextActionRef = "missing-task-id",
+        CurrentTargetAgentId = "ctu/worker",
+        CurrentTargetDisplayName = "ctu/worker",
+        AttemptCount = 1,
+        MaxAttempts = 8,
+        LastAttemptAt = DateTimeOffset.UtcNow
+    });
+
+    var controller = new DefaultCtuController(busRoot, appServer);
+    controller.RunStartupSweepAsync().GetAwaiter().GetResult();
+
+    var state = continuity.ReadLatest("orphan-task-id");
+    Equal(ExecutionContinuityStateKind.BlockedNeedsHuman, state?.State);
+    Equal("ctu/worker", state?.BlockingOwner);
+    True(!string.IsNullOrWhiteSpace(state?.BlockingReason));
+    True(!string.IsNullOrWhiteSpace(state?.LastError));
+    True(bus.ListEvents(300).Any(evt => evt.Type == "continuity.terminal_recorded" && evt.TaskId == "orphan-task-id"));
+    Equal(0, appServer.SentTurns.Count);
+}
+
+static void ControllerGuardianBlocksOnOrphanNotifyFromContinuityState()
+{
+    var root = NewTestDirectory();
+    var busRoot = Path.Combine(root, ".codexteamup", "agentbus");
+    var bus = new AgentBusStore(busRoot);
+    bus.Initialize();
+    bus.RegisterAgent(new AgentDefinition
+    {
+        Id = "ctu/architect",
+        Role = "Architect",
+        ThreadId = "thread-architect",
+        Cwd = root,
+        Status = "active"
+    });
+    bus.RegisterAgent(new AgentDefinition
+    {
+        Id = "ctu/worker",
+        Role = "Worker",
+        DisplayName = "ctu/worker",
+        ThreadId = "thread-worker",
+        Cwd = root,
+        ReturnTo = "ctu/architect",
+        Status = "active"
+    });
+
+    var task = bus.CreateTask(
+        "ctu/architect",
+        "ctu/worker",
+        "Orphan notify",
+        "Notify continuation does not have matching result.",
+        "codexteamup",
+        root,
+        [],
+        "ctu/architect");
+
+    var appServer = new FakeAppServerClient("""{"data":[]}""");
+    var continuity = new ExecutionContinuityStateStore(busRoot);
+    continuity.Initialize();
+    continuity.Upsert(new ExecutionContinuityState
+    {
+        StateId = continuity.CreateStateId(),
+        CorrelationId = task.Id,
+        TaskChainId = task.Id,
+        ShouldContinue = true,
+        State = ExecutionContinuityStateKind.NotifyRetryPending,
+        EnteredAt = DateTimeOffset.UtcNow,
+        UpdatedAt = DateTimeOffset.UtcNow,
+        GuardianAgentId = "ctu/continuity-reviewer",
+        GuardianDisplayName = "Continuity Reviewer",
+        LastOutcomeKind = "result",
+        LastOutcomeRef = "missing-result-id",
+        NextActionKind = "result",
+        NextActionRef = "missing-result-id",
+        CurrentTargetAgentId = "ctu/architect",
+        CurrentTargetDisplayName = "ctu/architect",
+        AttemptCount = 1,
+        MaxAttempts = 8,
+        LastAttemptAt = DateTimeOffset.UtcNow
+    });
+
+    var controller = new DefaultCtuController(busRoot, appServer);
+    controller.RunStartupSweepAsync().GetAwaiter().GetResult();
+
+    var state = continuity.ReadLatest(task.Id);
+    Equal(ExecutionContinuityStateKind.BlockedNeedsHuman, state?.State);
+    Equal("ctu/architect", state?.BlockingOwner);
+    True(!string.IsNullOrWhiteSpace(state?.BlockingReason));
+    True(!string.IsNullOrWhiteSpace(state?.LastError));
+    True(bus.ListEvents(300).Any(evt => evt.Type == "continuity.terminal_recorded" && evt.TaskId == task.Id));
+    Equal(0, appServer.SentTurns.Count);
+}
+
+static void ControllerGuardianResumesExternalContinuityViaCorrelation()
+{
+    var root = NewTestDirectory();
+    var busRoot = Path.Combine(root, ".codexteamup", "agentbus");
+    var bus = new AgentBusStore(busRoot);
+    bus.Initialize();
+    bus.RegisterAgent(new AgentDefinition
+    {
+        Id = "ctu/architect",
+        Role = "Architect",
+        ThreadId = "thread-architect",
+        Cwd = root,
+        Status = "active"
+    });
+    bus.RegisterAgent(new AgentDefinition
+    {
+        Id = "ctu/worker",
+        Role = "Worker",
+        DisplayName = "ctu/worker",
+        ThreadId = "thread-worker",
+        Cwd = root,
+        ReturnTo = "ctu/architect",
+        Status = "active"
+    });
+
+    var task = bus.CreateTask(
+        "ctu/architect",
+        "ctu/worker",
+        "Resume via external",
+        "Dispatch from external correlation on startup.",
+        "codexteamup",
+        root,
+        [],
+        "ctu/architect");
+    var appServer = new FakeAppServerClient("""{"data":[]}""");
+    var continuity = new ExecutionContinuityStateStore(busRoot);
+    continuity.Initialize();
+    continuity.Upsert(new ExecutionContinuityState
+    {
+        StateId = continuity.CreateStateId(),
+        CorrelationId = "resume-orphan-correlation",
+        TaskChainId = task.Id,
+        ShouldContinue = true,
+        State = ExecutionContinuityStateKind.ResumePendingExternal,
+        EnteredAt = DateTimeOffset.UtcNow,
+        UpdatedAt = DateTimeOffset.UtcNow,
+        GuardianAgentId = "ctu/continuity-reviewer",
+        GuardianDisplayName = "Continuity Reviewer",
+        LastOutcomeKind = "resume_pending_external",
+        LastOutcomeRef = "resume-orphan-correlation",
+        NextActionKind = "task",
+        NextActionRef = "resume-orphan-correlation",
+        CurrentTargetAgentId = "ctu/architect",
+        CurrentTargetDisplayName = "ctu/architect",
+        AttemptCount = 1,
+        MaxAttempts = 8,
+        LastAttemptAt = DateTimeOffset.UtcNow,
+        ResumeCorrelationId = task.Id
+    });
+
+    var controller = new DefaultCtuController(busRoot, appServer);
+    controller.RunStartupSweepAsync().GetAwaiter().GetResult();
+
+    Equal(1, appServer.SentTurns.Count);
+    Equal("thread-worker", appServer.SentTurns.Single().ThreadId);
+    True(bus.ListEvents(300).Any(evt => evt.Type == "continuity.dispatch_from_state"));
+}
+
+static void ControllerGuardianRespectsConfiguredContinuityPolicy()
+{
+    var root = NewTestDirectory();
+    var busRoot = Path.Combine(root, ".codexteamup", "agentbus");
+    var bus = new AgentBusStore(busRoot);
+    bus.Initialize();
+    bus.RegisterAgent(new AgentDefinition
+    {
+        Id = "ctu/architect",
+        Role = "Architect",
+        ThreadId = "thread-architect",
+        Cwd = root,
+        Status = "active"
+    });
+    bus.RegisterAgent(new AgentDefinition
+    {
+        Id = "ctu/worker",
+        Role = "Worker",
+        DisplayName = "ctu/worker",
+        ThreadId = "thread-worker",
+        Cwd = root,
+        ReturnTo = "ctu/architect",
+        Status = "active"
+    });
+
+    var task = bus.CreateTask(
+        "ctu/architect",
+        "ctu/worker",
+        "Continue slice",
+        "Continue with policy.",
+        "codexteamup",
+        root,
+        [],
+        "ctu/architect");
+
+    var appServer = new FakeAppServerClient("""{"data":[]}""");
+    var policy = new ReloadableCtuControllerPolicy();
+    var policyFile = Path.Combine(root, "ctu-controller-policy.json");
+    File.WriteAllText(policyFile, JsonSerializer.Serialize(new CtuControllerPolicy(
+        TeamSendMessageDefaultDispatchMode: "enqueue",
+        WakeupTimeoutSeconds: 1,
+        WaitResultTimeoutCapSeconds: 10,
+        EnsureThreadNameBeforePrime: true,
+        PrimePromptStartsWithAgentId: true,
+        ContinuityGuardianAgentId: "ctu/continuity-reviewer",
+        ContinuityGuardianDisplayName: "Continuity Reviewer",
+        ContinuityStateDirectory: ".ctu-continuity"), JsonFile.Options));
+    policy.Reload(policyFile);
+    var controller = new DefaultCtuController(busRoot, appServer, policy);
+    controller.RunStartupSweepAsync().GetAwaiter().GetResult();
+
+    var continuity = new ExecutionContinuityStateStore(busRoot, ".ctu-continuity");
+    continuity.Initialize();
+    var state = continuity.ReadLatest(task.Id);
+    Equal("ctu/continuity-reviewer", state?.GuardianAgentId);
+    Equal("Continuity Reviewer", state?.GuardianDisplayName);
+    Equal(Path.Combine(root, ".ctu-continuity"), continuity.StatesDirectory);
+}
+
+static void ControllerGuardianEmitsCanonicalContinuityDecisionEvents()
+{
+    var root = NewTestDirectory();
+    var busRoot = Path.Combine(root, ".codexteamup", "agentbus");
+    var bus = new AgentBusStore(busRoot);
+    bus.Initialize();
+    bus.RegisterAgent(new AgentDefinition
+    {
+        Id = "ctu/architect",
+        Role = "Architect",
+        ThreadId = "thread-architect",
+        Cwd = root,
+        Status = "active"
+    });
+    bus.RegisterAgent(new AgentDefinition
+    {
+        Id = "ctu/worker",
+        Role = "Worker",
+        DisplayName = "ctu/worker",
+        ThreadId = "thread-worker",
+        Cwd = root,
+        ReturnTo = "ctu/architect",
+        Status = "active"
+    });
+
+    var task = bus.CreateTask(
+        "ctu/architect",
+        "ctu/worker",
+        "Repeat attempt",
+        "Trigger dispatch retry metadata.",
+        "codexteamup",
+        root,
+        [],
+        "ctu/architect");
+
+    var appServer = new ScriptedSendTurnAppServerClient(
+        "thread-worker",
+        "ctu/worker",
+        root,
+        sendTurnFailuresBeforeSuccess: 5);
+    var controller = new DefaultCtuController(busRoot, appServer);
+    controller.RunStartupSweepAsync().GetAwaiter().GetResult();
+    controller.RunStartupSweepAsync().GetAwaiter().GetResult();
+
+    var continuity = new ExecutionContinuityStateStore(busRoot);
+    var state = continuity.ReadLatest(task.Id);
+    Equal(1, state?.AttemptCount);
+
+    var events = bus.ListEvents(300).Where(evt => evt.TaskId == task.Id).ToList();
+    True(events.Any(evt => evt.Type == "continuity.guardian_evaluated"));
+    True(events.Any(evt => evt.Type == "continuity.dispatch_requested"));
+    True(events.All(evt => evt.Type != "continuity.dispatch_retry_scheduled"));
+}
+
+static void ControllerGuardianBlocksOnExhaustedNotifyRetries()
+{
+    var root = NewTestDirectory();
+    var busRoot = Path.Combine(root, ".codexteamup", "agentbus");
+    var bus = new AgentBusStore(busRoot);
+    bus.Initialize();
+    bus.RegisterAgent(new AgentDefinition
+    {
+        Id = "ctu/architect",
+        Role = "Architect",
+        ThreadId = "thread-architect",
+        Cwd = root,
+        Status = "active"
+    });
+    bus.RegisterAgent(new AgentDefinition
+    {
+        Id = "ctu/worker",
+        Role = "Worker",
+        DisplayName = "ctu/worker",
+        ThreadId = "thread-worker",
+        Cwd = root,
+        ReturnTo = "ctu/architect",
+        Status = "active"
+    });
+
+    var task = bus.CreateTask(
+        "ctu/architect",
+        "ctu/worker",
+        "Exhaust notify",
+        "Cannot notify.",
+        "codexteamup",
+        root,
+        [],
+        "ctu/architect");
+    var result = bus.WriteResult(task.Id, "Done", "completed", "ctu/worker", "ctu/architect", null, [], []);
+    bus.UpdateResult(result.Id, existing => existing with
+    {
+        NotifyAttempts = 8,
+        LastNotifiedAt = null,
+        LastNotifyError = "notify exhausted",
+        LastNotifyAttemptAt = DateTimeOffset.Now
+    });
+
+    var appServer = new FakeAppServerClient("""{"data":[]}""");
+    var controller = new DefaultCtuController(busRoot, appServer);
+    controller.RunStartupSweepAsync().GetAwaiter().GetResult();
+
+    var continuity = new ExecutionContinuityStateStore(busRoot);
+    var state = continuity.ReadLatest(task.Id);
+    Equal(ExecutionContinuityStateKind.BlockedNeedsHuman, state?.State);
+    Equal(result.Id, state?.LastOutcomeRef);
+    Equal("ctu/architect", state?.BlockingOwner);
+    True(!string.IsNullOrWhiteSpace(state?.BlockingReason));
+    True(!string.IsNullOrWhiteSpace(state?.LastError));
+    True(bus.ListEvents(300).Any(evt => evt.Type == "continuity.terminal_recorded" && evt.TaskId == task.Id));
+}
+
+static void ControllerAgentContinuationWakesIdleOwner()
+{
+    var root = NewTestDirectory();
+    var busRoot = Path.Combine(root, ".codexteamup", "agentbus");
+    var bus = new AgentBusStore(busRoot);
+    bus.Initialize();
+    bus.RegisterAgent(new AgentDefinition
+    {
+        Id = "ctu/designer",
+        Role = "Designer",
+        DisplayName = "ctu/designer",
+        ThreadId = "thread-designer",
+        Cwd = root,
+        ReturnTo = "ctu/architect",
+        Status = "active"
+    });
+
+    var task = bus.CreateTask(
+        "ctu/architect",
+        "ctu/designer",
+        "Design slice",
+        "Continue until self-reported done.",
+        "codexteamup",
+        root,
+        [],
+        "ctu/architect");
+    bus.ClaimTask(task.Id, "ctu/designer");
+    var result = bus.WriteResult(
+        task.Id,
+        "Need one more pass after local cooldown.",
+        "completed",
+        "ctu/designer",
+        "ctu/architect",
+        null,
+        [],
+        [],
+        outcome: "self_continue",
+        continuation: new AgentBusContinuationRequest
+        {
+            Owner = "ctu/designer",
+            WakeAfterSeconds = 0,
+            DedupeKey = "design-self-pass",
+            Reason = "Continue the design review loop.",
+            MaxAttempts = 2
+        });
+    Equal("self_continue", result.Outcome);
+    Equal(1, bus.ListContinuations("ctu/designer", "open").Count);
+
+    var appServer = new ScriptedSendTurnAppServerClient(
+        "thread-designer",
+        "ctu/designer",
+        root);
+    var controller = new DefaultCtuController(busRoot, appServer);
+    controller.RunStartupSweepAsync().GetAwaiter().GetResult();
+
+    Equal(1, appServer.SentTurns.Count);
+    Equal("thread-designer", appServer.SentTurns.Single().ThreadId);
+    Equal(1, bus.ListTasks("ctu/designer", "open").Count);
+    Equal(0, bus.ListContinuations("ctu/designer", "open").Count);
+    Equal(1, bus.ListContinuations("ctu/designer", "done").Count);
+    True(bus.ListEvents(300).Any(evt => evt.Type == "continuation.wakeup_enqueued"));
+
+    controller.RunStartupSweepAsync().GetAwaiter().GetResult();
+
+    Equal(1, appServer.SentTurns.Count);
+}
+
+static void ControllerStartupSweepCoversMcpDiscoveredBusRoots()
+{
+    var root = NewTestDirectory();
+    var defaultBusRoot = Path.Combine(root, ".codexteamup", "agentbus");
+    var workspace = Path.Combine(root, "codexteamup.test");
+    var workspaceBusRoot = Path.Combine(workspace, ".codexteamup", "agentbus");
+    Directory.CreateDirectory(workspace);
+
+    var appServer = new ScriptedSendTurnAppServerClient(
+        "thread-live-agent",
+        "ctu-test/live-agent",
+        workspace);
+    var controller = new DefaultCtuController(defaultBusRoot, appServer);
+    var registerArgs = JsonSerializer.Deserialize<JsonElement>($$"""
+    {
+      "cwd": {{JsonSerializer.Serialize(workspace)}},
+      "id": "ctu-test/live-agent",
+      "displayName": "ctu-test/live-agent",
+      "role": "Live test agent",
+      "threadId": "thread-live-agent",
+      "returnTo": "ctu-test/architect",
+      "status": "active"
+    }
+    """);
+
+    _ = controller.InvokeToolAsync("agentbus_register_agent", registerArgs).GetAwaiter().GetResult();
+
+    var workspaceBus = new AgentBusStore(workspaceBusRoot);
+    var task = workspaceBus.CreateTask(
+        "ctu-test/architect",
+        "ctu-test/live-agent",
+        "Known bus continuation",
+        "Continue in the MCP-discovered test workspace.",
+        "codexteamup.test",
+        workspace,
+        [],
+        "ctu-test/architect");
+    workspaceBus.ClaimTask(task.Id, "ctu-test/live-agent");
+    workspaceBus.WriteResult(
+        task.Id,
+        "Needs a follow-up in the same workspace.",
+        "completed",
+        "ctu-test/live-agent",
+        "ctu-test/architect",
+        null,
+        [],
+        [],
+        outcome: "self_continue",
+        continuation: new AgentBusContinuationRequest
+        {
+            Owner = "ctu-test/live-agent",
+            WakeAfterSeconds = 0,
+            DedupeKey = "known-bus-root-continuation",
+            Reason = "Prove the sweep covers a cwd-discovered BusRoot.",
+            MaxAttempts = 2
+        });
+
+    controller.RunStartupSweepAsync().GetAwaiter().GetResult();
+
+    Equal(1, appServer.SentTurns.Count);
+    Equal("thread-live-agent", appServer.SentTurns.Single().ThreadId);
+    Equal(1, workspaceBus.ListTasks("ctu-test/live-agent", "open").Count);
+    Equal(0, workspaceBus.ListContinuations("ctu-test/live-agent", "open").Count);
+    Equal(1, workspaceBus.ListContinuations("ctu-test/live-agent", "done").Count);
+    True(workspaceBus.ListEvents(300).Any(evt => evt.Type == "continuation.wakeup_enqueued"));
+}
+
+static void SeedRestartCheckout(string checkout)
+{
+    Directory.CreateDirectory(Path.Combine(checkout, "scripts"));
+    File.WriteAllText(
+        Path.Combine(checkout, "scripts", "start-codexteamup.ps1"),
+        @"# synthetic startup script for deterministic tests");
 }
 
 static string NewTestDirectory()
@@ -1895,6 +4287,23 @@ static string NewTestDirectory()
     var root = Path.Combine(baseRoot, Guid.NewGuid().ToString("N"));
     Directory.CreateDirectory(root);
     return root;
+}
+
+static string TestRepoRoot()
+{
+    var fromEnv = Environment.GetEnvironmentVariable("CTU_TEST_REPO_ROOT");
+    if (!string.IsNullOrWhiteSpace(fromEnv) && File.Exists(Path.Combine(fromEnv, "CodexTeamUp.slnx")))
+    {
+        return fromEnv;
+    }
+
+    var current = Environment.CurrentDirectory;
+    if (File.Exists(Path.Combine(current, "CodexTeamUp.slnx")))
+    {
+        return current;
+    }
+
+    throw new InvalidOperationException("CTU_TEST_REPO_ROOT must point to the CodexTeamUp repository root.");
 }
 
 static string JsonEscaped(string value)
@@ -1919,11 +4328,11 @@ static string ExtractTaskIdFromWakeMessage(string message)
     return message[start..end];
 }
 
-static void True(bool condition)
+static void True(bool condition, [CallerArgumentExpression(nameof(condition))] string? expression = null)
 {
     if (!condition)
     {
-        throw new InvalidOperationException("Expected condition to be true.");
+        throw new InvalidOperationException($"Expected condition to be true: {expression}.");
     }
 }
 
@@ -2041,6 +4450,116 @@ sealed class FakeAppServerClient(
     public Task<TurnWaitResult> WaitForTurnAsync(string threadId, string turnId, TimeSpan timeout, CancellationToken cancellationToken = default)
     {
         return Task.FromResult(new TurnWaitResult(true, "completed", null, "{}"));
+    }
+}
+
+/// A test app-server client that can simulate transient send failures before succeeding.
+sealed class ScriptedSendTurnAppServerClient : IAppServerClient
+{
+    private int _sendTurnFailuresRemaining;
+    private readonly IReadOnlyList<string> _threadStatuses;
+    private int _listThreadsCallIndex;
+    private readonly string _threadId;
+    private readonly string _threadAgentId;
+    private readonly string _cwd;
+
+    public List<(string ThreadId, string Message, string? Cwd, AppServerAgentSettings? Settings)> SentTurns { get; } = [];
+    public List<(string ThreadId, string Name)> NamedThreads { get; } = [];
+    public List<string> ArchivedThreads { get; } = [];
+
+    public ScriptedSendTurnAppServerClient(
+        string threadId,
+        string threadAgentId,
+        string cwd,
+        int sendTurnFailuresBeforeSuccess = 0,
+        IReadOnlyList<string>? threadStatuses = null)
+    {
+        _sendTurnFailuresRemaining = sendTurnFailuresBeforeSuccess;
+        _threadStatuses = threadStatuses is null || threadStatuses.Count == 0
+            ? ["idle"]
+            : threadStatuses;
+        _threadId = threadId;
+        _threadAgentId = threadAgentId;
+        _cwd = cwd;
+    }
+
+    public Task<AppServerCallResult> ProbeAsync(CancellationToken cancellationToken = default)
+    {
+        return Task.FromResult(new AppServerCallResult(true, "{}", null));
+    }
+
+    public Task<AppServerCallResult> CallAsync(string method, object? parameters, CancellationToken cancellationToken = default)
+    {
+        if (string.Equals(method, "thread/name/set", StringComparison.Ordinal) && parameters is not null)
+        {
+            var json = JsonSerializer.Serialize(parameters);
+            using var doc = JsonDocument.Parse(json);
+            NamedThreads.Add((
+                doc.RootElement.GetProperty("threadId").GetString()!,
+                doc.RootElement.GetProperty("name").GetString()!));
+        }
+        else if (string.Equals(method, "thread/archive", StringComparison.Ordinal) && parameters is not null)
+        {
+            var json = JsonSerializer.Serialize(parameters);
+            using var doc = JsonDocument.Parse(json);
+            ArchivedThreads.Add(doc.RootElement.GetProperty("threadId").GetString()!);
+        }
+
+        return Task.FromResult(new AppServerCallResult(true, "{}", null));
+    }
+
+    public Task<AppServerCallResult> ListThreadsAsync(string? cwd, int limit, CancellationToken cancellationToken = default)
+    {
+        var status = _threadStatuses[
+            Math.Min(_listThreadsCallIndex, _threadStatuses.Count - 1)];
+        _listThreadsCallIndex++;
+        return Task.FromResult(new AppServerCallResult(true, ThreadPayload(_threadId, _threadAgentId, _cwd, status), null));
+    }
+
+    public Task<AppServerCallResult> ReadThreadAsync(string threadId, bool includeTurns, CancellationToken cancellationToken = default)
+    {
+        return Task.FromResult(new AppServerCallResult(true, "{}", null));
+    }
+
+    public Task<AppServerCallResult> StartThreadAsync(string cwd, string? name, string? role, AppServerAgentSettings? settings = null, CancellationToken cancellationToken = default)
+    {
+        return Task.FromResult(new AppServerCallResult(true, """{"id":"created-thread"}""", null));
+    }
+
+    public Task<AppServerCallResult> ResumeThreadAsync(string threadId, CancellationToken cancellationToken = default)
+    {
+        return Task.FromResult(new AppServerCallResult(true, "{}", null));
+    }
+
+    public Task<AppServerCallResult> SendTurnAsync(string threadId, string message, string? cwd = null, AppServerAgentSettings? settings = null, CancellationToken cancellationToken = default)
+    {
+        if (_sendTurnFailuresRemaining > 0)
+        {
+            _sendTurnFailuresRemaining -= 1;
+            return Task.FromResult(new AppServerCallResult(false, null, "thread unavailable"));
+        }
+
+        SentTurns.Add((threadId, message, cwd, settings));
+        return Task.FromResult(new AppServerCallResult(true, """{"turn":{"id":"turn-fake","status":"inProgress"}}""", null));
+    }
+
+    public Task<AppServerCallResult> ListTurnsAsync(string threadId, string sortDirection = "asc", int limit = 50, CancellationToken cancellationToken = default)
+    {
+        return Task.FromResult(new AppServerCallResult(true, "{}", null));
+    }
+
+    public Task<TurnWaitResult> WaitForTurnAsync(string threadId, string turnId, TimeSpan timeout, CancellationToken cancellationToken = default)
+    {
+        return Task.FromResult(new TurnWaitResult(true, "completed", null, "{}"));
+    }
+
+    private static string ThreadPayload(string threadId, string threadAgentId, string cwd, string status)
+    {
+        return $$"""
+        {
+          "data":[{"id":{{JsonSerializer.Serialize(threadId)}}, "name":{{JsonSerializer.Serialize(threadAgentId)}}, "cwd":{{JsonSerializer.Serialize(cwd)}}, "status":{{JsonSerializer.Serialize(status)}}}]
+        }
+        """;
     }
 }
 

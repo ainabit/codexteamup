@@ -14,7 +14,9 @@ public static class McpToolMetadata
             "agentbus_register_agent" => "Register or update an agent-to-thread binding.",
             "agentbus_create_task" => "Create an AgentBus task.",
             "agentbus_list_tasks" => "List AgentBus tasks.",
+            "agentbus_clear_tasks" => "Delete AgentBus task queue files for disposable test resets.",
             "agentbus_list_events" => "List AgentBus events.",
+            "agentbus_list_continuations" => "List scheduled agent-owned continuation wakeups.",
             "agentbus_claim_task" => "Claim an open AgentBus task.",
             "agentbus_write_result" => "Write an AgentBus result.",
             "agentbus_wait_result" => "Wait for an AgentBus task result.",
@@ -35,6 +37,8 @@ public static class McpToolMetadata
             "team_discover_agents" => "Discover visible Desktop threads by team names and bind them as project agents.",
             "team_send_message" => "Create a project AgentBus message/task. Defaults to enqueue-only; use bridge_dispatch_task for wakeup.",
             "team_dashboard_export" => "Export a local HTML dashboard for project communication.",
+            "ctu_restart_request" => "Request a persistent cross-checkout CTU restart with durable state and continuation intent.",
+            "ctu_restart_status" => "Read the durable restart operation state by operation id or record path.",
             _ => "CodexTeamUp tool."
         };
     }
@@ -46,6 +50,7 @@ public static class McpToolMetadata
             "agentbus_list_agents" or
             "agentbus_list_tasks" or
             "agentbus_list_events" or
+            "agentbus_list_continuations" or
             "agentbus_wait_result" or
             "codex_thread_list" or
             "codex_thread_read" or
@@ -67,6 +72,13 @@ public static class McpToolMetadata
                 idempotentHint = true,
                 openWorldHint = false
             },
+            "agentbus_clear_tasks" => new
+            {
+                readOnlyHint = false,
+                destructiveHint = true,
+                idempotentHint = false,
+                openWorldHint = false
+            },
             "agentbus_create_task" or
             "agentbus_claim_task" or
             "agentbus_write_result" or
@@ -80,6 +92,8 @@ public static class McpToolMetadata
             "team_create_agent" or
             "team_ensure_agents" or
             "team_send_message" or
+            "ctu_restart_request" or
+            "ctu_restart_status" or
             "team_dashboard_export" => new
             {
                 readOnlyHint = false,
@@ -135,9 +149,19 @@ public static class McpToolMetadata
                 ["to"] = StringSchema(),
                 ["status"] = StringSchema()
             }),
+            "agentbus_clear_tasks" => WithBusContext(new Dictionary<string, object>
+            {
+                ["confirm"] = StringSchema(),
+                ["includeResults"] = new { type = "boolean" }
+            }),
             "agentbus_list_events" => WithBusContext(new Dictionary<string, object>
             {
                 ["limit"] = new { type = "integer" }
+            }),
+            "agentbus_list_continuations" => WithBusContext(new Dictionary<string, object>
+            {
+                ["owner"] = StringSchema(),
+                ["status"] = StringSchema()
             }),
             "agentbus_claim_task" => WithBusContext(new Dictionary<string, object>
             {
@@ -157,7 +181,13 @@ public static class McpToolMetadata
                 ["tests"] = StringSchema(),
                 ["artifacts"] = StringSchema(),
                 ["openQuestions"] = StringSchema(),
-                ["nextSuggestedAction"] = StringSchema()
+                ["nextSuggestedAction"] = StringSchema(),
+                ["outcome"] = StringSchema(),
+                ["continuationOwner"] = StringSchema(),
+                ["continuationWakeAfterSeconds"] = new { type = "integer" },
+                ["continuationReason"] = StringSchema(),
+                ["continuationDedupeKey"] = StringSchema(),
+                ["continuationMaxAttempts"] = new { type = "integer" }
             }),
             "agentbus_wait_result" => WithBusContext(new Dictionary<string, object>
             {
@@ -292,6 +322,24 @@ public static class McpToolMetadata
             "team_dashboard_export" => WithBusContext(new Dictionary<string, object>
             {
                 ["outputPath"] = StringSchema()
+            }),
+            "ctu_restart_request" => WithBusContext(new Dictionary<string, object>
+            {
+                ["targetCwd"] = StringSchema(),
+                ["targetBusRoot"] = StringSchema(),
+                ["sourceCwd"] = StringSchema(),
+                ["targetAgentId"] = StringSchema(),
+                ["requestedByAgentId"] = StringSchema(),
+                ["fallbackCwd"] = StringSchema(),
+                ["fallbackBusRoot"] = StringSchema(),
+                ["continueTitle"] = StringSchema(),
+                ["continuePrompt"] = StringSchema(),
+                ["expectedTargetBranch"] = StringSchema()
+            }),
+            "ctu_restart_status" => WithBusContext(new Dictionary<string, object>
+            {
+                ["operationPath"] = StringSchema(),
+                ["operationId"] = StringSchema()
             }),
             _ => new Dictionary<string, object>()
         };

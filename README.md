@@ -25,7 +25,8 @@ Recent architecture work tightens the runtime around the parts that are most lik
 - Controller runtime files live under `.ctu/runtime`, separate from normal source build output, so local build/test runs are not coupled to the running CTU process.
 - Controller-only fixes can be published and reloaded without restarting CTU, using the controller runtime publish script and the controller reload MCP/HTTP endpoint.
 - CTU now writes both machine JSONL logs and human-readable `.log` files for controller, app-server/API adapter, and wrapper diagnostics under `.codexteamup/logs`.
-- Live smoke tests exercise the real Codex Desktop context: creating a visible agent, having one agent create peer agents, and replacing a stale agent binding.
+- Live smoke tests exercise the real Codex Desktop context: creating a visible agent, having one agent create peer agents, replacing a stale agent binding, proving queue-first delivery, delayed agent-owned continuation wakeups, live error paths, and stale claimed-task recovery.
+- Test runs now write a live progress snapshot beside the safety report so long live suites show the current phase, scenario number, last observed line, and final report target instead of looking like a black box.
 - Desktop wakeups are treated as best-effort delivery. AgentBus remains the durable truth, calls use short ACK/NACK behavior, and controller wakeups are serialized to avoid bursty Desktop app-server cancellations.
 
 ## Visual Walkthrough
@@ -123,7 +124,7 @@ CodexTeamUp currently provides:
 
 The dashboard exists and is useful, but it is not yet where I want it to be. The current version shows a flow overview, stuck-work signals, communication routes, tasks, results, and agent relationships, but the UX still needs work.
 
-The current planning surface for upcoming work lives in [docs/ctu-roadmap-and-execution-plan.md](docs/ctu-roadmap-and-execution-plan.md).
+The architecture entrypoint now lives in [docs/architecture/README.md](docs/architecture/README.md). Active work tracks live in [docs/initiatives/README.md](docs/initiatives/README.md). The build journey and notable redesigns are tracked in [docs/logbook.md](docs/logbook.md).
 
 ## Dogfooding
 
@@ -259,6 +260,11 @@ samples/
 - [CONTRIBUTING.md](CONTRIBUTING.md): controlled contribution and feedback flow
 - [CHANGELOG.md](CHANGELOG.md): notable changes, architecture redesign notes, and verification history
 - [SECURITY.md](SECURITY.md): security reporting and sensitive-data guidance
+- [docs/architecture/README.md](docs/architecture/README.md): binding architecture entrypoint
+- [docs/adr/README.md](docs/adr/README.md): architecture decision records
+- [docs/initiatives/README.md](docs/initiatives/README.md): active execution tracks and definition of done
+- [docs/operations/README.md](docs/operations/README.md): startup, testing, and recovery runbooks
+- [docs/logbook.md](docs/logbook.md): reverse-chronological project journal
 - [docs/interested-user-onboarding.md](docs/interested-user-onboarding.md): clone-first onboarding for interested users and their local Codex agent
 - [docs/architecture.md](docs/architecture.md): system architecture, startup flow, and task/result lifecycle
 - [docs/agent-thread-usage.md](docs/agent-thread-usage.md): expected workflow for visible Codex Desktop agent chats

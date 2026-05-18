@@ -79,5 +79,7 @@ public sealed class McpToolRegistry
 
         public Task<object> InvokeToolAsync(string name, JsonElement arguments, CancellationToken cancellationToken = default)
             => backend.CallToolAsync(name, arguments, cancellationToken);
+
+        public Task RunStartupSweepAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
     }
 }

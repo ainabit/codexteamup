@@ -9,7 +9,9 @@ public static class CtuControllerTools
         "agentbus_register_agent",
         "agentbus_create_task",
         "agentbus_list_tasks",
+        "agentbus_clear_tasks",
         "agentbus_list_events",
+        "agentbus_list_continuations",
         "agentbus_claim_task",
         "agentbus_write_result",
         "agentbus_wait_result",
@@ -28,7 +30,9 @@ public static class CtuControllerTools
         "team_create_agent",
         "team_ensure_agents",
         "team_discover_agents",
-        "team_send_message",
-        "team_dashboard_export"
-    ];
+            "team_send_message",
+            "team_dashboard_export",
+            "ctu_restart_request",
+            "ctu_restart_status"
+        ];
 }

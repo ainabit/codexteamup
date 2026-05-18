@@ -20,7 +20,9 @@ Before opening a PR:
 3. Prefix PR titles for fixes with `fix:` and new features with `feat:`.
 4. Keep public docs in English.
 5. Do not commit local runtime state, `.codexteamup`, `.ctu`, logs, generated binaries, local paths, or private project references.
-6. Run:
+6. Add or update focused deterministic tests for new production behavior. Live smoke tests are a supplement, not a substitute.
+7. Add or update short English summary comments on important classes, records, and interfaces when their responsibility changes.
+8. Run:
 
 ```powershell
 dotnet build

@@ -44,6 +44,7 @@ The server supports:
 - `agentbus_register_agent`
 - `agentbus_create_task`
 - `agentbus_list_tasks`
+- `agentbus_clear_tasks`
 - `agentbus_claim_task`
 - `agentbus_write_result`
 - `agentbus_wait_result`
@@ -86,6 +87,10 @@ Any registered `ctu/*` agent can use these paths. Communication is not architect
 Large task prompts should live in Markdown files and be referenced by path instead of being inlined.
 
 `agentbus_write_result` accepts comma-separated `changedFiles`, `tests`, `checks`, `artifacts`, and `openQuestions` values. `checks` is accepted as an alias for `tests`. Agents that edit files should set `changedFiles` explicitly so the dashboard and return agent can see what changed without parsing prose.
+
+Every result must also carry a structured outcome: `done`, `handed_off`, `self_continue`, `human`, or `failed`. Only `self_continue` schedules a deduplicated later wakeup for the same agent. Other outcomes may notify a return target or remain visible for recovery, but they do not create routine self-wakeup work.
+
+`agentbus_clear_tasks` is a destructive test-reset tool. It deletes AgentBus task queue files and, when `includeResults=true`, result files too. It requires `confirm=DELETE` so agents do not wipe active coordination by accident. Use it only for disposable test phases or deliberate local recovery; the normal production path should close work with results instead of erasing it.
 
 CodexTeamUp does not infer project roles. The caller provides the desired team. `team_ensure_agents` accepts `agentsJson` as a JSON array string, for example:
 

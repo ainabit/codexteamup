@@ -2,6 +2,31 @@
 
 All notable CodexTeamUp changes are tracked here by date. The project does not use formal version numbers yet.
 
+## 2026-05-18
+
+### Live Coordination Safety Net
+
+- Added live Codex Desktop coverage for queue-first UX, delayed agent-owned continuations, negative dispatch/error paths, and stale claimed-task recovery.
+- Taught the controller startup sweep to cover bus roots discovered through MCP calls, so `codexteamup.test` continuation and recovery work is processed by the running controller instead of only the default repo bus.
+- Kept continuity action-state handling ahead of generic task delivery so guardian-driven dispatch still produces the expected continuity events.
+- Added live progress snapshot files beside the safety report so broad runs expose phase, scenario count, current scenario, last observed line, and final report path while they run.
+- Documented the expanded multi-agent orchestration test strategy.
+
+Why this exists:
+
+The real safety net is not just deterministic unit coverage. CTU exists to coordinate visible Codex Desktop agents, so the live tests must prove the coordination behaviors that previously caused stalls: queued work staying queued until dispatch, self-continuation actually waking the same agent again, error paths being visible and durable, and claimed tasks being recovered instead of silently hanging.
+
+### Fresh Clone Acceptance Path
+
+- Added `scripts/test-fresh-clone-acceptance.ps1` as the smallest acceptance runner for a real fresh clone.
+- Clarified in `AGENTS.md`, `README.md`, and onboarding docs that `codexteamup.acceptance` is a separate outside-user checkout, not a second development workspace.
+- Updated the acceptance flow so it runs against the current checkout and refuses to masquerade a plain state folder as a real clone.
+- Verified that CTU can be started from `S:/_work/_development/codexteamup.acceptance` and that the acceptance clone can run the deterministic suite plus the live `basic` smoke.
+
+Why this exists:
+
+We want to test the path another person would actually take, not just whether the branch works inside the main development checkout. The acceptance clone acts like a synthetic outside-user machine: clone from remote, start CTU there, let visible agents validate the run, and only fix problems back in the main repo. That keeps the test honest and makes failures easier to reason about.
+
 ## 2026-05-17
 
 ### Dashboard Flow Visibility

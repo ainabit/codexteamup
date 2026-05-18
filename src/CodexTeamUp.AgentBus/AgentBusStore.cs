@@ -17,6 +17,9 @@ public sealed class AgentBusStore
     public string TasksFailedDirectory => Path.Combine(RootDirectory, "tasks", "failed");
     public string PromptsDirectory => Path.Combine(RootDirectory, "prompts");
     public string ResultsDirectory => Path.Combine(RootDirectory, "results");
+    public string ContinuationsOpenDirectory => Path.Combine(RootDirectory, "continuations", "open");
+    public string ContinuationsDoneDirectory => Path.Combine(RootDirectory, "continuations", "done");
+    public string ContinuationsFailedDirectory => Path.Combine(RootDirectory, "continuations", "failed");
     public string LocksDirectory => Path.Combine(RootDirectory, "locks");
     public string InboxDirectory => Path.Combine(RootDirectory, "inbox");
     public string EventsPath => Path.Combine(RootDirectory, "events.jsonl");
@@ -30,6 +33,9 @@ public sealed class AgentBusStore
         Directory.CreateDirectory(TasksFailedDirectory);
         Directory.CreateDirectory(PromptsDirectory);
         Directory.CreateDirectory(ResultsDirectory);
+        Directory.CreateDirectory(ContinuationsOpenDirectory);
+        Directory.CreateDirectory(ContinuationsDoneDirectory);
+        Directory.CreateDirectory(ContinuationsFailedDirectory);
         Directory.CreateDirectory(LocksDirectory);
         Directory.CreateDirectory(InboxDirectory);
 
@@ -59,6 +65,56 @@ public sealed class AgentBusStore
             Type = "bus.initialized",
             Message = "AgentBus directories are ready."
         });
+    }
+
+    public void MarkTaskSuperseded(AgentBusTask task)
+    {
+        MarkTaskToDirectory(task, DateTimeOffset.Now, "superseded");
+    }
+
+    /// <summary>Atomically updates a task record if present in any task directory.</summary>
+    public AgentBusTask? UpdateTask(string taskId, Func<AgentBusTask, AgentBusTask> updater)
+    {
+        InitializeIfMissing();
+        foreach (var directory in new[] { TasksOpenDirectory, TasksClaimedDirectory, TasksDoneDirectory, TasksFailedDirectory })
+        {
+            var path = TaskPath(directory, taskId);
+            if (!File.Exists(path))
+            {
+                continue;
+            }
+
+            var existing = JsonFile.Read<AgentBusTask>(path);
+            if (existing is null)
+            {
+                return null;
+            }
+
+            var updated = updater(existing);
+            JsonFile.WriteAtomic(path, updated);
+            return updated;
+        }
+
+        return null;
+    }
+
+    /// <summary>Atomically updates a result record if present.</summary>
+    public AgentBusResult? UpdateResult(string resultId, Func<AgentBusResult, AgentBusResult> updater)
+    {
+        InitializeIfMissing();
+        var normalized = resultId.EndsWith(".json", StringComparison.OrdinalIgnoreCase)
+            ? Path.GetFileNameWithoutExtension(resultId)
+            : resultId;
+        var path = ResultPath(normalized);
+        var existing = File.Exists(path) ? JsonFile.Read<AgentBusResult>(path) : null;
+        if (existing is null)
+        {
+            return null;
+        }
+
+        var updated = updater(existing);
+        JsonFile.WriteAtomic(path, updated);
+        return updated;
     }
 
     public AgentBusTask CreateTask(
@@ -172,6 +228,40 @@ public sealed class AgentBusStore
             .ToList();
     }
 
+    /// <summary>
+    /// Deletes task queue files for disposable test resets while preserving agents and events.
+    /// </summary>
+    public AgentBusClearResult ClearTasks(bool includeResults = false)
+    {
+        InitializeIfMissing();
+        var deletedTasks = 0;
+        foreach (var path in EnumerateTaskFiles(status: null).ToList())
+        {
+            File.Delete(path);
+            deletedTasks++;
+        }
+
+        var deletedResults = 0;
+        if (includeResults && Directory.Exists(ResultsDirectory))
+        {
+            foreach (var path in Directory.EnumerateFiles(ResultsDirectory, "*.json", SearchOption.TopDirectoryOnly).ToList())
+            {
+                File.Delete(path);
+                deletedResults++;
+            }
+        }
+
+        var clearedAt = DateTimeOffset.Now;
+        AppendEvent(new AgentBusEvent
+        {
+            Timestamp = clearedAt,
+            Type = "agentbus.tasks_cleared",
+            Message = $"Deleted {deletedTasks} task files and {deletedResults} result files.",
+            Payload = new { includeResults, deletedTasks, deletedResults }
+        });
+        return new AgentBusClearResult(deletedTasks, deletedResults, includeResults, clearedAt);
+    }
+
     public AgentBusTask ClaimTask(string taskId, string? owner)
     {
         InitializeIfMissing();
@@ -215,6 +305,44 @@ public sealed class AgentBusStore
         return claimed;
     }
 
+    /// <summary>
+    /// Requeues a claimed task back into the open queue so the controller can retry delivery.
+    /// </summary>
+    public AgentBusTask? RequeueClaimedTask(string taskId)
+    {
+        InitializeIfMissing();
+        var claimedPath = TaskPath(TasksClaimedDirectory, taskId);
+        if (!File.Exists(claimedPath))
+        {
+            return null;
+        }
+
+        Directory.CreateDirectory(TasksOpenDirectory);
+        using var requeueLock = TryCreateLock($"task-{taskId}.requeue.lock");
+        if (requeueLock is null)
+        {
+            throw new InvalidOperationException($"Task requeue is locked: {taskId}");
+        }
+
+        var task = JsonFile.Read<AgentBusTask>(claimedPath)
+            ?? throw new InvalidOperationException($"Could not read claimed task for requeue: {taskId}");
+        var requeued = task with
+        {
+            Status = "open",
+            ClaimedAt = null,
+            Owner = null
+        };
+        var openPath = TaskPath(TasksOpenDirectory, taskId);
+        JsonFile.WriteAtomic(claimedPath, requeued);
+        if (File.Exists(openPath))
+        {
+            File.Delete(openPath);
+        }
+
+        File.Move(claimedPath, openPath);
+        return requeued;
+    }
+
     public AgentBusResult WriteResult(
         string taskId,
         string summary,
@@ -226,10 +354,15 @@ public sealed class AgentBusStore
         IReadOnlyList<string> openQuestions,
         IReadOnlyList<string>? changedFiles = null,
         IReadOnlyList<string>? artifacts = null,
-        string? nextSuggestedAction = null)
+        string? nextSuggestedAction = null,
+        string? outcome = null,
+        AgentBusContinuationRequest? continuation = null)
     {
         InitializeIfMissing();
         var task = FindTask(taskId) ?? throw new FileNotFoundException($"Task not found: {taskId}");
+        var normalizedOutcome = NormalizeOutcome(outcome, status, continuation);
+        var normalizedContinuation = NormalizeContinuationRequest(continuation, task, normalizedOutcome);
+        var continuationId = normalizedContinuation is null ? null : CreateContinuationId(taskId);
         var result = new AgentBusResult
         {
             Id = CreateResultId(taskId),
@@ -240,6 +373,9 @@ public sealed class AgentBusStore
             CompletedAt = DateTimeOffset.Now,
             Summary = summary,
             Commit = commit,
+            Outcome = normalizedOutcome,
+            ContinuationId = continuationId,
+            Continuation = normalizedContinuation,
             ChangedFiles = changedFiles ?? [],
             Tests = tests,
             Artifacts = artifacts ?? [],
@@ -266,7 +402,99 @@ public sealed class AgentBusStore
             To = result.To,
             Message = result.Status
         });
+
+        if (normalizedContinuation is not null)
+        {
+            RegisterContinuation(result, normalizedContinuation, continuationId!);
+        }
+
         return result;
+    }
+
+    /// <summary>
+    /// Returns scheduled self-continuations, optionally filtered by owner and status.
+    /// </summary>
+    public IReadOnlyList<AgentBusContinuation> ListContinuations(string? owner = null, string? status = null)
+    {
+        InitializeIfMissing();
+        return EnumerateContinuationFiles(status)
+            .Select(path => JsonFile.Read<AgentBusContinuation>(path))
+            .Where(continuation => continuation is not null)
+            .Cast<AgentBusContinuation>()
+            .Where(continuation => string.IsNullOrWhiteSpace(owner)
+                || string.Equals(NormalizeAgentKey(continuation.Owner), NormalizeAgentKey(owner), StringComparison.OrdinalIgnoreCase))
+            .OrderBy(continuation => continuation.DueAt)
+            .ToList();
+    }
+
+    /// <summary>Atomically updates a continuation record if it exists.</summary>
+    public AgentBusContinuation? UpdateContinuation(string continuationId, Func<AgentBusContinuation, AgentBusContinuation> updater)
+    {
+        InitializeIfMissing();
+        foreach (var directory in new[] { ContinuationsOpenDirectory, ContinuationsDoneDirectory, ContinuationsFailedDirectory })
+        {
+            var path = ContinuationPath(directory, continuationId);
+            if (!File.Exists(path))
+            {
+                continue;
+            }
+
+            var existing = JsonFile.Read<AgentBusContinuation>(path);
+            if (existing is null)
+            {
+                return null;
+            }
+
+            var updated = updater(existing);
+            JsonFile.WriteAtomic(path, updated);
+            return updated;
+        }
+
+        return null;
+    }
+
+    /// <summary>Moves an open continuation into a terminal status directory.</summary>
+    public AgentBusContinuation? CompleteContinuation(string continuationId, string status, string? lastError = null, string? lastWakeTaskId = null)
+    {
+        InitializeIfMissing();
+        var sourcePath = ContinuationPath(ContinuationsOpenDirectory, continuationId);
+        if (!File.Exists(sourcePath))
+        {
+            return null;
+        }
+
+        var existing = JsonFile.Read<AgentBusContinuation>(sourcePath)
+            ?? throw new InvalidOperationException($"Could not read continuation: {continuationId}");
+        var terminalStatus = string.Equals(status, "failed", StringComparison.OrdinalIgnoreCase) ? "failed" : "done";
+        var targetDirectory = string.Equals(terminalStatus, "failed", StringComparison.OrdinalIgnoreCase)
+            ? ContinuationsFailedDirectory
+            : ContinuationsDoneDirectory;
+        var completed = existing with
+        {
+            Status = terminalStatus,
+            CompletedAt = DateTimeOffset.Now,
+            LastWakeError = lastError ?? existing.LastWakeError,
+            LastWakeTaskId = lastWakeTaskId ?? existing.LastWakeTaskId
+        };
+        var targetPath = ContinuationPath(targetDirectory, continuationId);
+        JsonFile.WriteAtomic(sourcePath, completed);
+        if (File.Exists(targetPath))
+        {
+            File.Delete(targetPath);
+        }
+
+        File.Move(sourcePath, targetPath);
+        AppendEvent(new AgentBusEvent
+        {
+            Timestamp = DateTimeOffset.Now,
+            Type = $"continuation.{terminalStatus}",
+            TaskId = completed.TaskId,
+            ResultId = completed.ResultId,
+            To = completed.Owner,
+            Message = completed.LastWakeError ?? completed.Reason,
+            Payload = new { continuationId = completed.Id, completed.LastWakeTaskId }
+        });
+        return completed;
     }
 
     public AgentBusTask? FindTask(string taskId)
@@ -452,17 +680,38 @@ public sealed class AgentBusStore
 
     private void InitializeIfMissing()
     {
-        if (!Directory.Exists(RootDirectory))
+        if (!Directory.Exists(RootDirectory)
+            || !Directory.Exists(TasksOpenDirectory)
+            || !Directory.Exists(ResultsDirectory)
+            || !Directory.Exists(ContinuationsOpenDirectory))
         {
             Initialize();
         }
     }
 
+    /// <summary>Serializes event appends to avoid concurrent writers corrupting JSONL event rows.</summary>
     private void AppendEvent(AgentBusEvent evt)
     {
         Directory.CreateDirectory(RootDirectory);
         var lineOptions = new JsonSerializerOptions(JsonFile.Options) { WriteIndented = false };
-        File.AppendAllText(EventsPath, JsonSerializer.Serialize(evt, lineOptions) + Environment.NewLine);
+        var line = JsonSerializer.Serialize(evt, lineOptions) + Environment.NewLine;
+        const int lockWaitAttempts = 100;
+        const int lockWaitMilliseconds = 5;
+
+        for (var attempt = 0; attempt < lockWaitAttempts; attempt++)
+        {
+            using var appendLock = TryCreateLock("events.append.lock");
+            if (appendLock is null)
+            {
+                Thread.Sleep(lockWaitMilliseconds);
+                continue;
+            }
+
+            File.AppendAllText(EventsPath, line);
+            return;
+        }
+
+        throw new IOException("Timed out acquiring event append lock.");
     }
 
     private AgentRegistryDocument ReadRegistry()
@@ -505,13 +754,95 @@ public sealed class AgentBusStore
             .FirstOrDefault(result => string.Equals(result.TaskId, taskId, StringComparison.OrdinalIgnoreCase));
     }
 
+    private AgentBusContinuation RegisterContinuation(
+        AgentBusResult result,
+        AgentBusContinuationRequest request,
+        string continuationId)
+    {
+        var owner = string.IsNullOrWhiteSpace(request.Owner) ? result.From : request.Owner!.Trim();
+        var dedupeKey = string.IsNullOrWhiteSpace(request.DedupeKey) ? result.TaskId : request.DedupeKey!.Trim();
+        var now = DateTimeOffset.Now;
+        var existing = ListContinuations(owner, "open")
+            .FirstOrDefault(continuation => string.Equals(continuation.DedupeKey, dedupeKey, StringComparison.OrdinalIgnoreCase));
+        var continuation = new AgentBusContinuation
+        {
+            Id = existing?.Id ?? continuationId,
+            ResultId = result.Id,
+            TaskId = result.TaskId,
+            Owner = owner,
+            Status = "open",
+            CreatedAt = existing?.CreatedAt ?? now,
+            DueAt = now.AddSeconds(Math.Clamp(request.WakeAfterSeconds, 0, 86400)),
+            DedupeKey = dedupeKey,
+            Reason = request.Reason,
+            ReturnTo = result.To,
+            Attempts = existing?.Attempts ?? 0,
+            MaxAttempts = Math.Clamp(request.MaxAttempts <= 0 ? 5 : request.MaxAttempts, 1, 50),
+            LastWakeAttemptAt = existing?.LastWakeAttemptAt,
+            LastWakeTaskId = existing?.LastWakeTaskId,
+            LastWakeError = null
+        };
+
+        JsonFile.WriteAtomic(ContinuationPath(ContinuationsOpenDirectory, continuation.Id), continuation);
+        AppendEvent(new AgentBusEvent
+        {
+            Timestamp = now,
+            Type = existing is null ? "continuation.scheduled" : "continuation.deduped",
+            TaskId = result.TaskId,
+            ResultId = result.Id,
+            From = result.From,
+            To = owner,
+            Message = request.Reason ?? "Agent requested self-continuation.",
+            Payload = new { continuationId = continuation.Id, continuation.DedupeKey, continuation.DueAt }
+        });
+        return continuation;
+    }
+
+    private static string NormalizeOutcome(string? outcome, string status, AgentBusContinuationRequest? continuation)
+    {
+        if (continuation is not null)
+        {
+            return "self_continue";
+        }
+
+        var normalized = string.IsNullOrWhiteSpace(outcome)
+            ? null
+            : outcome.Trim().ToLowerInvariant().Replace("-", "_", StringComparison.Ordinal);
+        if (normalized is "done" or "handed_off" or "self_continue" or "human" or "failed")
+        {
+            return normalized;
+        }
+
+        return string.Equals(status, "failed", StringComparison.OrdinalIgnoreCase) ? "failed" : "done";
+    }
+
+    private static AgentBusContinuationRequest? NormalizeContinuationRequest(
+        AgentBusContinuationRequest? continuation,
+        AgentBusTask task,
+        string outcome)
+    {
+        if (!string.Equals(outcome, "self_continue", StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        continuation ??= new AgentBusContinuationRequest();
+        return continuation with
+        {
+            Owner = string.IsNullOrWhiteSpace(continuation.Owner) ? task.To : continuation.Owner!.Trim(),
+            DedupeKey = string.IsNullOrWhiteSpace(continuation.DedupeKey) ? task.Id : continuation.DedupeKey!.Trim(),
+            WakeAfterSeconds = Math.Clamp(continuation.WakeAfterSeconds, 0, 86400),
+            MaxAttempts = Math.Clamp(continuation.MaxAttempts <= 0 ? 5 : continuation.MaxAttempts, 1, 50)
+        };
+    }
+
     private FileStream? TryCreateLock(string name)
     {
         Directory.CreateDirectory(LocksDirectory);
         var path = Path.Combine(LocksDirectory, name);
         try
         {
-            return new FileStream(path, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None);
+            return new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
         }
         catch (IOException)
         {
@@ -527,6 +858,33 @@ public sealed class AgentBusStore
     private string ResultPath(string resultId)
     {
         return Path.Combine(ResultsDirectory, $"{resultId}.json");
+    }
+
+    private IEnumerable<string> EnumerateContinuationFiles(string? status)
+    {
+        string[] directories = string.IsNullOrWhiteSpace(status)
+            ? [ContinuationsOpenDirectory, ContinuationsDoneDirectory, ContinuationsFailedDirectory]
+            : [ContinuationStatusDirectory(status)];
+
+        return directories
+            .Where(Directory.Exists)
+            .SelectMany(directory => Directory.EnumerateFiles(directory, "*.json", SearchOption.TopDirectoryOnly));
+    }
+
+    private string ContinuationStatusDirectory(string status)
+    {
+        return status.ToLowerInvariant() switch
+        {
+            "open" or "pending" => ContinuationsOpenDirectory,
+            "done" or "completed" => ContinuationsDoneDirectory,
+            "failed" => ContinuationsFailedDirectory,
+            _ => throw new ArgumentException($"Unknown continuation status: {status}", nameof(status))
+        };
+    }
+
+    private string ContinuationPath(string directory, string continuationId)
+    {
+        return Path.Combine(directory, $"{continuationId}.json");
     }
 
     private void MarkTaskFailed(AgentBusTask task, DateTimeOffset completedAt)
@@ -562,6 +920,34 @@ public sealed class AgentBusStore
         File.Move(sourcePath, targetPath);
     }
 
+    private void MarkTaskToDirectory(AgentBusTask task, DateTimeOffset completedAt, string status)
+    {
+        var sourcePath = TaskPath(TasksOpenDirectory, task.Id);
+        if (!File.Exists(sourcePath))
+        {
+            sourcePath = TaskPath(TasksClaimedDirectory, task.Id);
+            if (!File.Exists(sourcePath))
+            {
+                return;
+            }
+        }
+
+        var updated = task with
+        {
+            Status = status,
+            CompletedAt = completedAt
+        };
+
+        var targetPath = TaskPath(TasksDoneDirectory, task.Id);
+        JsonFile.WriteAtomic(sourcePath, updated);
+        if (File.Exists(targetPath))
+        {
+            File.Delete(targetPath);
+        }
+
+        File.Move(sourcePath, targetPath);
+    }
+
     private static string CreateTaskId()
     {
         return $"task-{DateTimeOffset.Now:yyyy-MM-dd-HHmmss}-{Guid.NewGuid():N}"[..38];
@@ -570,6 +956,11 @@ public sealed class AgentBusStore
     private static string CreateResultId(string taskId)
     {
         return $"result-{taskId}-{DateTimeOffset.Now:yyyyMMddHHmmss}";
+    }
+
+    private static string CreateContinuationId(string taskId)
+    {
+        return $"continuation-{taskId}-{Guid.NewGuid():N}";
     }
 
     private static string NormalizeAgentKey(string? value)

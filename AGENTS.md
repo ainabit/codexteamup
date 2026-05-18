@@ -61,6 +61,10 @@ The architect reads the project documentation and decides:
 
 The architect then uses CodexTeamUp MCP, for example `team_ensure_agents`, and passes that exact agent list. CodexTeamUp does not invent roles on its own.
 
+Implementation work should normally be delegated by `ctu/architect` to dedicated developer agents such as `ctu/service`, `ctu/wrapper`, or explicit `ctu/developer*` roles. The architect owns scope, architecture, sequencing, and final acceptance. The architect should only make implementation edits directly for unusually hard critical-path work or small final corrections.
+
+Keep the active team small. When a temporary worker or developer agent is no longer needed, retire or archive it instead of letting stale threads accumulate. This is especially important for ad hoc `ctu/developer*` agents so they do not keep obsolete context from discarded designs, failed experiments, or already-finished slices.
+
 ## Project-Local State
 
 Each project can keep its own CodexTeamUp directory:
@@ -130,7 +134,17 @@ Codex Desktop may start multiple wrapped `app-server` processes. Only the visibl
 
 Visible Codex Desktop threads should be named with their agent id/display name. Normal controller policy should pass the display name at thread creation and call the explicit thread naming path before the first prime turn when a thread is created or rebound. For short ACK/NACK live smoke paths, the controller may use `prime=false setName=false` to avoid fragile Desktop rename or prime calls before the AgentBus registration is usable; those paths must still pass the intended display name into thread creation and include the exact agent id in the first dispatched task or prime fallback. The first line of every prime prompt should also be the exact agent id as a fallback for Desktop title generation.
 
-`docs/ctu-runtime-architecture.md` is the binding architecture reference. Read it before changing CTU runtime, MCP, app-server adapter, controller, AgentBus, logging, or orchestration code. New runtime changes must preserve its layer split: MCP and app-server adapters stay thin; workflow lives in the hot-reloadable controller runtime; AgentBus remains durable truth.
+`docs/architecture/README.md` is the binding architecture entrypoint. Read it before changing CTU runtime, MCP, app-server adapter, controller, AgentBus, exchange, logging, acceptance flow, or orchestration code.
+
+Architecture governance is split deliberately:
+
+- `docs/architecture/**`: binding current-state architecture rules
+- `docs/adr/**`: durable decision history and rationale
+- `docs/initiatives/**`: active execution tracks and definition of done
+- `docs/operations/**`: startup, testing, recovery, and runtime inspection guidance
+- `docs/logbook.md`: reverse-chronological journal of notable CTU milestones, failures, and redesigns
+
+New runtime changes must preserve the architecture split: MCP and app-server adapters stay thin; workflow lives in the hot-reloadable controller runtime; AgentBus remains CTU's internal durable truth; external ingress/egress and restart startup handoffs use the exchange boundary.
 
 ## Reactivity And ACK/NACK
 
@@ -148,6 +162,12 @@ Use a short ACK/NACK pattern:
 - `team_send_message` with `waitResult=true` is only for quick acknowledgements or very short answers and should not be used as a cross-agent RPC primitive. Longer work should use asynchronous enqueue, explicit dispatch, and result polling.
 
 Live tests and adapters should prefer short per-call timeouts and explicit polling. A Desktop app-server timeout is not by itself proof that an agent did not receive work; AgentBus events/results are the durable truth.
+
+## Agent-Owned Continuations
+
+CTU must be able to keep an agreed plan moving without relying on the user to type "weiter". The normal mechanism is agent-owned: every AgentBus result declares `done`, `handed_off`, `self_continue`, `human`, or `failed`. Only `self_continue` may register a deduplicated later wakeup for the same agent.
+
+The controller processes due continuations from `.codexteamup/agentbus/continuations/open`, creates a normal AgentBus task for the owning agent, and dispatches it through the same controller delivery policy used for all other work. There is no global `ctu/projectlead` heartbeat in the runtime path. Central recovery may be added later as explicit stale-chain analysis, but it must not replace the owning agent's outcome decision or bypass AgentBus.
 
 ## Operating Model
 
@@ -179,6 +199,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\test-codexteamup.ps1 -Coverag
 
 Coverage uses the repo-local .NET tool manifest and `coverlet.console`. The default line threshold is 80 percent. If the current baseline is below that threshold, add focused tests rather than lowering the architecture target.
 
+New production behavior must come with focused deterministic tests. Live smoke tests are evidence for runtime integration; they do not replace unit or deterministic controller/service tests. When you add or change controller flow, restart behavior, AgentBus semantics, exchange/channel logic, or service/API behavior, write or extend tests in the same branch before treating the slice as done.
+
 For changes to CTU service, wrapper, MCP tools, AgentBus, thread binding, wakeups, runtime settings, or agent orchestration, also run at least the relevant live Codex Desktop smoke test:
 
 ```powershell
@@ -208,6 +230,16 @@ When the user asks for the CTU tests or smoke tests, notify `ctu/tester` through
 - broad orchestration changes: deterministic safety net plus `-LiveAll`
 
 The tester should report exact commands, pass/fail status, run id for live tests, cleanup status, and any blockers.
+
+## Code Documentation
+
+Keep source code lightly documented for human maintainers.
+
+- Add short English summary comments for important classes, records, and interfaces.
+- The summary should say what the type owns or is responsible for, not restate the type name.
+- Keep the comments brief. One or two short sentences is enough.
+- Add or update the summary when a class changes responsibility in a meaningful way.
+- Prefer type-level documentation over noisy inline comments. Use inline comments only where local control flow is genuinely non-obvious.
 
 ## Codex Desktop Git Directives
 

@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using CodexTeamUp.Core;
 
 namespace CodexTeamUp.Controller;
@@ -8,7 +9,11 @@ public sealed record CtuControllerPolicy(
     int WakeupTimeoutSeconds,
     int WaitResultTimeoutCapSeconds,
     bool EnsureThreadNameBeforePrime,
-    bool PrimePromptStartsWithAgentId)
+    bool PrimePromptStartsWithAgentId,
+    string? ContinuityGuardianAgentId = null,
+    string? ContinuityGuardianDisplayName = null,
+    string? ContinuityStateDirectory = null,
+    int StaleClaimedTaskRecoverySeconds = 10)
 {
     public static CtuControllerPolicy Default { get; } = new("enqueue", 8, 10, true, true);
 }
@@ -118,10 +123,37 @@ public sealed class ReloadableCtuControllerPolicy
         }
 
         return policy with
+            {
+                TeamSendMessageDefaultDispatchMode = dispatchMode,
+                WakeupTimeoutSeconds = Math.Clamp(policy.WakeupTimeoutSeconds, 1, 10),
+                WaitResultTimeoutCapSeconds = Math.Clamp(policy.WaitResultTimeoutCapSeconds, 1, 10),
+                ContinuityGuardianAgentId = NormalizeAgentId(policy.ContinuityGuardianAgentId),
+                ContinuityGuardianDisplayName = BlankToNull(policy.ContinuityGuardianDisplayName)
+                    ?? NormalizeAgentId(policy.ContinuityGuardianAgentId)
+                    ?? "ctu/reviewer",
+                ContinuityStateDirectory = NormalizeStateDirectory(policy.ContinuityStateDirectory),
+                StaleClaimedTaskRecoverySeconds = Math.Clamp(policy.StaleClaimedTaskRecoverySeconds, 5, 300)
+            };
+    }
+
+    private static string? NormalizeAgentId(string? value)
+    {
+        var normalized = BlankToNull(value);
+        if (normalized is null)
         {
-            TeamSendMessageDefaultDispatchMode = dispatchMode,
-            WakeupTimeoutSeconds = Math.Clamp(policy.WakeupTimeoutSeconds, 1, 10),
-            WaitResultTimeoutCapSeconds = Math.Clamp(policy.WaitResultTimeoutCapSeconds, 1, 10)
-        };
+            return null;
+        }
+
+        return Regex.Replace(normalized, @"\\", "/", RegexOptions.None, TimeSpan.FromMilliseconds(100));
+    }
+
+    private static string? NormalizeStateDirectory(string? value)
+    {
+        return BlankToNull(value);
+    }
+
+    private static string? BlankToNull(string? value)
+    {
+        return string.IsNullOrWhiteSpace(value) ? null : value.Trim();
     }
 }

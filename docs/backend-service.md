@@ -30,6 +30,7 @@ Codex agent
 - `GET /api/agents?busRoot=<path>`
 - `GET /api/tasks?busRoot=<path>`
 - `GET /api/results?busRoot=<path>`
+- `GET /api/continuations?busRoot=<path>`
 - `GET /api/events?busRoot=<path>`
 - `POST /mcp`
 - `POST /mcp/tools/<toolName>`
@@ -38,12 +39,12 @@ Codex agent
 
 Tools may pass `cwd` or `busRoot`. If `cwd` is present, the service uses `<cwd>/.codexteamup/agentbus` for that project.
 
-`GET /` and `GET /dashboard` both render the monitoring dashboard.
+`GET /` and `GET /dashboard` both render the monitoring dashboard. The dashboard must show AgentBus communication and continuation state in one place, including pending, due, dispatched, expired, deduped, and human-blocked continuations by agent, chain, source task/result, next action, and next wakeup time.
 
 `GET /api/snapshot` returns one combined response:
 
 ```json
-{"busRoot":"...","generatedAt":"...","stats":{},"agents":[],"tasks":[],"results":[],"events":[]}
+{"busRoot":"...","generatedAt":"...","stats":{},"agents":[],"tasks":[],"results":[],"continuations":[],"events":[]}
 ```
 
 ## Start

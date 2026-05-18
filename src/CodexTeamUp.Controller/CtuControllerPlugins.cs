@@ -269,6 +269,11 @@ public sealed class ReloadableCtuController : IReloadableCtuController, IDisposa
         throw new InvalidOperationException($"Unsupported controller plugin type {type.FullName}.");
     }
 
+    public Task RunStartupSweepAsync(CancellationToken cancellationToken = default)
+    {
+        return _current.Controller.RunStartupSweepAsync(cancellationToken);
+    }
+
     private static string ShadowCopyPlugin(string pluginPath)
     {
         var sourceDirectory = Path.GetDirectoryName(pluginPath) ?? Environment.CurrentDirectory;
@@ -351,6 +356,8 @@ public sealed class ReloadableCtuController : IReloadableCtuController, IDisposa
 
         public Task<object> InvokeToolAsync(string name, JsonElement arguments, CancellationToken cancellationToken = default)
             => throw new InvalidOperationException("No CTU controller plugin is loaded. Use codex_controller_reload with a plugin DLL path.");
+
+        public Task RunStartupSweepAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
     }
 
     private sealed class ControllerPluginLoadContext(string pluginPath) : AssemblyLoadContext(isCollectible: true)

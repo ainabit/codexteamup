@@ -9,6 +9,11 @@ public interface ICtuController
     CtuControllerRuntimeStatus Status { get; }
 
     Task<object> InvokeToolAsync(string name, JsonElement arguments, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Runs one bounded background processing step for controller-owned channel/inbox work.
+    /// </summary>
+    Task RunStartupSweepAsync(CancellationToken cancellationToken = default);
 }
 
 public sealed record CtuControllerRuntimeStatus(

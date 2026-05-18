@@ -104,3 +104,25 @@ config/ctu-controller-policy.json
 ```
 
 It keeps `team_send_message` queue-first, serializes Desktop wakeups, caps Desktop wakeup at 8 seconds, caps inline waits at 10 seconds, names threads before prime, and starts prime prompts with the exact agent id. Agent prime turns use the same short wakeup/defer policy as task dispatch so a stalled Desktop app-server call records `agent.prime_deferred` instead of blocking the controller for the wrapper response timeout. Short live-smoke or recovery flows may explicitly pass `prime=false setName=false` so AgentBus registration and dispatch can be tested without first depending on volatile Desktop rename or prime calls.
+
+## Self-Continuation Scheduler
+
+The normal carry-through path is a controller sweep over pending continuation records created from `self_continue` result outcomes. This is not an API-layer feature; it is controller workflow policy and must remain reloadable.
+
+The scheduler evaluates due continuations, checks whether the same agent already has open or claimed work for that chain, creates a normal AgentBus task when work is due, and dispatches through the standard serialized wakeup path.
+
+Continuation policy should cover:
+
+- sweep interval;
+- wakeup timeout cap;
+- retry/attempt caps;
+- dedupe key handling;
+- expiration and blocked-state handling.
+
+The controller must not create continuation work from `done`, `handed_off`, `human`, or `failed` outcomes.
+
+## Recovery Boundary
+
+The former global `ctu/projectlead` guardian heartbeat has been removed from controller policy and runtime code. Routine execution continuity must come from result outcomes plus same-agent continuations.
+
+Future recovery may inspect stale plans, missing outcomes, expired continuations, or stranded chains, but it must be explicit analysis that records durable AgentBus evidence and enqueues normal recovery tasks. It must not be a background heartbeat that silently substitutes for the owning agent's required `done`, `handed_off`, `self_continue`, `human`, or `failed` result outcome.
