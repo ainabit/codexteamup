@@ -1709,6 +1709,99 @@ public sealed class DefaultCtuController : ICtuController
             });
         });
 
+        registry.Register("ctu_bootstrap_info", (args, _) =>
+        {
+            var info = ReadBootstrapInfo(args, busRoot);
+            return Task.FromResult<object>(new
+            {
+                role = "ctu/bootstrap",
+                architectAgent = "ctu/architect",
+                infoPath = info.Path,
+                content = info.Content,
+                bootstrapPrompt = CtuBootstrapPrompt(),
+                architectStartupPrompt = CtuArchitectStartupPrompt()
+            });
+        });
+
+        registry.Register("ctu_project_init", (args, _) =>
+        {
+            var cwd = Path.GetFullPath(Optional(args, "cwd") ?? Environment.CurrentDirectory);
+            Directory.CreateDirectory(cwd);
+            var bus = OpenBus(args);
+            bus.Initialize();
+
+            var ctuDirectory = Directory.GetParent(bus.RootDirectory)?.FullName
+                ?? Path.Combine(cwd, ".codexteamup");
+            Directory.CreateDirectory(ctuDirectory);
+
+            var project = Optional(args, "project") ?? new DirectoryInfo(cwd).Name;
+            var projectJsonPath = Path.Combine(ctuDirectory, "project.json");
+            var overwrite = Bool(args, "force");
+            var projectJsonCreated = false;
+            if (overwrite || !File.Exists(projectJsonPath))
+            {
+                var document = new
+                {
+                    schema = "codexteamup.project.v1",
+                    project,
+                    cwd,
+                    createdAt = DateTimeOffset.Now,
+                    bootstrapAgent = "ctu/bootstrap",
+                    architectAgent = "ctu/architect",
+                    bootstrapInfoTool = "ctu_bootstrap_info",
+                    agentBusRoot = bus.RootDirectory
+                };
+                File.WriteAllText(projectJsonPath, JsonSerializer.Serialize(document, JsonFile.Options));
+                projectJsonCreated = true;
+            }
+
+            string? agentsPath = null;
+            var agentsFileCreated = false;
+            if (Bool(args, "writeAgentsFile"))
+            {
+                agentsPath = Path.Combine(cwd, "AGENTS.md");
+                if (overwrite || !File.Exists(agentsPath))
+                {
+                    File.WriteAllText(agentsPath, CtuMinimalAgentsFile());
+                    agentsFileCreated = true;
+                }
+            }
+
+            bus.RecordEvent(new AgentBusEvent
+            {
+                Timestamp = DateTimeOffset.Now,
+                Type = "project.initialized",
+                From = "ctu/bootstrap",
+                To = "ctu/architect",
+                Message = $"Initialized CTU project state for {project}.",
+                Payload = new
+                {
+                    project,
+                    cwd,
+                    busRoot = bus.RootDirectory,
+                    projectJsonPath,
+                    projectJsonCreated,
+                    agentsPath,
+                    agentsFileCreated
+                }
+            });
+
+            return Task.FromResult<object>(new
+            {
+                initialized = true,
+                project,
+                cwd,
+                busRoot = bus.RootDirectory,
+                projectJsonPath,
+                projectJsonCreated,
+                agentsPath,
+                agentsFileCreated,
+                bootstrapAgent = "ctu/bootstrap",
+                architectAgent = "ctu/architect",
+                nextPrompt = CtuArchitectStartupPrompt()
+            });
+        });
+
         registry.Register("codex_thread_list", async (args, ct) =>
         {
             var result = await appServer.ListThreadsAsync(Optional(args, "cwd"), Int(args, "limit", 30), ct).ConfigureAwait(false);
@@ -3781,6 +3874,131 @@ public sealed class DefaultCtuController : ICtuController
         string? TurnId,
         long NotifyLatencyMs,
         long WaitedMs);
+
+    private static (string? Path, string Content) ReadBootstrapInfo(JsonElement args, string defaultBusRoot)
+    {
+        foreach (var candidate in BootstrapInfoCandidates(args, defaultBusRoot))
+        {
+            if (File.Exists(candidate))
+            {
+                return (candidate, File.ReadAllText(candidate));
+            }
+        }
+
+        return (null, EmbeddedBootstrapInfo());
+    }
+
+    private static IEnumerable<string> BootstrapInfoCandidates(JsonElement args, string defaultBusRoot)
+    {
+        foreach (var explicitPath in new[]
+        {
+            Optional(args, "bootstrapInfoPath"),
+            Optional(args, "path"),
+            Environment.GetEnvironmentVariable("CTU_BOOTSTRAP_INFO_PATH")
+        })
+        {
+            if (!string.IsNullOrWhiteSpace(explicitPath))
+            {
+                yield return Path.GetFullPath(explicitPath);
+            }
+        }
+
+        var repoRoot = Environment.GetEnvironmentVariable("CTU_REPO_ROOT");
+        if (!string.IsNullOrWhiteSpace(repoRoot))
+        {
+            yield return Path.Combine(repoRoot, "docs", "operations", "ctu-bootstrap.md");
+        }
+
+        foreach (var root in CandidateRootsFrom(defaultBusRoot))
+        {
+            yield return Path.Combine(root, "docs", "operations", "ctu-bootstrap.md");
+        }
+    }
+
+    private static IEnumerable<string> CandidateRootsFrom(string path)
+    {
+        var directory = Directory.Exists(path)
+            ? new DirectoryInfo(Path.GetFullPath(path))
+            : new FileInfo(Path.GetFullPath(path)).Directory;
+
+        while (directory is not null)
+        {
+            yield return directory.FullName;
+            directory = directory.Parent;
+        }
+    }
+
+    private static string CtuBootstrapPrompt()
+    {
+        return """
+        Du bist ctu/bootstrap.
+
+        Initialisiere dieses Projekt fuer CodexTeamUp:
+        1. Rufe ctu_bootstrap_info auf.
+        2. Rufe ctu_project_init mit dem Projekt-cwd auf.
+        3. Sage dem User, dass er ctu/architect oeffnen soll.
+        4. Gib den architect startup prompt aus ctu_bootstrap_info weiter.
+
+        Lege noch kein grosses Team an, ausser der User fordert es ausdruecklich an.
+        """;
+    }
+
+    private static string CtuArchitectStartupPrompt()
+    {
+        return """
+        Du bist ctu/architect fuer dieses Projekt.
+
+        Lies zuerst AGENTS.md, README.md und die offensichtlich relevanten Projektdateien.
+        Falls CTU-Projektinitialisierung vorhanden ist, lies .codexteamup/project.json.
+
+        Analysiere kurz:
+        - worum es in diesem Projekt geht,
+        - welche Architektur/Technologien du erkennst,
+        - welche Risiken oder Unklarheiten du siehst,
+        - welches kleine CTU-Team sinnvoll waere.
+
+        Schlage mir danach das Team vor, bevor du Agenten anlegst.
+        Wenn ich zustimme, verwende CodexTeamUp MCP:
+        - team_ensure_agents fuer sichtbare Agenten,
+        - team_send_message queue-first fuer Aufgaben,
+        - bridge_dispatch_task fuer sichtbares Aufwecken,
+        - agentbus_wait_result in kurzen Polling-Schritten.
+
+        Halte das Team klein. Implementierung delegierst du normalerweise an dedizierte ctu/* Developer-Agenten.
+        Jeder Agent soll am Ende done, handed_off, self_continue, human oder failed als Ergebnislogik verwenden.
+        """;
+    }
+
+    private static string CtuMinimalAgentsFile()
+    {
+        return """
+        # Project Agent Instructions
+
+        This project uses CodexTeamUp.
+
+        Start with a visible `ctu/bootstrap` chat for project initialization or `ctu/architect` for normal project work.
+        Use the CTU MCP tool `ctu_bootstrap_info` for current bootstrap instructions.
+        Keep visible notes short, use AgentBus for durable tasks/results, and keep the active team small.
+        """;
+    }
+
+    private static string EmbeddedBootstrapInfo()
+    {
+        return """
+        # CTU Project Bootstrap
+
+        Use a visible `ctu/bootstrap` chat as a short-lived initializer.
+
+        Flow:
+        1. Call `ctu_project_init` with the project working directory.
+        2. Confirm `.codexteamup/agentbus` and `.codexteamup/project.json`.
+        3. Tell the user to open `ctu/architect`.
+        4. Pass the returned architect startup prompt to the user.
+
+        `ctu/bootstrap` should not create the full team unless the user explicitly asks.
+        The actual project team belongs to `ctu/architect` and the project material.
+        """;
+    }
 
     private static string Required(JsonElement args, string name)
     {

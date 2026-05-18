@@ -4,6 +4,17 @@ All notable CodexTeamUp changes are tracked here by date. The project does not u
 
 ## 2026-05-18
 
+### Project Bootstrap MCP
+
+- Added `ctu_bootstrap_info` so a new project can ask CTU itself for the current bootstrap instructions instead of relying on a pasted bundle of files.
+- Added `ctu_project_init` to create the minimal project-local CTU state: `.codexteamup/agentbus` and `.codexteamup/project.json`.
+- Added `docs/operations/ctu-bootstrap.md` as the CTU-maintained bootstrap text returned by the info path when available.
+- Registered the new tools in the Codex MCP startup config and documented the `ctu/bootstrap` flow.
+
+Why this exists:
+
+New projects should not need a copied startup zip or a pile of hand-maintained role files before CTU can help. The user can start a short-lived `ctu/bootstrap` chat, let it fetch current CTU instructions through MCP, initialize the project state, and then hand off the real project analysis to `ctu/architect`.
+
 ### Live Coordination Safety Net
 
 - Added live Codex Desktop coverage for queue-first UX, delayed agent-owned continuations, negative dispatch/error paths, and stale claimed-task recovery.

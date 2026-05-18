@@ -48,6 +48,8 @@ The server supports:
 - `agentbus_claim_task`
 - `agentbus_write_result`
 - `agentbus_wait_result`
+- `ctu_bootstrap_info`
+- `ctu_project_init`
 - `codex_thread_list`
 - `codex_thread_read`
 - `codex_thread_archive`
@@ -68,9 +70,12 @@ The server supports:
 
 ## Intended Use
 
+- Bootstrap thread: create a visible `ctu/bootstrap` chat in a new project, call `ctu_bootstrap_info`, then call `ctu_project_init` to create the minimal `.codexteamup` state and hand the returned startup prompt to `ctu/architect`.
 - Architect thread: decide the explicit `ctu/*` team, call `team_ensure_agents`, create tasks, dispatch work, and review results
 - Worker thread: claim a task, do the work, write a result, and notify the return thread
 - Reviewer thread: inspect results and create follow-up tasks
+
+`ctu_bootstrap_info` returns the central CTU-maintained bootstrap instructions. `ctu_project_init` creates only the minimal project-local state by default: `.codexteamup/agentbus` and `.codexteamup/project.json`. It does not decide the project team and does not overwrite `AGENTS.md` unless explicitly asked with `writeAgentsFile=true`.
 
 Use `team_send_message` for asynchronous delegation. By default it only creates the durable AgentBus task and returns an accepted/enqueued response. Wake the target thread separately with `bridge_dispatch_task`. The worker later writes a result and calls `bridge_notify_result`.
 

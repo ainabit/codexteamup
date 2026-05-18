@@ -4,6 +4,8 @@ Reverse chronological notes about the build journey, notable failures, redesigns
 
 ## 2026-05-18
 
+- New-project bootstrap was simplified into a `ctu/bootstrap` model instead of a copied starter zip. The bootstrap chat can ask CTU MCP for central startup instructions, create minimal `.codexteamup` state, and then hand the project to `ctu/architect`.
+- The bootstrap info is now CTU-owned documentation under `docs/operations/ctu-bootstrap.md`, with MCP tools planned/implemented around `ctu_bootstrap_info` and `ctu_project_init` so future updates stay central.
 - The live safety net was expanded after the remaining CTU feature gaps became explicit: queue-first UX, real delayed self-continuation, live error paths, and stale claimed-task recovery now have dedicated live smoke scenarios.
 - The first delayed-continuation live test exposed that controller background sweeps were only processing the default repo bus. The controller now tracks bus roots touched through MCP and sweeps those roots too, so `codexteamup.test` work is not starved behind the development repo's AgentBus.
 - A deterministic regression caught that generic delivery must not outrun continuity action-state processing. The startup sweep order now preserves guardian/continuity dispatch semantics before normal queued-task delivery.

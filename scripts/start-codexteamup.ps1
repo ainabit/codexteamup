@@ -460,6 +460,12 @@ approval_mode = "approve"
 [mcp_servers.ctu.tools.agentbus_wait_result]
 approval_mode = "approve"
 
+[mcp_servers.ctu.tools.ctu_bootstrap_info]
+approval_mode = "approve"
+
+[mcp_servers.ctu.tools.ctu_project_init]
+approval_mode = "approve"
+
 [mcp_servers.ctu.tools.bridge_dispatch_task]
 approval_mode = "approve"
 
