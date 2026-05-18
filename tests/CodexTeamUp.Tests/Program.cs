@@ -112,6 +112,7 @@ var tests = new (string Name, Func<Task> Body)[]
     ("Startup script records CTU session manifest", () => Task.Run(StartupScriptRecordsCtuSessionManifest)),
     ("Restart supervisor replaces manifest session and keeps target startup transient", () => Task.Run(RestartSupervisorUsesSessionManifestAndTransientTargetStartup)),
     ("Restart helper supervisor console is transient", () => Task.Run(RestartHelperSupervisorConsoleIsTransient)),
+    ("Service-only startup does not target desktop session processes", () => Task.Run(ServiceOnlyStartupDoesNotTargetDesktopSessionProcesses)),
     ("Exchange restart handoff supports lease and completion flow", () => Task.Run(ExchangeHandoffLeaseAndCompletionFlow)),
     ("Exchange restart handoff accepts PowerShell casing", () => Task.Run(ExchangeHandoffAcceptsPowerShellCasing)),
     ("Exchange startup sweep isolates malformed envelopes", () => Task.Run(ExchangeStartupSweepIsolatesMalformedEnvelope)),
@@ -2426,6 +2427,15 @@ static void RestartHelperSupervisorConsoleIsTransient()
     True(!text.Contains("var command = $\"-NoExit -ExecutionPolicy Bypass -File", StringComparison.Ordinal));
 }
 
+static void ServiceOnlyStartupDoesNotTargetDesktopSessionProcesses()
+{
+    var text = File.ReadAllText(Path.Combine(TestRepoRoot(), "scripts", "start-codexteamup.ps1"));
+
+    True(text.Contains("Enabled = (-not $NoService -or $RestartService)", StringComparison.Ordinal));
+    True(text.Contains("Enabled = (-not $NoLaunch -and -not $AllowExistingDesktop)", StringComparison.Ordinal));
+    True(text.Contains("if (-not $NoLaunch -and -not $AllowExistingDesktop) {", StringComparison.Ordinal));
+}
+
 static void RestartOperationLifecycleAndPersistence()
 {
     var root = NewTestDirectory();
@@ -2736,6 +2746,7 @@ static void ExchangeHandoffAcceptsPowerShellCasing()
     var exchange = new ExchangeStore(targetBusRoot);
     exchange.Initialize();
 
+    var expiresAt = DateTimeOffset.UtcNow.AddHours(1).ToString("O");
     var startupDirectory = Path.Combine(
         Path.GetDirectoryName(targetBusRoot)!,
         "exchange",
@@ -2744,7 +2755,7 @@ static void ExchangeHandoffAcceptsPowerShellCasing()
         ExchangeEnvelopeKind.Restart);
     Directory.CreateDirectory(startupDirectory);
     var messagePath = Path.Combine(startupDirectory, "restart-handoff-pwsh.json");
-    File.WriteAllText(messagePath, """
+    File.WriteAllText(messagePath, $$"""
         {
           "MessageId": "restart-handoff-pwsh",
           "Kind": "restart",
@@ -2755,7 +2766,7 @@ static void ExchangeHandoffAcceptsPowerShellCasing()
           "CorrelationId": "restart-test",
           "CausationId": "restart-test",
           "CreatedAt": "2026-05-18T12:00:00+00:00",
-          "ExpiresAt": "2026-05-18T16:00:00+00:00",
+          "ExpiresAt": "{{expiresAt}}",
           "PayloadType": "application/json",
           "Payload": {
             "operationId": "restart-test",

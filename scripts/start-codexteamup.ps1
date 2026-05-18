@@ -248,20 +248,26 @@ function Add-CtuSessionProcessCandidates {
     }
 
     foreach ($entry in @(
-        @{ Name = "servicePid"; Expected = @("CodexTeamUp.Service"); Reason = "Previous CTU session service must be replaced." },
-        @{ Name = "desktopPid"; Expected = @("Codex", "codex"); Reason = "Previous CTU session desktop must be replaced." },
-        @{ Name = "launcherPid"; Expected = @("pwsh", "powershell"); Reason = "Previous CTU startup console must be closed." }
+        @{ Name = "servicePid"; Expected = @("CodexTeamUp.Service"); Reason = "Previous CTU session service must be replaced."; Enabled = (-not $NoService -or $RestartService) },
+        @{ Name = "desktopPid"; Expected = @("Codex", "codex"); Reason = "Previous CTU session desktop must be replaced."; Enabled = (-not $NoLaunch -and -not $AllowExistingDesktop) },
+        @{ Name = "launcherPid"; Expected = @("pwsh", "powershell"); Reason = "Previous CTU startup console must be closed."; Enabled = (-not $NoLaunch -and -not $AllowExistingDesktop) }
     )) {
+        if (-not $entry.Enabled) {
+            continue
+        }
+
         $value = Get-SessionPropertyValue -Session $session -Name $entry.Name
         if ($null -ne $value) {
             Add-SessionPidCandidate -Candidates $Candidates -ProcessId ([int]$value) -ExpectedProcessNames $entry.Expected -Reason $entry.Reason -ProcessMetadata $ProcessMetadata -PreservePid $PreservePid
         }
     }
 
-    $wrapperPids = Get-SessionPropertyValue -Session $session -Name "wrapperPids"
-    if ($null -ne $wrapperPids) {
-        foreach ($wrapperPid in @($wrapperPids)) {
-            Add-SessionPidCandidate -Candidates $Candidates -ProcessId ([int]$wrapperPid) -ExpectedProcessNames @("CodexTeamUp.CodexWrapper") -Reason "Previous CTU session wrapper must be replaced." -ProcessMetadata $ProcessMetadata -PreservePid $PreservePid
+    if (-not $NoLaunch -and -not $AllowExistingDesktop) {
+        $wrapperPids = Get-SessionPropertyValue -Session $session -Name "wrapperPids"
+        if ($null -ne $wrapperPids) {
+            foreach ($wrapperPid in @($wrapperPids)) {
+                Add-SessionPidCandidate -Candidates $Candidates -ProcessId ([int]$wrapperPid) -ExpectedProcessNames @("CodexTeamUp.CodexWrapper") -Reason "Previous CTU session wrapper must be replaced." -ProcessMetadata $ProcessMetadata -PreservePid $PreservePid
+            }
         }
     }
 }
