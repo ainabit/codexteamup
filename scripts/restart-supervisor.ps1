@@ -324,7 +324,13 @@ function Set-ObjectPropertyValue([Parameter(Mandatory=$true)] $object, [Paramete
     $property.Value = $Value
 }
 
-function Write-Operation([Parameter(Mandatory=$true)] $operation, [string]$Status, [string]$HelperPid = $null, [string]$ContinuationTaskId = $null, [string]$LastError = $null)
+function Write-Operation(
+    [Parameter(Mandatory=$true)] $operation,
+    [string]$Status,
+    [string]$HelperPid = $null,
+    [string]$ContinuationTaskId = $null,
+    [string]$StartupHandoffMessageId = $null,
+    [string]$LastError = $null)
 {
     $currentStatusValue = Get-ObjectPropertyValue $operation "Status"
     $currentStatus = if ($currentStatusValue) { $currentStatusValue.ToLowerInvariant() } else { "" }
@@ -346,6 +352,11 @@ function Write-Operation([Parameter(Mandatory=$true)] $operation, [string]$Statu
     if (-not [string]::IsNullOrWhiteSpace($ContinuationTaskId))
     {
         Set-ObjectPropertyValue $operation "ContinuationTaskId" $ContinuationTaskId
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($StartupHandoffMessageId))
+    {
+        Set-ObjectPropertyValue $operation "StartupHandoffMessageId" $StartupHandoffMessageId
     }
 
     if ($null -ne $LastError)
@@ -501,12 +512,18 @@ function Stop-SourceStartupConsoles([string]$sourceCwd, [int]$preservePid)
     }
 }
 
-function Update-Phases([string]$status, [string]$phase, [string]$helperPid = $null, [string]$continuationTaskId = $null, [string]$error = $null)
+function Update-Phases(
+    [string]$status,
+    [string]$phase,
+    [string]$helperPid = $null,
+    [string]$continuationTaskId = $null,
+    [string]$startupHandoffMessageId = $null,
+    [string]$error = $null)
 {
-    script:Operation = Write-Operation -Operation $script:Operation -Status $status -HelperPid $helperPid -ContinuationTaskId $continuationTaskId -LastError $phase
+    script:Operation = Write-Operation -Operation $script:Operation -Status $status -HelperPid $helperPid -ContinuationTaskId $continuationTaskId -StartupHandoffMessageId $startupHandoffMessageId -LastError $phase
     if ($error -ne $null)
     {
-        $script:Operation = Write-Operation -Operation $script:Operation -Status $status -HelperPid $helperPid -ContinuationTaskId $continuationTaskId -LastError $error
+        $script:Operation = Write-Operation -Operation $script:Operation -Status $status -HelperPid $helperPid -ContinuationTaskId $continuationTaskId -StartupHandoffMessageId $startupHandoffMessageId -LastError $error
     }
 }
 
@@ -544,14 +561,14 @@ try
     $handoff = New-RestartHandoff -operation $script:Operation
     $handoffId = $handoff.MessageId
     Write-Phase "handoff_written id=$handoffId path=$($handoff.MessagePath)"
-    $script:Operation = Write-Operation -Operation $script:Operation -Status "continuation_enqueued" -ContinuationTaskId $handoffId -LastError "phase=continuation_handoff_written id=$handoffId"
+    $script:Operation = Write-Operation -Operation $script:Operation -Status "continuation_enqueued" -StartupHandoffMessageId $handoffId -LastError "phase=continuation_handoff_written id=$handoffId"
 
     $handoffStatus = Wait-ForRestartProgress -operationPath $script:OperationPath -TimeoutSeconds 60
     if ($handoffStatus -eq "continuation_dispatched")
     {
         Write-Phase "continuation_dispatched"
-        $script:Operation = Write-Operation -Operation $script:Operation -Status "continuation_dispatched" -ContinuationTaskId $handoffId -LastError "phase=continuation_dispatched"
-        $script:Operation = Write-Operation -Operation $script:Operation -Status "completed" -ContinuationTaskId $handoffId -LastError "phase=completed"
+        $script:Operation = Write-Operation -Operation $script:Operation -Status "continuation_dispatched" -StartupHandoffMessageId $handoffId -LastError "phase=continuation_dispatched"
+        $script:Operation = Write-Operation -Operation $script:Operation -Status "completed" -StartupHandoffMessageId $handoffId -LastError "phase=completed"
         Write-Phase "completed"
         exit 0
     }
@@ -559,7 +576,7 @@ try
     if ($handoffStatus -eq "completed")
     {
         Write-Phase "completed"
-        $script:Operation = Write-Operation -Operation $script:Operation -Status "completed" -ContinuationTaskId $handoffId -LastError "phase=completed"
+        $script:Operation = Write-Operation -Operation $script:Operation -Status "completed" -StartupHandoffMessageId $handoffId -LastError "phase=completed"
         exit 0
     }
 

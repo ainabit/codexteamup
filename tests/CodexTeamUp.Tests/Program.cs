@@ -99,6 +99,7 @@ var tests = new (string Name, Func<Task> Body)[]
     ("Restart orchestration record lifecycle", () => Task.Run(RestartOperationLifecycleAndPersistence)),
     ("Restart orchestration validation rejects missing target", () => Task.Run(RestartOperationRejectsInvalidTargetCwd)),
     ("Restart operation status updates are idempotent", () => Task.Run(RestartOperationStatusUpdateIsIdempotent)),
+    ("Restart operation preserves imported continuation task id", () => Task.Run(RestartOperationPreservesImportedContinuationTaskId)),
     ("Restart operation records checkpoint id", () => Task.Run(RestartOperationPersistsStartupHandoffAndKnownGood)),
     ("Exchange restart handoff supports lease and completion flow", () => Task.Run(ExchangeHandoffLeaseAndCompletionFlow)),
     ("Known-good checkpoint store records runtime", () => Task.Run(KnownGoodRuntimeCheckpointStoreRecordsRuntime)),
@@ -2256,6 +2257,52 @@ static void RestartOperationStatusUpdateIsIdempotent()
     Equal(RestartOperationStatus.Completed, completedViaTerminal.Status);
     var terminalReplay = store.UpdateStatus(completed.Id, RestartOperationStatus.Completed);
     Equal(completedViaTerminal.CompletedAt, terminalReplay.CompletedAt);
+}
+
+static void RestartOperationPreservesImportedContinuationTaskId()
+{
+    var root = NewTestDirectory();
+    var sourceCwd = Path.Combine(root, "source");
+    var targetCwd = Path.Combine(root, "target");
+    SeedRestartCheckout(sourceCwd);
+    SeedRestartCheckout(targetCwd);
+    var store = new RestartOperationStore(Path.Combine(sourceCwd, ".codexteamup", "agentbus"));
+
+    var operation = store.Create(
+        "ctu/architect",
+        sourceCwd,
+        Path.Combine(sourceCwd, ".codexteamup", "agentbus"),
+        targetCwd,
+        Path.Combine(targetCwd, ".codexteamup", "agentbus"),
+        "ctu/architect",
+        null,
+        null,
+        "Continue after restart",
+        "Continue with imported task.",
+        null);
+
+    operation = store.UpdateStatus(
+        operation,
+        RestartOperationStatus.ContinuationEnqueued,
+        startupHandoffMessageId: "restart-handoff-1");
+    Equal("restart-handoff-1", operation.StartupHandoffMessageId);
+    Equal(null, operation.ContinuationTaskId);
+
+    operation = store.UpdateStatus(
+        operation,
+        RestartOperationStatus.ContinuationDispatched,
+        continuationTaskId: "task-actual-1",
+        startupHandoffMessageId: "restart-handoff-1");
+    Equal("task-actual-1", operation.ContinuationTaskId);
+    Equal("restart-handoff-1", operation.StartupHandoffMessageId);
+
+    operation = store.UpdateStatus(
+        operation,
+        RestartOperationStatus.Completed,
+        startupHandoffMessageId: "restart-handoff-1",
+        lastError: "phase=completed");
+    Equal("task-actual-1", operation.ContinuationTaskId);
+    Equal("restart-handoff-1", operation.StartupHandoffMessageId);
 }
 
 static void RestartOperationPersistsStartupHandoffAndKnownGood()

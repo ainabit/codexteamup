@@ -263,7 +263,7 @@ For restart specifically, use the exchange channel itself as the durable message
 .codexteamup/exchange/startup/system/restart/<message-id>.json
 ```
 
-That file is the restart continuation contract. When CTU starts and the controller runtime is up, the first startup sweep should read pending `system/restart` envelopes, lease them, validate the linked restart operation, and only then perform the internal dispatch into AgentBus or the controller's system action flow.
+That file is the restart continuation contract. When CTU starts and the controller runtime is up, the startup-sweep loop should read pending `system/restart` envelopes from this priority lane, lease them, validate the linked restart operation, and only then perform the internal dispatch into AgentBus or the controller's system action flow.
 
 The wakeup message, if used at all, should point to the exact task file, handoff id, and operation id so the target thread can continue deterministically instead of inferring intent from historic chat state.
 
@@ -314,7 +314,7 @@ That loop should:
 
 1. scan startup handoffs under `.codexteamup/exchange/startup/**` and runtime ingress under `.codexteamup/exchange/inbox/**`,
 2. lease pending envelopes,
-3. import startup handoffs and external requests, with `system/restart` processed first during startup,
+3. import startup handoffs and external requests, with `system/restart` processed first from the startup lane,
 4. translate them into AgentBus tasks or restart/system actions,
 5. emit outbox or dead-letter evidence,
 6. reconcile correlations and retry metadata,
