@@ -53,6 +53,9 @@ var tests = new (string Name, Func<Task> Body)[]
     ("MCP registry preserves existing thread binding on re-register", () => Task.Run(McpRegistryPreservesExistingThreadBindingOnReregister)),
     ("MCP registry accepts chatName as agent display name", () => Task.Run(McpRegistryAcceptsChatNameAsAgentDisplayName)),
     ("MCP registry writes result file metadata", () => Task.Run(McpRegistryWritesResultFileMetadata)),
+    ("AgentBus terminal outcome ignores continuation request", () => Task.Run(AgentBusTerminalOutcomeIgnoresContinuationRequest)),
+    ("Controller continuation follow-up inherits dedupe key", () => Task.Run(ControllerContinuationFollowUpInheritsDedupeKey)),
+    ("Controller continuation follow-up rejects loop beyond prompt limit", () => Task.Run(ControllerContinuationFollowUpRejectsLoopBeyondPromptLimit)),
     ("MCP registry ensures explicit ctu agents", () => Task.Run(McpRegistryEnsuresExplicitCtuAgents)),
     ("MCP registry primes agents without fallback tasks", () => Task.Run(McpRegistryPrimesAgentsWithoutFallbackTasks)),
     ("MCP registry ACKs deferred agent ensure", () => Task.Run(McpRegistryAcksDeferredAgentEnsure)),
@@ -1125,6 +1128,209 @@ static void McpRegistryWritesResultFileMetadata()
     Equal("sample-page-polish", continuation.DedupeKey);
     Equal("open", continuation.Status);
     Equal(3, continuation.MaxAttempts);
+}
+
+static void AgentBusTerminalOutcomeIgnoresContinuationRequest()
+{
+    var root = NewTestDirectory();
+    var busRoot = Path.Combine(root, ".codexteamup", "agentbus");
+    var bus = new AgentBusStore(busRoot);
+    bus.Initialize();
+    var task = bus.CreateTask(
+        "ctu/architect",
+        "ctu/worker",
+        "Terminal outcome check",
+        "Return explicit terminal outcome.",
+        "codexteamup",
+        root,
+        [],
+        "ctu/architect");
+    bus.ClaimTask(task.Id, "ctu/worker");
+    var registry = McpToolRegistry.CreateDefault(busRoot, new FakeAppServerClient("""{"data":[]}"""));
+    var args = JsonSerializer.Deserialize<JsonElement>($$"""
+    {
+      "taskId": {{JsonSerializer.Serialize(task.Id)}},
+      "summary": "No continuation needed.",
+      "status": "completed",
+      "from": "ctu/worker",
+      "to": "ctu/architect",
+      "outcome": "done",
+      "continuationOwner": "ctu/worker",
+      "continuationDedupeKey": "should-not-persist",
+      "continuationReason": "Explicit done outcome should cancel continuation."
+    }
+    """);
+    var resultObject = registry.InvokeAsync("agentbus_write_result", args).GetAwaiter().GetResult();
+    var result = (AgentBusResult?)resultObject.GetType().GetProperty("result")?.GetValue(resultObject);
+    Equal("done", result?.Outcome);
+    True(result?.Continuation is null);
+    Equal(0, bus.ListContinuations(status: "open").Count);
+}
+
+static void ControllerContinuationFollowUpInheritsDedupeKey()
+{
+    var root = NewTestDirectory();
+    var busRoot = Path.Combine(root, ".codexteamup", "agentbus");
+    var bus = new AgentBusStore(busRoot);
+    bus.Initialize();
+    bus.RegisterAgent(new AgentDefinition
+    {
+        Id = "ctu/designer",
+        Role = "Designer",
+        DisplayName = "ctu/designer",
+        ThreadId = "thread-designer",
+        Cwd = root,
+        ReturnTo = "ctu/architect",
+        Status = "active"
+    });
+
+    var task = bus.CreateTask(
+        "ctu/architect",
+        "ctu/designer",
+        "Design slice",
+        "Continue until self-reported done.",
+        "codexteamup",
+        root,
+        [],
+        "ctu/architect");
+    bus.ClaimTask(task.Id, "ctu/designer");
+
+    var firstResult = bus.WriteResult(
+        task.Id,
+        "Need one more pass after local cooldown.",
+        "completed",
+        "ctu/designer",
+        "ctu/architect",
+        null,
+        [],
+        [],
+        outcome: "self_continue",
+        continuation: new AgentBusContinuationRequest
+        {
+            Owner = "ctu/designer",
+            WakeAfterSeconds = 0,
+            MaxAttempts = 2,
+            DedupeKey = "design-review",
+            Reason = "Continue the design review loop."
+        });
+    Equal("self_continue", firstResult.Outcome);
+
+    var firstContinuation = bus.ListContinuations("ctu/designer", "open").Single();
+    Equal("design-review", firstContinuation.DedupeKey);
+
+    var appServer = new ScriptedSendTurnAppServerClient(
+        "thread-designer",
+        "ctu/designer",
+        root);
+    var controller = new DefaultCtuController(busRoot, appServer);
+    controller.RunStartupSweepAsync().GetAwaiter().GetResult();
+
+    var followUpTask = bus.ListTasks("ctu/designer", "open")
+        .Single(t => string.Equals(t.Title, $"Self-continuation: ctu/designer", StringComparison.Ordinal));
+    True(followUpTask.Prompt.Contains("Continuation dedupe key:", StringComparison.Ordinal));
+    True(followUpTask.Prompt.Contains("design-review", StringComparison.Ordinal));
+    True(followUpTask.Prompt.Contains("1 of 2", StringComparison.Ordinal));
+
+    bus.ClaimTask(followUpTask.Id, "ctu/designer");
+    var registry = McpToolRegistry.CreateDefault(busRoot, appServer);
+    var secondArgs = JsonSerializer.Deserialize<JsonElement>($$"""
+    {
+      "taskId": {{JsonSerializer.Serialize(followUpTask.Id)}},
+      "summary": "Need another follow-up pass.",
+      "status": "completed",
+      "from": "ctu/designer",
+      "to": "ctu/architect",
+      "outcome": "self_continue",
+      "continuationOwner": "ctu/designer",
+      "continuationWakeAfterSeconds": 0,
+      "continuationReason": "Continue the design review loop."
+    }
+    """);
+    var secondResultObject = registry.InvokeAsync("agentbus_write_result", secondArgs).GetAwaiter().GetResult();
+    var secondResult = (AgentBusResult?)secondResultObject.GetType().GetProperty("result")?.GetValue(secondResultObject);
+    Equal("self_continue", secondResult?.Outcome);
+    var secondContinuation = bus.ListContinuations("ctu/designer", "open").Single();
+    Equal(firstContinuation.DedupeKey, secondContinuation.DedupeKey);
+    Equal(2, secondContinuation.MaxAttempts);
+}
+
+static void ControllerContinuationFollowUpRejectsLoopBeyondPromptLimit()
+{
+    var root = NewTestDirectory();
+    var busRoot = Path.Combine(root, ".codexteamup", "agentbus");
+    var bus = new AgentBusStore(busRoot);
+    bus.Initialize();
+    bus.RegisterAgent(new AgentDefinition
+    {
+        Id = "ctu/designer",
+        Role = "Designer",
+        DisplayName = "ctu/designer",
+        ThreadId = "thread-designer",
+        Cwd = root,
+        ReturnTo = "ctu/architect",
+        Status = "active"
+    });
+
+    var appServer = new ScriptedSendTurnAppServerClient(
+        "thread-designer",
+        "ctu/designer",
+        root);
+    var controller = new DefaultCtuController(busRoot, appServer);
+
+    var task = bus.CreateTask(
+        "ctu/architect",
+        "ctu/designer",
+        "Design slice",
+        "Continue until self-reported done.",
+        "codexteamup",
+        root,
+        [],
+        "ctu/architect");
+    bus.ClaimTask(task.Id, "ctu/designer");
+
+    bus.WriteResult(
+        task.Id,
+        "Need one more pass after local cooldown.",
+        "completed",
+        "ctu/designer",
+        "ctu/architect",
+        null,
+        [],
+        [],
+        outcome: "self_continue",
+        continuation: new AgentBusContinuationRequest
+        {
+            Owner = "ctu/designer",
+            WakeAfterSeconds = 0,
+            MaxAttempts = 1,
+            DedupeKey = "design-review",
+            Reason = "Continue the design review loop."
+        });
+
+    controller.RunStartupSweepAsync().GetAwaiter().GetResult();
+    var followUpTask = bus.ListTasks("ctu/designer", "open")
+        .Single(t => string.Equals(t.Title, $"Self-continuation: ctu/designer", StringComparison.Ordinal));
+    True(followUpTask.Prompt.Contains("1 of 1", StringComparison.Ordinal));
+    bus.ClaimTask(followUpTask.Id, "ctu/designer");
+    var registry = McpToolRegistry.CreateDefault(busRoot, appServer);
+    var rejectedArgs = JsonSerializer.Deserialize<JsonElement>($$"""
+    {
+      "taskId": {{JsonSerializer.Serialize(followUpTask.Id)}},
+      "summary": "This would loop forever without a guard.",
+      "status": "completed",
+      "from": "ctu/designer",
+      "to": "ctu/architect",
+      "outcome": "self_continue",
+      "continuationOwner": "ctu/designer",
+      "continuationWakeAfterSeconds": 0,
+      "continuationReason": "Continue the design review loop."
+    }
+    """);
+    var rejectedResultObject = registry.InvokeAsync("agentbus_write_result", rejectedArgs).GetAwaiter().GetResult();
+    var rejectedResult = (AgentBusResult?)rejectedResultObject.GetType().GetProperty("result")?.GetValue(rejectedResultObject);
+    Equal("failed", rejectedResult?.Outcome);
+    Equal(0, bus.ListContinuations("ctu/designer", "open").Count);
+    Equal(0, bus.ListContinuations("ctu/designer", "failed").Count);
 }
 
 static void McpRegistryEnsuresExplicitCtuAgents()

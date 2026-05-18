@@ -1334,16 +1334,76 @@ public sealed class DefaultCtuController : ICtuController
         Previous result:
         {continuation.ResultId}
 
+        Continuation dedupe key:
+        {continuation.DedupeKey ?? continuation.TaskId}
+
+        Continuation wake attempt:
+        {Math.Max(continuation.Attempts + 1, 1)} of {continuation.MaxAttempts}
+
         Reason:
         {continuation.Reason ?? "The previous result requested that this agent continue later."}
 
         Claim this task and continue the same work chain. When you stop, write exactly one result with an explicit outcome:
-        - done: you are finished and no wakeup is needed.
-        - handed_off: you delegated to another agent and no self-wakeup is needed.
+        - done: you are finished and no wakeup is needed. Do not include continuation metadata.
+        - handed_off: you delegated to another agent and no self-wakeup is needed. Do not include continuation metadata.
         - self_continue: you still need to continue later; include continuation owner, reason, dedupe key, wake delay, and max attempts.
         - human: you need a human decision.
         - failed: a technical blocker prevents progress.
+        Repeating self_continue after the work is already complete is a bug; use done instead.
         """;
+    }
+
+    private sealed record ContinuationPromptState(
+        string DedupeKey,
+        int CurrentHop,
+        int MaxAttempts);
+
+    private static ContinuationPromptState? TryParseContinuationPromptState(AgentBusTask task)
+    {
+        if (!task.Title.StartsWith("Self-continuation:", StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        var dedupeKey = PromptValue(task.Prompt, "Continuation dedupe key:");
+        var wakeAttempt = PromptValue(task.Prompt, "Continuation wake attempt:");
+        if (string.IsNullOrWhiteSpace(dedupeKey) || string.IsNullOrWhiteSpace(wakeAttempt))
+        {
+            return null;
+        }
+
+        var parts = wakeAttempt.Split("of", StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length != 2
+            || !int.TryParse(parts[0], out var currentHop)
+            || !int.TryParse(parts[1], out var maxAttempts))
+        {
+            return null;
+        }
+
+        return new ContinuationPromptState(dedupeKey.Trim(), Math.Max(currentHop, 1), Math.Max(maxAttempts, 1));
+    }
+
+    private static string? PromptValue(string prompt, string label)
+    {
+        var lines = prompt.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n');
+        for (var i = 0; i < lines.Length; i++)
+        {
+            if (!string.Equals(lines[i].Trim(), label, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            for (var j = i + 1; j < lines.Length; j++)
+            {
+                var candidate = lines[j].Trim();
+                if (!string.IsNullOrWhiteSpace(candidate))
+                {
+                    return candidate;
+                }
+            }
+        }
+
+        return null;
     }
 
     private static bool HasOpenOrClaimedTaskFor(AgentBusStore bus, string agentId)
@@ -1462,8 +1522,20 @@ public sealed class DefaultCtuController : ICtuController
         registry.Register("agentbus_write_result", (args, _) =>
         {
             var bus = Bus(args, busRoot);
+            var taskId = Required(args, "taskId");
+            var task = bus.FindTask(taskId) ?? throw new FileNotFoundException("Task not found.");
+            var continuationContext = TryParseContinuationPromptState(task);
+            var outcome = Optional(args, "outcome");
+            var continuation = ContinuationRequest(args, continuationContext);
+            if (continuationContext is not null
+                && string.Equals(outcome, "self_continue", StringComparison.OrdinalIgnoreCase)
+                && continuationContext.CurrentHop >= continuationContext.MaxAttempts)
+            {
+                outcome = "failed";
+                continuation = null;
+            }
             var result = bus.WriteResult(
-                Required(args, "taskId"),
+                taskId,
                 Required(args, "summary"),
                 Optional(args, "status") ?? "completed",
                 Optional(args, "from"),
@@ -1474,8 +1546,8 @@ public sealed class DefaultCtuController : ICtuController
                 Csv(args, "changedFiles"),
                 Csv(args, "artifacts"),
                 Optional(args, "nextSuggestedAction"),
-                Optional(args, "outcome"),
-                ContinuationRequest(args));
+                outcome,
+                continuation);
             return Task.FromResult<object>(new { result });
         });
 
@@ -3669,14 +3741,23 @@ public sealed class DefaultCtuController : ICtuController
             : defaultValue;
     }
 
-    private static AgentBusContinuationRequest? ContinuationRequest(JsonElement args)
+    private static AgentBusContinuationRequest? ContinuationRequest(JsonElement args, ContinuationPromptState? continuationContext = null)
     {
+        var outcome = Optional(args, "outcome");
+        if (string.Equals(outcome, "done", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(outcome, "handed_off", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(outcome, "human", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(outcome, "failed", StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
         var hasContinuation = !string.IsNullOrWhiteSpace(Optional(args, "continuationOwner"))
             || !string.IsNullOrWhiteSpace(Optional(args, "continuationReason"))
             || !string.IsNullOrWhiteSpace(Optional(args, "continuationDedupeKey"))
             || HasProperty(args, "continuationWakeAfterSeconds")
             || HasProperty(args, "continuationMaxAttempts")
-            || string.Equals(Optional(args, "outcome"), "self_continue", StringComparison.OrdinalIgnoreCase);
+            || string.Equals(outcome, "self_continue", StringComparison.OrdinalIgnoreCase);
         if (!hasContinuation)
         {
             return null;
@@ -3686,9 +3767,11 @@ public sealed class DefaultCtuController : ICtuController
         {
             Owner = Optional(args, "continuationOwner"),
             WakeAfterSeconds = Int(args, "continuationWakeAfterSeconds", 60),
-            DedupeKey = Optional(args, "continuationDedupeKey"),
+            DedupeKey = Optional(args, "continuationDedupeKey") ?? continuationContext?.DedupeKey,
             Reason = Optional(args, "continuationReason"),
-            MaxAttempts = Int(args, "continuationMaxAttempts", 5)
+            MaxAttempts = HasProperty(args, "continuationMaxAttempts")
+                ? Int(args, "continuationMaxAttempts", 5)
+                : continuationContext?.MaxAttempts ?? 5
         };
     }
 
