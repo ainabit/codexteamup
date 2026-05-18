@@ -53,6 +53,9 @@ public sealed record AgentBusTask
     public bool ResultExpected { get; init; } = true;
     public string? Priority { get; init; }
     public TimeSpan? Timeout { get; init; }
+    public int DeliveryAttempts { get; init; }
+    public DateTimeOffset? LastDeliveryAttemptAt { get; init; }
+    public string? LastDeliveryError { get; init; }
 }
 
 /// <summary>
@@ -73,6 +76,10 @@ public sealed record AgentBusResult
     public IReadOnlyList<string> Artifacts { get; init; } = [];
     public IReadOnlyList<string> OpenQuestions { get; init; } = [];
     public string? NextSuggestedAction { get; init; }
+    public int NotifyAttempts { get; init; }
+    public DateTimeOffset? LastNotifyAttemptAt { get; init; }
+    public DateTimeOffset? LastNotifiedAt { get; init; }
+    public string? LastNotifyError { get; init; }
 }
 
 /// <summary>

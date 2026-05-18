@@ -14,6 +14,7 @@ Files:
 - [startup.md](startup.md)
 - [testing-matrix.md](testing-matrix.md)
 - [recovery.md](recovery.md)
+- [bug-ledger.md](bug-ledger.md)
 
 Detailed legacy reference:
 

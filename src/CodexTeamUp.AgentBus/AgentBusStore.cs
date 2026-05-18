@@ -61,6 +61,56 @@ public sealed class AgentBusStore
         });
     }
 
+    public void MarkTaskSuperseded(AgentBusTask task)
+    {
+        MarkTaskToDirectory(task, DateTimeOffset.Now, "superseded");
+    }
+
+    /// <summary>Atomically updates a task record if present in any task directory.</summary>
+    public AgentBusTask? UpdateTask(string taskId, Func<AgentBusTask, AgentBusTask> updater)
+    {
+        InitializeIfMissing();
+        foreach (var directory in new[] { TasksOpenDirectory, TasksClaimedDirectory, TasksDoneDirectory, TasksFailedDirectory })
+        {
+            var path = TaskPath(directory, taskId);
+            if (!File.Exists(path))
+            {
+                continue;
+            }
+
+            var existing = JsonFile.Read<AgentBusTask>(path);
+            if (existing is null)
+            {
+                return null;
+            }
+
+            var updated = updater(existing);
+            JsonFile.WriteAtomic(path, updated);
+            return updated;
+        }
+
+        return null;
+    }
+
+    /// <summary>Atomically updates a result record if present.</summary>
+    public AgentBusResult? UpdateResult(string resultId, Func<AgentBusResult, AgentBusResult> updater)
+    {
+        InitializeIfMissing();
+        var normalized = resultId.EndsWith(".json", StringComparison.OrdinalIgnoreCase)
+            ? Path.GetFileNameWithoutExtension(resultId)
+            : resultId;
+        var path = ResultPath(normalized);
+        var existing = File.Exists(path) ? JsonFile.Read<AgentBusResult>(path) : null;
+        if (existing is null)
+        {
+            return null;
+        }
+
+        var updated = updater(existing);
+        JsonFile.WriteAtomic(path, updated);
+        return updated;
+    }
+
     public AgentBusTask CreateTask(
         string from,
         string to,
@@ -554,6 +604,34 @@ public sealed class AgentBusStore
         };
         var targetPath = TaskPath(targetDirectory, task.Id);
         JsonFile.WriteAtomic(sourcePath, terminal);
+        if (File.Exists(targetPath))
+        {
+            File.Delete(targetPath);
+        }
+
+        File.Move(sourcePath, targetPath);
+    }
+
+    private void MarkTaskToDirectory(AgentBusTask task, DateTimeOffset completedAt, string status)
+    {
+        var sourcePath = TaskPath(TasksOpenDirectory, task.Id);
+        if (!File.Exists(sourcePath))
+        {
+            sourcePath = TaskPath(TasksClaimedDirectory, task.Id);
+            if (!File.Exists(sourcePath))
+            {
+                return;
+            }
+        }
+
+        var updated = task with
+        {
+            Status = status,
+            CompletedAt = completedAt
+        };
+
+        var targetPath = TaskPath(TasksDoneDirectory, task.Id);
+        JsonFile.WriteAtomic(sourcePath, updated);
         if (File.Exists(targetPath))
         {
             File.Delete(targetPath);

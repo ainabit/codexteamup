@@ -15,9 +15,17 @@ public sealed class DefaultCtuController : ICtuController
     private static readonly TimeSpan WakeupReadyTimeout = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan WakeupReadyPollInterval = TimeSpan.FromMilliseconds(200);
     private static readonly SemaphoreSlim DesktopWakeupGate = new(1, 1);
+    private static readonly TimeSpan StartupSweepLeaseDuration = TimeSpan.FromMinutes(2);
+    private static readonly TimeSpan DeliverySweepWait = TimeSpan.FromMilliseconds(200);
+    private static readonly TimeSpan StaleClaimedTaskRecoveryDelay = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan ResultNotificationRetryDelay = TimeSpan.FromSeconds(3);
+    private const int MaxResultNotifyRetryAttempts = 8;
     private readonly ReloadableCtuControllerPolicy _controllerPolicy;
     private readonly CtuJsonLogger? _logger;
+    private readonly string _defaultBusRoot;
+    private readonly IAppServerClient _appServer;
     private readonly DateTimeOffset _loadedAt = DateTimeOffset.Now;
+    private readonly SemaphoreSlim _startupSweepGate = new(1, 1);
 
     public DefaultCtuController(
         string busRoot,
@@ -26,6 +34,8 @@ public sealed class DefaultCtuController : ICtuController
         CtuJsonLogger? logger = null)
     {
         _controllerPolicy = controllerPolicy ?? new ReloadableCtuControllerPolicy(logger: logger);
+        _appServer = appServer;
+        _defaultBusRoot = Path.GetFullPath(busRoot);
         _logger = logger;
         RegisterDefaultTools(busRoot, appServer);
     }
@@ -76,6 +86,789 @@ public sealed class DefaultCtuController : ICtuController
         0,
         null,
         _controllerPolicy.Status);
+
+    /// <summary>
+    /// Executes one bounded startup/interop sweep over the exchange system channel.
+    /// </summary>
+    public async Task RunStartupSweepAsync(CancellationToken cancellationToken = default)
+    {
+        if (!await _startupSweepGate.WaitAsync(0, cancellationToken).ConfigureAwait(false))
+        {
+            return;
+        }
+
+        try
+        {
+            await ProcessStartupSweepAsync(cancellationToken).ConfigureAwait(false);
+            await ProcessTaskDeliveryAsync(cancellationToken).ConfigureAwait(false);
+            await ProcessResultNotificationRetriesAsync(cancellationToken).ConfigureAwait(false);
+            await ProcessContinuityGuardianAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger?.Error("controller.startup_sweep.failed", ex);
+            throw;
+        }
+        finally
+        {
+            _startupSweepGate.Release();
+        }
+    }
+
+    private async Task ProcessTaskDeliveryAsync(CancellationToken cancellationToken)
+    {
+        var bus = new AgentBusStore(_defaultBusRoot);
+        var now = DateTimeOffset.Now;
+        var recoverable = bus.ListTasks()
+            .Where(task => string.Equals(task.Status, "open", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(task.Status, "claimed", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        if (recoverable.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var stale in recoverable.Where(task =>
+            string.Equals(task.Status, "claimed", StringComparison.OrdinalIgnoreCase)
+            && IsStaleClaimForDelivery(task, now)))
+        {
+            var recovered = bus.UpdateTask(stale.Id, static task => task with
+            {
+                Status = "open",
+                ClaimedAt = null,
+                Owner = null
+            });
+
+            if (recovered is not null)
+            {
+                bus.RecordEvent(new AgentBusEvent
+                {
+                    Timestamp = DateTimeOffset.Now,
+                    Type = "task.recovered_claimed",
+                    TaskId = stale.Id,
+                    From = stale.From,
+                    To = stale.To,
+                    Message = $"Recovered stale claimed task after {StaleClaimedTaskRecoveryDelay}."
+                });
+            }
+        }
+
+        var openTasks = bus.ListTasks(status: "open")
+            .Where(task => task.Status.Equals("open", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        if (openTasks.Count == 0)
+        {
+            return;
+        }
+
+        var grouped = openTasks
+            .Where(task => !string.IsNullOrWhiteSpace(task.To))
+            .GroupBy(task => task.To!, StringComparer.OrdinalIgnoreCase);
+
+        foreach (var group in grouped)
+        {
+            if (cancellationToken.IsCancellationRequested)
+            {
+                return;
+            }
+
+            var ordered = group.OrderBy(task => task.CreatedAt).ToList();
+            if (ordered.Count <= 1)
+            {
+                await TryDeliverQueuedTaskAsync(bus, ordered[0], cancellationToken).ConfigureAwait(false);
+                continue;
+            }
+
+            var carryThrough = ordered[^1];
+            foreach (var stale in ordered.SkipLast(1))
+            {
+                bus.MarkTaskSuperseded(stale);
+                bus.RecordEvent(new AgentBusEvent
+                {
+                    Timestamp = DateTimeOffset.Now,
+                    Type = "task.superseded",
+                    TaskId = stale.Id,
+                    From = stale.From,
+                    To = stale.To,
+                    Message = $"Superseded by later queued task {carryThrough.Id}."
+                });
+            }
+
+            await TryDeliverQueuedTaskAsync(bus, carryThrough, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private async Task TryDeliverQueuedTaskAsync(AgentBusStore bus, AgentBusTask task, CancellationToken cancellationToken)
+    {
+        task = bus.UpdateTask(task.Id, existing => existing with
+        {
+            DeliveryAttempts = existing.DeliveryAttempts + 1,
+            LastDeliveryAttemptAt = DateTimeOffset.Now,
+            LastDeliveryError = null
+        }) ?? task;
+
+        try
+        {
+            var dispatchResult = await DispatchTaskAsync(bus, _appServer, task.Id, ControllerWakeupTimeout(), cancellationToken).ConfigureAwait(false);
+            if (cancellationToken.IsCancellationRequested)
+            {
+                bus.UpdateTask(task.Id, existing => existing with { LastDeliveryError = "delivery canceled" });
+                return;
+            }
+
+            if (!dispatchResult.Succeeded)
+            {
+                bus.UpdateTask(task.Id, existing => existing with
+                {
+                    LastDeliveryError = SafeText.Preview(dispatchResult.Error, 180) ?? "wake-up did not succeed",
+                    LastDeliveryAttemptAt = DateTimeOffset.Now
+                });
+            }
+
+            await Task.Delay(DeliverySweepWait, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            bus.UpdateTask(task.Id, existing => existing with { LastDeliveryError = "delivery canceled" });
+            return;
+        }
+        catch (Exception ex)
+        {
+            bus.UpdateTask(task.Id, existing => existing with
+            {
+                LastDeliveryError = SafeText.Redact(ex.Message),
+                LastDeliveryAttemptAt = DateTimeOffset.Now
+            });
+            bus.RecordEvent(new AgentBusEvent
+            {
+                Timestamp = DateTimeOffset.Now,
+                Type = "task.delivery_failed",
+                TaskId = task.Id,
+                From = task.From,
+                To = task.To,
+                Message = SafeText.Redact(ex.Message),
+                Payload = new
+                {
+                    exception = SafeText.Redact(ex.GetType().FullName)
+                }
+            });
+        }
+    }
+
+    private async Task ProcessResultNotificationRetriesAsync(CancellationToken cancellationToken)
+    {
+        var bus = new AgentBusStore(_defaultBusRoot);
+        var pendingResults = bus.ListResults()
+            .Where(result =>
+                result.NotifyAttempts > 0 &&
+                result.LastNotifiedAt is null &&
+                result.NotifyAttempts < MaxResultNotifyRetryAttempts)
+            .ToList();
+
+        foreach (var result in pendingResults)
+        {
+            if (cancellationToken.IsCancellationRequested)
+            {
+                return;
+            }
+
+            if (result.LastNotifyAttemptAt is not null
+                && DateTimeOffset.Now - result.LastNotifyAttemptAt < ResultNotificationRetryDelay)
+            {
+                continue;
+            }
+
+            try
+            {
+                var notify = await AttemptResultNotifyAsync(
+                    bus,
+                    _appServer,
+                    result,
+                    optionalResultId: null,
+                    requestedThreadId: null,
+                    requestedAgentId: null,
+                    cwd: null,
+                    cancellationToken).ConfigureAwait(false);
+
+                if (notify.Notified)
+                {
+                    continue;
+                }
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                return;
+            }
+            catch (Exception ex)
+            {
+                _logger?.Error("controller.result_notify.retry_failed", ex, new { result.Id });
+            }
+        }
+    }
+
+    private async Task ProcessContinuityGuardianAsync(CancellationToken cancellationToken)
+    {
+        var bus = new AgentBusStore(_defaultBusRoot);
+        var continuity = new ExecutionContinuityStateStore(_defaultBusRoot, _controllerPolicy.Policy.ContinuityStateDirectory);
+        continuity.Initialize();
+        var guardian = ContinuityGuardian();
+
+        var queuedTasks = bus.ListTasks()
+            .Where(task => string.Equals(task.Status, "open", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(task.Status, "claimed", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        foreach (var task in queuedTasks)
+        {
+            if (cancellationToken.IsCancellationRequested)
+            {
+                return;
+            }
+
+            try
+            {
+                var targetState = EvaluateGuardedStateForTask(task);
+                var existing = continuity.ReadLatest(task.Id);
+                if (IsTerminalRepeatForSameOutcome(existing, targetState, task.Id))
+                {
+                    continue;
+                }
+
+                var nextState = BuildContinuityState(
+                    task.Id,
+                    existing,
+                    targetState,
+                    shouldContinue: true,
+                    lastOutcomeKind: "queued",
+                    lastOutcomeRef: task.Id,
+                    lastError: null,
+                    guardianAgentId: guardian.id,
+                    guardianDisplayName: guardian.displayName,
+                    currentTargetAgentId: task.To,
+                    currentTargetDisplayName: task.To,
+                    blockingOwner: null,
+                    blockingReason: null,
+                    nextActionKind: "task",
+                    nextActionRef: task.Id,
+                    resumeCorrelationId: null);
+
+                continuity.Upsert(nextState);
+                RecordContinuityGuardianEvaluatedEvent(bus, task.From, task.To, task.Id, existing, nextState, isForResult: false);
+                if (IsContinuityDecisionDispatchState(nextState.State))
+                {
+                    bus.RecordEvent(new AgentBusEvent
+                    {
+                        Timestamp = DateTimeOffset.Now,
+                        Type = IsRepeatStateForDecision(existing, nextState.State)
+                            ? "continuity.dispatch_retry_scheduled"
+                            : "continuity.dispatch_requested",
+                        TaskId = task.Id,
+                        From = task.From,
+                        To = task.To,
+                        Message = $"Dispatch continuity decision for task {task.Id}.",
+                        Payload = new { state = nextState.State, attempt = nextState.AttemptCount, continueFlow = nextState.ShouldContinue }
+                    });
+                }
+                RecordContinuityTerminalStateEventIfNeeded(bus, task.From, task.To, task.Id, existing, nextState);
+                bus.RecordEvent(new AgentBusEvent
+                {
+                    Timestamp = DateTimeOffset.Now,
+                    Type = "continuity.state_updated",
+                    TaskId = task.Id,
+                    From = task.From,
+                    To = task.To,
+                    Message = $"Continuity state set to '{targetState}' for task {task.Id}.",
+                    Payload = new { state = nextState.State, shouldContinue = nextState.ShouldContinue, stateId = nextState.StateId }
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger?.Error("controller.continuity.task_evaluation_failed", ex, new { taskId = task.Id });
+            }
+        }
+
+        foreach (var result in bus.ListResults())
+        {
+            if (cancellationToken.IsCancellationRequested)
+            {
+                return;
+            }
+
+            try
+            {
+                var notifyRetryExhausted = ShouldGuardianTransitionNotifyRetryToBlocked(result);
+                var targetState = EvaluateGuardedStateForResult(result, notifyRetryExhausted);
+                var existing = continuity.ReadLatest(result.TaskId);
+                if (IsTerminalRepeatForSameOutcome(existing, targetState, result.Id))
+                {
+                    continue;
+                }
+
+                var nextState = BuildContinuityState(
+                    result.TaskId,
+                    existing,
+                    targetState,
+                    shouldContinue: ShouldContinueFromResultState(targetState),
+                    lastOutcomeKind: string.IsNullOrWhiteSpace(result.Status) ? "unknown" : result.Status,
+                    lastOutcomeRef: result.Id,
+                    lastError: ShouldRecordNotifyRetryError(result, notifyRetryExhausted)
+                        ? "result notify retries exhausted"
+                        : result.Status.Equals("failed", StringComparison.OrdinalIgnoreCase) ? result.Summary : null,
+                    guardianAgentId: guardian.id,
+                    guardianDisplayName: guardian.displayName,
+                    currentTargetAgentId: result.From,
+                    currentTargetDisplayName: result.From,
+                    blockingOwner: GetResultBlockingOwner(result, notifyRetryExhausted),
+                    blockingReason: GetResultBlockingReason(result, notifyRetryExhausted),
+                    nextActionKind: string.IsNullOrWhiteSpace(result.NextSuggestedAction) ? null : "task",
+                    nextActionRef: result.NextSuggestedAction,
+                    resumeCorrelationId: null);
+
+                continuity.Upsert(nextState);
+                RecordContinuityGuardianEvaluatedEvent(bus, result.From, result.To, result.TaskId, existing, nextState, isForResult: true);
+                if (string.Equals(targetState, ExecutionContinuityStateKind.NotifyRetryPending, StringComparison.OrdinalIgnoreCase))
+                {
+                    bus.RecordEvent(new AgentBusEvent
+                    {
+                        Timestamp = DateTimeOffset.Now,
+                        Type = "continuity.notify_retry_scheduled",
+                        TaskId = result.TaskId,
+                        From = result.From,
+                        To = result.To,
+                        Message = $"Result notify continuity decision for result {result.Id}.",
+                        Payload = new { state = nextState.State, attempt = nextState.AttemptCount, notifyAttempts = result.NotifyAttempts }
+                    });
+                }
+                RecordContinuityTerminalStateEventIfNeeded(bus, result.From, result.To, result.TaskId, existing, nextState);
+                bus.RecordEvent(new AgentBusEvent
+                {
+                    Timestamp = DateTimeOffset.Now,
+                    Type = string.IsNullOrWhiteSpace(existing?.State) ? "continuity.state_created" : "continuity.state_transitioned",
+                    TaskId = result.TaskId,
+                    From = result.From,
+                    To = result.To,
+                    Message = $"Continuity transition '{existing?.State ?? "new"}' -> '{targetState}' via result {result.Id}.",
+                    Payload = new { state = nextState.State, stateId = nextState.StateId, resultId = result.Id }
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger?.Error("controller.continuity.result_evaluation_failed", ex, new { resultId = result.Id });
+            }
+        }
+
+        await ProcessContinuityActionStatesAsync(bus, continuity, cancellationToken).ConfigureAwait(false);
+
+        await Task.CompletedTask.ConfigureAwait(false);
+    }
+
+    private static string EvaluateGuardedStateForTask(AgentBusTask task)
+    {
+        return string.Equals(task.Status, "claimed", StringComparison.OrdinalIgnoreCase)
+            ? ExecutionContinuityStateKind.WaitingOnWorker
+            : ExecutionContinuityStateKind.QueuedForDispatch;
+    }
+
+    private static string EvaluateGuardedStateForResult(AgentBusResult result, bool notifyRetryExhausted)
+    {
+        if (notifyRetryExhausted)
+        {
+            return ExecutionContinuityStateKind.BlockedNeedsHuman;
+        }
+
+        if (string.Equals(result.Status, "completed", StringComparison.OrdinalIgnoreCase))
+        {
+            if (result.NotifyAttempts > 0 && result.LastNotifiedAt is null)
+            {
+                return ExecutionContinuityStateKind.NotifyRetryPending;
+            }
+
+            return string.IsNullOrWhiteSpace(result.NextSuggestedAction)
+                ? ExecutionContinuityStateKind.Completed
+                : ExecutionContinuityStateKind.DelegatedNextTask;
+        }
+
+        if (string.Equals(result.Status, "failed", StringComparison.OrdinalIgnoreCase))
+        {
+            return ExecutionContinuityStateKind.BlockedNeedsHuman;
+        }
+
+        return ExecutionContinuityStateKind.PendingReview;
+    }
+
+    private static bool ShouldContinueFromResultState(string targetState)
+    {
+        return !ExecutionContinuityStateKind.TerminalStates.Contains(targetState);
+    }
+
+    private (string id, string displayName) ContinuityGuardian()
+    {
+        var policy = _controllerPolicy.Policy;
+        var normalizedId = string.IsNullOrWhiteSpace(policy.ContinuityGuardianAgentId)
+            ? "ctu/reviewer"
+            : policy.ContinuityGuardianAgentId.Trim();
+        return (normalizedId, string.IsNullOrWhiteSpace(policy.ContinuityGuardianDisplayName)
+            ? normalizedId
+            : policy.ContinuityGuardianDisplayName!.Trim());
+    }
+
+    private static bool IsTerminalRepeatForSameOutcome(ExecutionContinuityState? existing, string targetState, string outcomeRef)
+    {
+        return existing is not null
+            && ExecutionContinuityStateKind.TerminalStates.Contains(existing.State)
+            && string.Equals(existing.State, targetState, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(existing.LastOutcomeRef, outcomeRef, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsRepeatStateForDecision(ExecutionContinuityState? existing, string targetState)
+    {
+        return existing is not null
+            && string.Equals(existing.State, targetState, StringComparison.OrdinalIgnoreCase)
+            && !ExecutionContinuityStateKind.TerminalStates.Contains(targetState);
+    }
+
+    private async Task ProcessContinuityActionStatesAsync(AgentBusStore bus, ExecutionContinuityStateStore continuity, CancellationToken cancellationToken)
+    {
+        var latestStates = continuity.ListStates()
+            .GroupBy(state => state.CorrelationId, StringComparer.OrdinalIgnoreCase)
+            .Select(group => group.OrderByDescending(state => state.UpdatedAt).First())
+            .ToList();
+
+        foreach (var state in latestStates)
+        {
+            if (cancellationToken.IsCancellationRequested)
+            {
+                return;
+            }
+
+            if (!string.IsNullOrWhiteSpace(state.State)
+                && state.ShouldContinue
+                && !ExecutionContinuityStateKind.TerminalStates.Contains(state.State))
+            {
+                try
+                {
+                    if (string.Equals(state.State, ExecutionContinuityStateKind.QueuedForDispatch, StringComparison.OrdinalIgnoreCase)
+                        || string.Equals(state.State, ExecutionContinuityStateKind.DispatchRetryPending, StringComparison.OrdinalIgnoreCase)
+                        || string.Equals(state.State, ExecutionContinuityStateKind.WaitingOnWorker, StringComparison.OrdinalIgnoreCase))
+                    {
+                        await ResumeDispatchFromContinuityStateAsync(bus, state, cancellationToken).ConfigureAwait(false);
+                        continue;
+                    }
+
+                    if (string.Equals(state.State, ExecutionContinuityStateKind.NotifyRetryPending, StringComparison.OrdinalIgnoreCase))
+                    {
+                        await ResumeNotifyFromContinuityStateAsync(bus, state, cancellationToken).ConfigureAwait(false);
+                        continue;
+                    }
+
+                    if (string.Equals(state.State, ExecutionContinuityStateKind.ResumePendingExternal, StringComparison.OrdinalIgnoreCase))
+                    {
+                        bus.RecordEvent(new AgentBusEvent
+                        {
+                            Timestamp = DateTimeOffset.Now,
+                            Type = "continuity.resume_pending_external_skipped",
+                            TaskId = state.CorrelationId,
+                            Message = $"Continuity resume pending external for {state.CorrelationId}.",
+                            Payload = new { state.State, state.ResumeCorrelationId }
+                        });
+                    }
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    _logger?.Error("controller.continuity.action_failed", ex, new { correlationId = state.CorrelationId, state = state.State });
+                }
+            }
+        }
+    }
+
+    private async Task ResumeDispatchFromContinuityStateAsync(AgentBusStore bus, ExecutionContinuityState state, CancellationToken cancellationToken)
+    {
+        var taskId = state.NextActionRef ?? state.CorrelationId;
+        if (string.IsNullOrWhiteSpace(taskId))
+        {
+            bus.RecordEvent(new AgentBusEvent
+            {
+                Timestamp = DateTimeOffset.Now,
+                Type = "continuity.dispatch_resume_skipped",
+                TaskId = state.CorrelationId,
+                Message = $"Skipping continuity dispatch continuation for {state.CorrelationId}: missing task ref."
+            });
+            return;
+        }
+
+        var task = bus.FindTask(taskId);
+        if (task is null)
+        {
+            bus.RecordEvent(new AgentBusEvent
+            {
+                Timestamp = DateTimeOffset.Now,
+                Type = "continuity.dispatch_resume_skipped",
+                TaskId = state.CorrelationId,
+                Message = $"Skipping continuity dispatch continuation for {state.CorrelationId}: task {taskId} not found."
+            });
+            return;
+        }
+
+        bus.RecordEvent(new AgentBusEvent
+        {
+            Timestamp = DateTimeOffset.Now,
+            Type = "continuity.dispatch_from_state",
+            TaskId = task.Id,
+            From = task.From,
+            To = task.To,
+            Message = $"Dispatch continuation from continuity state '{state.State}' for task {task.Id}.",
+            Payload = new { state = state.State, stateId = state.StateId, actionAttempt = state.AttemptCount }
+        });
+
+        var dispatch = await DispatchTaskAsync(bus, _appServer, task.Id, ControllerWakeupTimeout(), cancellationToken).ConfigureAwait(false);
+        if (!dispatch.Succeeded)
+        {
+            bus.RecordEvent(new AgentBusEvent
+            {
+                Timestamp = DateTimeOffset.Now,
+                Type = "continuity.dispatch_from_state_failed",
+                TaskId = task.Id,
+                From = task.From,
+                To = task.To,
+                Message = $"Dispatch continuation from continuity state '{state.State}' failed for task {task.Id}.",
+                Payload = new { stateId = state.StateId, dispatch.Error }
+            });
+        }
+    }
+
+    private async Task ResumeNotifyFromContinuityStateAsync(AgentBusStore bus, ExecutionContinuityState state, CancellationToken cancellationToken)
+    {
+        var resultId = state.LastOutcomeRef;
+        if (string.IsNullOrWhiteSpace(resultId))
+        {
+            bus.RecordEvent(new AgentBusEvent
+            {
+                Timestamp = DateTimeOffset.Now,
+                Type = "continuity.notify_resume_skipped",
+                TaskId = state.CorrelationId,
+                Message = $"Skipping continuity notify continuation for {state.CorrelationId}: missing result ref."
+            });
+            return;
+        }
+
+        var result = bus.FindResult(resultId);
+        if (result is null)
+        {
+            bus.RecordEvent(new AgentBusEvent
+            {
+                Timestamp = DateTimeOffset.Now,
+                Type = "continuity.notify_resume_skipped",
+                TaskId = state.CorrelationId,
+                Message = $"Skipping continuity notify continuation for {state.CorrelationId}: result {resultId} not found."
+            });
+            return;
+        }
+
+        if (result.LastNotifiedAt is not null)
+        {
+            bus.RecordEvent(new AgentBusEvent
+            {
+                Timestamp = DateTimeOffset.Now,
+                Type = "continuity.notify_resume_skipped",
+                TaskId = state.CorrelationId,
+                From = result.From,
+                To = result.To,
+                Message = $"Skipping continuity notify continuation for {state.CorrelationId}: result {resultId} already notified."
+            });
+            return;
+        }
+
+        var targetAgentId = string.IsNullOrWhiteSpace(state.CurrentTargetAgentId) ? result.To : state.CurrentTargetAgentId;
+
+        bus.RecordEvent(new AgentBusEvent
+        {
+            Timestamp = DateTimeOffset.Now,
+            Type = "continuity.notify_from_state",
+            TaskId = state.CorrelationId,
+            From = result.From,
+            To = targetAgentId,
+            Message = $"Notify continuation from continuity state '{state.State}' for result {result.Id}.",
+            Payload = new { state = state.State, stateId = state.StateId, resultId, actionAttempt = state.AttemptCount }
+        });
+
+        var notify = await AttemptResultNotifyAsync(
+            bus,
+            _appServer,
+            result,
+            optionalResultId: resultId,
+            requestedThreadId: null,
+            requestedAgentId: targetAgentId,
+            cwd: null,
+            cancellationToken).ConfigureAwait(false);
+
+        if (!notify.Notified)
+        {
+            bus.RecordEvent(new AgentBusEvent
+            {
+                Timestamp = DateTimeOffset.Now,
+                Type = "continuity.notify_from_state_pending",
+                TaskId = state.CorrelationId,
+                From = result.From,
+                To = targetAgentId,
+                Message = $"Continuity notify continuation for result {result.Id} is pending.",
+                Payload = new { state = state.State, stateId = state.StateId, error = notify.Error, deferred = notify.Deferred }
+            });
+        }
+    }
+
+    private static bool IsContinuityDecisionDispatchState(string targetState)
+    {
+        return string.Equals(targetState, ExecutionContinuityStateKind.QueuedForDispatch, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(targetState, ExecutionContinuityStateKind.WaitingOnWorker, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(targetState, ExecutionContinuityStateKind.DispatchRetryPending, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool ShouldGuardianTransitionNotifyRetryToBlocked(AgentBusResult result)
+    {
+        return result.NotifyAttempts >= MaxResultNotifyRetryAttempts && result.LastNotifiedAt is null;
+    }
+
+    private static bool ShouldRecordNotifyRetryError(AgentBusResult result, bool notifyRetryExhausted)
+    {
+        return notifyRetryExhausted && result.NotifyAttempts > 0;
+    }
+
+    private static string? GetResultBlockingOwner(AgentBusResult result, bool notifyRetryExhausted)
+    {
+        return notifyRetryExhausted
+            ? result.To
+            : result.Status.Equals("failed", StringComparison.OrdinalIgnoreCase) ? result.To : null;
+    }
+
+    private static string? GetResultBlockingReason(AgentBusResult result, bool notifyRetryExhausted)
+    {
+        return notifyRetryExhausted
+            ? "Result notify retries exhausted without successful delivery."
+            : result.Status.Equals("failed", StringComparison.OrdinalIgnoreCase) ? result.Summary : null;
+    }
+
+    private static void RecordContinuityGuardianEvaluatedEvent(
+        AgentBusStore bus,
+        string? from,
+        string? to,
+        string taskId,
+        ExecutionContinuityState? existing,
+        ExecutionContinuityState nextState,
+        bool isForResult)
+    {
+        bus.RecordEvent(new AgentBusEvent
+        {
+            Timestamp = DateTimeOffset.Now,
+            Type = "continuity.guardian_evaluated",
+            TaskId = taskId,
+            From = from,
+            To = to,
+            Message = isForResult
+                ? $"Result continuity evaluated to '{nextState.State}' for outcome {nextState.LastOutcomeRef}."
+                : $"Task continuity evaluated to '{nextState.State}' for task {nextState.LastOutcomeRef}.",
+            Payload = new
+            {
+                previousState = existing?.State,
+                nextState = nextState.State,
+                shouldContinue = nextState.ShouldContinue,
+                attempt = nextState.AttemptCount,
+                repeat = IsRepeatStateForDecision(existing, nextState.State)
+            }
+        });
+    }
+
+    private static void RecordContinuityTerminalStateEventIfNeeded(
+        AgentBusStore bus,
+        string? from,
+        string? to,
+        string taskId,
+        ExecutionContinuityState? existing,
+        ExecutionContinuityState nextState)
+    {
+        if (!ExecutionContinuityStateKind.TerminalStates.Contains(nextState.State)
+            || string.Equals(existing?.State, nextState.State, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        bus.RecordEvent(new AgentBusEvent
+        {
+            Timestamp = DateTimeOffset.Now,
+            Type = "continuity.terminal_recorded",
+            TaskId = taskId,
+            From = from,
+            To = to,
+            Message = $"Continuity reached terminal state '{nextState.State}'.",
+            Payload = new { nextState.State, lastOutcomeRef = nextState.LastOutcomeRef }
+        });
+    }
+
+    private static ExecutionContinuityState BuildContinuityState(
+        string taskId,
+        ExecutionContinuityState? existing,
+        string targetState,
+        bool shouldContinue,
+        string lastOutcomeKind,
+        string lastOutcomeRef,
+        string? lastError,
+        string? guardianAgentId,
+        string? guardianDisplayName,
+        string? currentTargetAgentId,
+        string? currentTargetDisplayName,
+        string? blockingOwner,
+        string? blockingReason,
+        string? nextActionKind,
+        string? nextActionRef,
+        string? resumeCorrelationId)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var sameState = existing is not null
+            && string.IsNullOrWhiteSpace(existing.State) == false
+            && string.Equals(existing.State, targetState, StringComparison.OrdinalIgnoreCase);
+        var attemptCount = sameState && !ExecutionContinuityStateKind.TerminalStates.Contains(targetState)
+            ? existing!.AttemptCount + 1
+            : sameState
+                ? existing!.AttemptCount
+                : (existing?.AttemptCount ?? 0) + 1;
+
+        return new ExecutionContinuityState
+        {
+            StateId = sameState ? existing!.StateId : Guid.NewGuid().ToString("N")[..30],
+            CorrelationId = taskId,
+            InitiativeId = null,
+            TaskChainId = taskId,
+            ShouldContinue = shouldContinue,
+            State = targetState,
+            EnteredAt = sameState ? existing!.EnteredAt : now,
+            UpdatedAt = now,
+            GuardianAgentId = guardianAgentId,
+            GuardianDisplayName = guardianDisplayName,
+            LastOutcomeKind = lastOutcomeKind,
+            LastOutcomeRef = lastOutcomeRef,
+            NextActionKind = nextActionKind,
+            NextActionRef = nextActionRef,
+            CurrentTargetAgentId = currentTargetAgentId,
+            CurrentTargetDisplayName = currentTargetDisplayName,
+            AttemptCount = attemptCount,
+            MaxAttempts = 8,
+            LastAttemptAt = now,
+            LastError = lastError,
+            BlockingOwner = blockingOwner,
+            BlockingReason = blockingReason,
+            ResumeCorrelationId = resumeCorrelationId,
+            SupersedesStateId = sameState ? existing?.SupersedesStateId : existing?.StateId
+        };
+    }
+
+    private static bool IsStaleClaimForDelivery(AgentBusTask task, DateTimeOffset now)
+    {
+        return task.ClaimedAt.HasValue
+            && now - task.ClaimedAt.Value >= StaleClaimedTaskRecoveryDelay;
+    }
 
     private void RegisterDefaultTools(string busRoot, IAppServerClient appServer)
     {
@@ -292,108 +1085,25 @@ public sealed class DefaultCtuController : ICtuController
         {
             var bus = Bus(args, busRoot);
             var busResult = bus.FindResult(Required(args, "resultId")) ?? throw new FileNotFoundException("Result not found.");
-            var targetThreadId = Optional(args, "toThread");
-            var targetAgent = Optional(args, "toAgent") ?? busResult.To;
+            var targetThreadArg = Optional(args, "toThread");
+            var targetAgentArg = Optional(args, "toAgent") ?? busResult.To;
             var cwd = Optional(args, "cwd");
 
-            if (string.IsNullOrWhiteSpace(targetThreadId))
-            {
-                var agent = await EnsureAgentBoundAsync(bus, appServer, targetAgent, cwd, ct).ConfigureAwait(false);
-                targetThreadId = agent.ThreadId;
-                cwd ??= agent.Cwd;
-            }
-
-            if (string.IsNullOrWhiteSpace(targetThreadId))
-            {
-                throw new InvalidOperationException($"No target thread found for result {busResult.Id}.");
-            }
-
-            var message =
-                $"CodexTeamUp result arrived: {busResult.Id}.\n" +
-                $"Please read .codexteamup/agentbus/results/{busResult.Id}.json and review the result, scope, and next steps.";
-            var notifyStartedAt = DateTimeOffset.Now;
-            var targetSettings = !string.IsNullOrWhiteSpace(targetAgent)
-                ? RuntimeSettings(bus.FindAgent(targetAgent))
-                : null;
-            var wakeup = await SendTurnWhenReadyAsync(appServer, targetThreadId, message, cwd, targetSettings, registry.ControllerWakeupTimeout(), ct).ConfigureAwait(false);
-            var result = wakeup.Result;
-            var turnId = TryExtractTurnId(result.ResultJson);
-            var notifyMessage = WakeupEventMessage(wakeup, turnId);
-            if (result.Succeeded)
-            {
-                bus.RecordEvent(new AgentBusEvent
-                {
-                    Timestamp = DateTimeOffset.Now,
-                    Type = "result.notified",
-                    ResultId = busResult.Id,
-                    From = busResult.From,
-                    To = targetAgent,
-                    Message = notifyMessage,
-                    Payload = new
-                    {
-                        targetThreadId,
-                        targetStatus = wakeup.FinalStatus,
-                        initialStatus = wakeup.InitialStatus,
-                        turnId,
-                        notifyStartedAt,
-                        notifyCompletedAt = DateTimeOffset.Now,
-                        notifyLatencyMs = wakeup.ElapsedMs,
-                        waitedMs = wakeup.WaitedMs
-                    }
-                });
-            }
-            else if (wakeup.Deferred)
-            {
-                bus.RecordEvent(new AgentBusEvent
-                {
-                    Timestamp = DateTimeOffset.Now,
-                    Type = "result.notify_deferred",
-                    ResultId = busResult.Id,
-                    From = busResult.From,
-                    To = targetAgent,
-                    Message = notifyMessage,
-                    Payload = new
-                    {
-                        targetThreadId,
-                        targetStatus = wakeup.FinalStatus,
-                        initialStatus = wakeup.InitialStatus,
-                        notifyStartedAt,
-                        notifyCompletedAt = DateTimeOffset.Now,
-                        notifyLatencyMs = wakeup.ElapsedMs,
-                        waitedMs = wakeup.WaitedMs,
-                        result.Error
-                    }
-                });
-            }
-            else
-            {
-                bus.RecordEvent(new AgentBusEvent
-                {
-                    Timestamp = DateTimeOffset.Now,
-                    Type = "result.notify_failed",
-                    ResultId = busResult.Id,
-                    From = busResult.From,
-                    To = targetAgent,
-                    Message = notifyMessage,
-                    Payload = new
-                    {
-                        targetThreadId,
-                        targetStatus = wakeup.FinalStatus,
-                        initialStatus = wakeup.InitialStatus,
-                        notifyStartedAt,
-                        notifyCompletedAt = DateTimeOffset.Now,
-                        notifyLatencyMs = wakeup.ElapsedMs,
-                        waitedMs = wakeup.WaitedMs,
-                        result.Error
-                    }
-                });
-            }
+            var notify = await AttemptResultNotifyAsync(
+                bus,
+                appServer,
+                busResult,
+                optionalResultId: null,
+                requestedThreadId: targetThreadArg,
+                requestedAgentId: targetAgentArg,
+                cwd,
+                ct).ConfigureAwait(false);
 
             return new
             {
-                result = busResult,
-                target = new { agent = targetAgent, threadId = targetThreadId, status = wakeup.FinalStatus, initialStatus = wakeup.InitialStatus },
-                wakeup = new { result.Succeeded, result.ResultJson, result.Error, turnId, wakeup.Deferred, notifyLatencyMs = wakeup.ElapsedMs, wakeup.WaitedMs }
+                result = notify.Result,
+                target = new { agent = notify.TargetAgentId, threadId = notify.TargetThreadId, status = notify.FinalStatus, initialStatus = notify.InitialStatus },
+                wakeup = new { notify.ResultJson, notify.Error, notify.TurnId, notify.Deferred, notifyLatencyMs = notify.NotifyLatencyMs, notify.WaitedMs }
             };
         });
 
@@ -705,6 +1415,7 @@ public sealed class DefaultCtuController : ICtuController
                 : ResolveCheckoutBusRoot(
                     fallbackCwd,
                     Optional(args, "fallbackBusRoot"));
+            var knownGood = new KnownGoodRuntimeCheckpointStore(sourceBusRoot).ReadVerified();
 
             var operationStore = new RestartOperationStore(sourceBusRoot);
             var operation = operationStore.Create(
@@ -718,7 +1429,8 @@ public sealed class DefaultCtuController : ICtuController
                 fallbackBusRoot,
                 Optional(args, "continueTitle") ?? "Continue after restart",
                 Optional(args, "continuePrompt") ?? $"{Required(args, "targetAgentId")} requested a checkpointed restart into this checkout.\nPlease continue the active task from the source context.",
-                Optional(args, "expectedTargetBranch"));
+                Optional(args, "expectedTargetBranch"),
+                knownGood?.Id);
             var operationPath = operationStore.OperationPath(operation.Id);
             try
             {
@@ -781,6 +1493,187 @@ public sealed class DefaultCtuController : ICtuController
         });
 
         return;
+    }
+
+    private async Task ProcessStartupSweepAsync(CancellationToken cancellationToken)
+    {
+        var exchange = new ExchangeStore(_defaultBusRoot);
+        var messages = exchange.ListPendingSystemMessages(ExchangeEnvelopeKind.Restart, Math.Max(1, _controllerPolicy.Policy.WaitResultTimeoutCapSeconds));
+        if (messages.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var (path, envelope) in messages)
+        {
+            if (cancellationToken.IsCancellationRequested)
+            {
+                return;
+            }
+
+            using var lease = exchange.TryAcquireLease(path, "ctu-controller", StartupSweepLeaseDuration);
+            if (lease is null)
+            {
+                continue;
+            }
+
+            try
+            {
+                if (!string.Equals(envelope.Kind, ExchangeEnvelopeKind.Restart, StringComparison.OrdinalIgnoreCase))
+                {
+                    exchange.Requeue(path, lease.Envelope, $"Unsupported envelope kind '{envelope.Kind}'.");
+                    continue;
+                }
+
+                await ImportRestartStartupHandoffAsync(exchange, lease, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                exchange.DeadLetter(path, lease.Envelope, ex.Message);
+                _logger?.Error("controller.startup_sweep.message_failed", ex, new { envelope.MessageId, operationPath = ExtractPayloadString(lease.Envelope, "operationPath") });
+            }
+        }
+    }
+
+    private async Task ImportRestartStartupHandoffAsync(ExchangeStore exchange, ExchangeStore.LeaseHandle lease, CancellationToken cancellationToken)
+    {
+        var operationPath = ExtractPayloadString(lease.Envelope, "operationPath");
+        if (string.IsNullOrWhiteSpace(operationPath))
+        {
+            throw new InvalidOperationException("Restart envelope is missing operationPath.");
+        }
+
+        var sourceOperationPath = Path.GetFullPath(operationPath);
+        var operation = JsonFile.Read<RestartOperationRecord>(sourceOperationPath);
+        if (operation is null)
+        {
+            throw new FileNotFoundException($"Restart operation was not found at {sourceOperationPath}");
+        }
+
+        if (operation.SourceBusRoot is null || !Directory.Exists(operation.SourceBusRoot))
+        {
+            throw new DirectoryNotFoundException($"Restart source bus root is not available: {operation.SourceBusRoot}");
+        }
+
+        if (operation.Status is RestartOperationStatus.Completed or RestartOperationStatus.RolledBack or RestartOperationStatus.Failed)
+        {
+            exchange.Complete(lease.EnvelopePath, lease.Envelope);
+            return;
+        }
+
+        var targetBus = new AgentBusStore(operation.TargetBusRoot);
+        targetBus.Initialize();
+        var existingTask = operation.ContinuationTaskId is not null ? targetBus.FindTask(operation.ContinuationTaskId) : null;
+        var task = existingTask ?? await CreateRestartContinuationTaskAsync(targetBus, operation).ConfigureAwait(false);
+        var taskId = task.Id;
+
+        var targetAgent = await EnsureAgentBoundAsync(
+            targetBus,
+            _appServer,
+            operation.TargetAgentId,
+            operation.TargetCwd,
+            cancellationToken).ConfigureAwait(false);
+
+        if (string.IsNullOrWhiteSpace(targetAgent.ThreadId))
+        {
+            var store = new RestartOperationStore(operation.SourceBusRoot);
+            operation = store.UpdateStatus(
+                operation,
+                RestartOperationStatus.ContinuationEnqueued,
+                continuationTaskId: taskId,
+                startupHandoffMessageId: lease.Envelope.MessageId);
+            store.Write(operation);
+            exchange.Complete(lease.EnvelopePath, lease.Envelope with
+            {
+                LastError = $"Continuation task {taskId} created; target agent not currently callable."
+            });
+            return;
+        }
+
+        var wakeMessage = BuildTaskWakeMessage(task.Id, operation.TargetAgentId, operation.TargetAgentId);
+        var wakeup = await SendTurnWhenReadyAsync(
+            _appServer,
+            targetAgent.ThreadId!,
+            wakeMessage,
+            operation.TargetCwd,
+            RuntimeSettings(targetBus.FindAgent(operation.TargetAgentId)),
+            ControllerWakeupTimeout(),
+            cancellationToken).ConfigureAwait(false);
+
+        var finalStatus = wakeup.Result.Succeeded
+            ? RestartOperationStatus.ContinuationDispatched
+            : RestartOperationStatus.ContinuationEnqueued;
+
+        var sourceStore = new RestartOperationStore(operation.SourceBusRoot);
+        var knownGoodCheckpointId = operation.KnownGoodCheckpointId;
+        operation = sourceStore.UpdateStatus(
+            operation,
+            finalStatus,
+            continuationTaskId: taskId,
+            startupHandoffMessageId: lease.Envelope.MessageId,
+            lastError: wakeup.Result.Succeeded ? null : wakeup.Result.Error);
+        sourceStore.Write(operation);
+        if (finalStatus == RestartOperationStatus.ContinuationDispatched)
+        {
+            PromoteKnownGoodCheckpoint(operation.SourceBusRoot, knownGoodCheckpointId);
+        }
+
+        exchange.Complete(lease.EnvelopePath, lease.Envelope);
+    }
+
+    private void PromoteKnownGoodCheckpoint(string sourceBusRoot, string? checkpointId)
+    {
+        if (string.IsNullOrWhiteSpace(checkpointId))
+        {
+            return;
+        }
+
+        try
+        {
+            var store = new KnownGoodRuntimeCheckpointStore(sourceBusRoot);
+            var promoted = store.MarkVerifiedIfMatch(
+                checkpointId,
+                $"startup_sweep:{RestartOperationStatus.ContinuationDispatched}");
+            if (promoted is null)
+            {
+                _logger?.Info("controller.startup_sweep.known_good_checkpoint_missed", new { sourceBusRoot, checkpointId });
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger?.Error("controller.startup_sweep.known_good_checkpoint_verify_failed", ex, new { sourceBusRoot, checkpointId });
+        }
+    }
+
+    private static async Task<AgentBusTask> CreateRestartContinuationTaskAsync(
+        AgentBusStore targetBus,
+        RestartOperationRecord operation)
+    {
+        return await Task.FromResult(targetBus.CreateTask(
+            string.IsNullOrWhiteSpace(operation.RequestedByAgentId) ? operation.TargetAgentId : operation.RequestedByAgentId,
+            operation.TargetAgentId,
+            operation.ContinueTitle ?? "Continue after restart",
+            operation.ContinuePrompt
+                ?? $"{operation.TargetAgentId} requested a checkpointed restart into this checkout.\nPlease continue the source task from the operation record.",
+            new DirectoryInfo(operation.TargetCwd).Name,
+            operation.TargetCwd,
+            [],
+            operation.RequestedByAgentId)).ConfigureAwait(false);
+    }
+
+    private static string? ExtractPayloadString(ExchangeEnvelope envelope, string name)
+    {
+        if (envelope.Payload is null || envelope.Payload.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        if (!envelope.Payload.Value.TryGetProperty(name, out var value) || value.ValueKind != JsonValueKind.String)
+        {
+            return null;
+        }
+
+        return value.GetString();
     }
 
     private static AgentBusStore Bus(JsonElement args, string defaultBusRoot)
@@ -899,7 +1792,7 @@ public sealed class DefaultCtuController : ICtuController
             || Bool(args, "background");
     }
 
-    private async Task RunDeferredAsync(string operationId, string operationName, Func<Task> action)
+        private async Task RunDeferredAsync(string operationId, string operationName, Func<Task> action)
     {
         var startedAt = DateTimeOffset.Now;
         _logger?.Info("controller.deferred.start", new { operationId, operationName });
@@ -924,7 +1817,7 @@ public sealed class DefaultCtuController : ICtuController
         }
     }
 
-    private static async Task<object> DispatchTaskAsync(
+    private static async Task<DispatchTaskResult> DispatchTaskAsync(
         AgentBusStore bus,
         IAppServerClient appServer,
         string taskId,
@@ -947,7 +1840,196 @@ public sealed class DefaultCtuController : ICtuController
             Payload = WakeupEventPayload(agent.ThreadId!, wakeup)
         });
 
-        return new { wakeup.Result.Succeeded, wakeup.Result.ResultJson, wakeup.Result.Error, wakeup.Deferred, wakeup.InitialStatus, wakeup.FinalStatus };
+        return new DispatchTaskResult(
+            wakeup.Result.Succeeded,
+            wakeup.Result.ResultJson,
+            wakeup.Result.Error,
+            wakeup.Deferred,
+            wakeup.InitialStatus,
+            wakeup.FinalStatus);
+    }
+
+    private async Task<ResultNotifyAttempt> AttemptResultNotifyAsync(
+        AgentBusStore bus,
+        IAppServerClient appServer,
+        AgentBusResult result,
+        string? optionalResultId,
+        string? requestedThreadId,
+        string? requestedAgentId,
+        string? cwd,
+        CancellationToken cancellationToken)
+    {
+        var resultId = optionalResultId ?? result.Id;
+        var notifyStartedAt = DateTimeOffset.Now;
+
+        var currentResult = bus.UpdateResult(resultId, existing => existing with
+        {
+            NotifyAttempts = existing.NotifyAttempts + 1,
+            LastNotifyAttemptAt = notifyStartedAt,
+            LastNotifyError = null
+        }) ?? throw new FileNotFoundException($"Result not found: {resultId}");
+
+        try
+        {
+            var target = await ResolveNotifyTargetAsync(
+                bus,
+                appServer,
+                requestedThreadId,
+                requestedAgentId,
+                currentResult,
+                cwd,
+                cancellationToken).ConfigureAwait(false);
+            var targetThreadId = target.ThreadId;
+            var targetAgent = target.AgentId;
+            cwd ??= target.Cwd;
+
+            bus.RecordEvent(new AgentBusEvent
+            {
+                Timestamp = DateTimeOffset.Now,
+                Type = "result.notify_target_resolved",
+                ResultId = currentResult.Id,
+                From = currentResult.From,
+                To = targetAgent,
+                Message = $"Notify target resolved via {target.ResolutionPath}.",
+                Payload = new
+                {
+                    requestedThreadId = requestedThreadId,
+                    requestedAgentId = requestedAgentId,
+                    resolvedThreadId = targetThreadId,
+                    requestedFromResult = currentResult.To,
+                    resolutionPath = target.ResolutionPath,
+                    cwd
+                }
+            });
+
+            var message =
+                $"CodexTeamUp result arrived: {currentResult.Id}.\n" +
+                $"Please read .codexteamup/agentbus/results/{currentResult.Id}.json and review the result, scope, and next steps.";
+            var targetSettings = !string.IsNullOrWhiteSpace(targetAgent)
+                ? RuntimeSettings(bus.FindAgent(targetAgent))
+                : null;
+            var wakeup = await SendTurnWhenReadyAsync(
+                appServer,
+                targetThreadId,
+                message,
+                cwd,
+                targetSettings,
+                ControllerWakeupTimeout(),
+                cancellationToken).ConfigureAwait(false);
+            var turnId = TryExtractTurnId(wakeup.Result.ResultJson);
+
+            if (wakeup.Result.Succeeded)
+            {
+                var notifiedAt = DateTimeOffset.Now;
+                currentResult = bus.UpdateResult(currentResult.Id, existing => existing with
+                {
+                    LastNotifiedAt = notifiedAt,
+                    LastNotifyError = null
+                }) ?? currentResult;
+
+                bus.RecordEvent(new AgentBusEvent
+                {
+                    Timestamp = notifiedAt,
+                    Type = "result.notified",
+                    ResultId = currentResult.Id,
+                    From = currentResult.From,
+                    To = targetAgent,
+                    Message = WakeupEventMessage(wakeup, turnId),
+                    Payload = new
+                    {
+                        targetThreadId,
+                        targetStatus = wakeup.FinalStatus,
+                        initialStatus = wakeup.InitialStatus,
+                        notifyStartedAt,
+                        notifyCompletedAt = notifiedAt,
+                        notifyLatencyMs = wakeup.ElapsedMs,
+                        waitedMs = wakeup.WaitedMs,
+                        notifyAttempts = currentResult.NotifyAttempts
+                    }
+                });
+
+                return new ResultNotifyAttempt(
+                    currentResult,
+                    targetThreadId,
+                    targetAgent,
+                    Notified: true,
+                    Deferred: false,
+                    InitialStatus: wakeup.InitialStatus,
+                    FinalStatus: wakeup.FinalStatus,
+                    ResultJson: wakeup.Result.ResultJson,
+                    Error: wakeup.Result.Error,
+                    TurnId: turnId,
+                    NotifyLatencyMs: wakeup.ElapsedMs,
+                    WaitedMs: wakeup.WaitedMs);
+            }
+
+            currentResult = bus.UpdateResult(currentResult.Id, existing => existing with
+            {
+                LastNotifyError = SafeText.Redact(wakeup.Result.Error)
+            }) ?? currentResult;
+
+            bus.RecordEvent(new AgentBusEvent
+            {
+                Timestamp = DateTimeOffset.Now,
+                Type = wakeup.Deferred ? "result.notify_deferred" : "result.notify_failed",
+                ResultId = currentResult.Id,
+                From = currentResult.From,
+                To = targetAgent,
+                Message = WakeupEventMessage(wakeup, turnId),
+                Payload = new
+                {
+                    targetThreadId,
+                    targetStatus = wakeup.FinalStatus,
+                    initialStatus = wakeup.InitialStatus,
+                    notifyStartedAt,
+                    notifyCompletedAt = DateTimeOffset.Now,
+                    notifyLatencyMs = wakeup.ElapsedMs,
+                    waitedMs = wakeup.WaitedMs,
+                    wakeup.Result.Error,
+                    notifyAttempts = currentResult.NotifyAttempts,
+                    notifyDeferred = wakeup.Deferred
+                }
+            });
+
+            return new ResultNotifyAttempt(
+                currentResult,
+                targetThreadId,
+                targetAgent,
+                Notified: false,
+                Deferred: wakeup.Deferred,
+                InitialStatus: wakeup.InitialStatus,
+                FinalStatus: wakeup.FinalStatus,
+                ResultJson: wakeup.Result.ResultJson,
+                Error: wakeup.Result.Error,
+                TurnId: turnId,
+                NotifyLatencyMs: wakeup.ElapsedMs,
+                WaitedMs: wakeup.WaitedMs);
+        }
+        catch (Exception ex)
+        {
+            currentResult = bus.UpdateResult(currentResult.Id, existing => existing with
+            {
+                LastNotifyError = SafeText.Redact(ex.Message)
+            }) ?? currentResult;
+
+            bus.RecordEvent(new AgentBusEvent
+            {
+                Timestamp = DateTimeOffset.Now,
+                Type = "result.notify_failed",
+                ResultId = currentResult.Id,
+                From = currentResult.From,
+                To = currentResult.To,
+                Message = $"Could not notify result: {SafeText.Preview(ex.Message, 180)}",
+                Payload = new
+                {
+                    notifyStartedAt,
+                    notifyCompletedAt = DateTimeOffset.Now,
+                    notifyError = SafeText.Redact(ex.Message)
+                }
+            });
+
+            throw;
+        }
     }
 
     private static string RoleFromAgentId(string agentId)
@@ -1440,6 +2522,41 @@ public sealed class DefaultCtuController : ICtuController
         throw new InvalidOperationException($"Agent {agentId} could not be auto-bound. Open a visible Codex Desktop thread named '{agentId}'.");
     }
 
+    private static async Task<NotifyTargetResolution> ResolveNotifyTargetAsync(
+        AgentBusStore bus,
+        IAppServerClient appServer,
+        string? requestedThreadId,
+        string? requestedAgentId,
+        AgentBusResult? busResult,
+        string? cwd,
+        CancellationToken cancellationToken)
+    {
+        if (!string.IsNullOrWhiteSpace(requestedThreadId))
+        {
+            if (await ThreadExistsAsync(appServer, requestedThreadId, cwd, cancellationToken).ConfigureAwait(false))
+            {
+                return new NotifyTargetResolution(requestedThreadId, requestedAgentId ?? busResult?.To, "thread-id", cwd);
+            }
+
+            var matchedAgent = bus.FindAgent(requestedThreadId);
+            if (matchedAgent is not null)
+            {
+                var agent = await EnsureAgentBoundAsync(bus, appServer, requestedThreadId, cwd, cancellationToken).ConfigureAwait(false);
+                return new NotifyTargetResolution(agent.ThreadId!, agent.Id, "agent-id", agent.Cwd ?? cwd);
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(requestedAgentId))
+        {
+            var agent = await EnsureAgentBoundAsync(bus, appServer, requestedAgentId, cwd, cancellationToken).ConfigureAwait(false);
+            return new NotifyTargetResolution(agent.ThreadId!, agent.Id, "agent-id", agent.Cwd ?? cwd);
+        }
+
+        throw new InvalidOperationException($"No target thread found for result {busResult?.Id}.");
+    }
+
+    private sealed record NotifyTargetResolution(string ThreadId, string? AgentId, string ResolutionPath, string? Cwd);
+
     private static async Task<bool> ThreadExistsAsync(
         IAppServerClient appServer,
         string threadId,
@@ -1796,6 +2913,30 @@ public sealed class DefaultCtuController : ICtuController
         bool Deferred,
         long WaitedMs,
         long ElapsedMs);
+
+    /// <summary>Result of a task wakeup attempt from controller delivery logic.</summary>
+    private sealed record DispatchTaskResult(
+        bool Succeeded,
+        string? ResultJson,
+        string? Error,
+        bool Deferred,
+        string? InitialStatus,
+        string? FinalStatus);
+
+    /// <summary>Result of a result-notify wakeup attempt including persisted retry metadata.</summary>
+    private sealed record ResultNotifyAttempt(
+        AgentBusResult Result,
+        string TargetThreadId,
+        string TargetAgentId,
+        bool Notified,
+        bool Deferred,
+        string? InitialStatus,
+        string? FinalStatus,
+        string? ResultJson,
+        string? Error,
+        string? TurnId,
+        long NotifyLatencyMs,
+        long WaitedMs);
 
     private static string Required(JsonElement args, string name)
     {

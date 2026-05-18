@@ -7,6 +7,7 @@ Current initiatives:
 - [restart-orchestration.md](restart-orchestration.md)
 - [acceptance-hardening.md](acceptance-hardening.md)
 - [company-bus-exploration.md](company-bus-exploration.md)
+- [task-carry-through-reliability.md](task-carry-through-reliability.md)
 
 Detailed background planning still lives in:
 

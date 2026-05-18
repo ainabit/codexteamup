@@ -61,6 +61,10 @@ The architect reads the project documentation and decides:
 
 The architect then uses CodexTeamUp MCP, for example `team_ensure_agents`, and passes that exact agent list. CodexTeamUp does not invent roles on its own.
 
+Implementation work should normally be delegated by `ctu/architect` to dedicated developer agents such as `ctu/service`, `ctu/wrapper`, or explicit `ctu/developer*` roles. The architect owns scope, architecture, sequencing, and final acceptance. The architect should only make implementation edits directly for unusually hard critical-path work or small final corrections.
+
+Keep the active team small. When a temporary worker or developer agent is no longer needed, retire or archive it instead of letting stale threads accumulate. This is especially important for ad hoc `ctu/developer*` agents so they do not keep obsolete context from discarded designs, failed experiments, or already-finished slices.
+
 ## Project-Local State
 
 Each project can keep its own CodexTeamUp directory:

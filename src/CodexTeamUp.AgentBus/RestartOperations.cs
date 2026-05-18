@@ -43,8 +43,10 @@ public sealed record RestartOperationRecord
     public string? ContinuePrompt { get; init; }
     public string? ExpectedTargetBranch { get; init; }
     public string? HelperPid { get; init; }
+    public string? StartupHandoffMessageId { get; init; }
     public string? LastError { get; init; }
     public string? ContinuationTaskId { get; init; }
+    public string? KnownGoodCheckpointId { get; init; }
 }
 
 public sealed class RestartOperationStore
@@ -74,7 +76,8 @@ public sealed class RestartOperationStore
         string? fallbackBusRoot,
         string? continueTitle,
         string? continuePrompt,
-        string? expectedTargetBranch)
+        string? expectedTargetBranch,
+        string? knownGoodCheckpointId = null)
     {
         var normalizedSourceCwd = NormalizeCheckoutPath(sourceCwd);
         var normalizedTargetCwd = NormalizeCheckoutPath(targetCwd);
@@ -103,7 +106,8 @@ public sealed class RestartOperationStore
             FallbackBusRoot = fallbackBusRoot is null ? null : Path.GetFullPath(fallbackBusRoot),
             ContinueTitle = continueTitle,
             ContinuePrompt = continuePrompt,
-            ExpectedTargetBranch = expectedTargetBranch
+            ExpectedTargetBranch = expectedTargetBranch,
+            KnownGoodCheckpointId = knownGoodCheckpointId
         };
 
         Write(operation);
@@ -116,7 +120,14 @@ public sealed class RestartOperationStore
         JsonFile.WriteAtomic(OperationPath(operation.Id), operation);
     }
 
-    public RestartOperationRecord UpdateStatus(RestartOperationRecord operation, string status, string? helperPid = null, string? continuationTaskId = null, string? lastError = null)
+    public RestartOperationRecord UpdateStatus(
+        RestartOperationRecord operation,
+        string status,
+        string? helperPid = null,
+        string? continuationTaskId = null,
+        string? lastError = null,
+        string? startupHandoffMessageId = null,
+        string? knownGoodCheckpointId = null)
     {
         var nextStatus = NormalizeStatus(status);
         var currentStatus = NormalizeStatus(operation.Status);
@@ -129,6 +140,8 @@ public sealed class RestartOperationStore
                 {
                     HelperPid = helperPid ?? operation.HelperPid,
                     ContinuationTaskId = continuationTaskId ?? operation.ContinuationTaskId,
+                    StartupHandoffMessageId = startupHandoffMessageId ?? operation.StartupHandoffMessageId,
+                    KnownGoodCheckpointId = knownGoodCheckpointId ?? operation.KnownGoodCheckpointId,
                     LastError = lastError ?? operation.LastError
                 };
             }
@@ -141,6 +154,8 @@ public sealed class RestartOperationStore
             Status = nextStatus,
             HelperPid = helperPid ?? operation.HelperPid,
             ContinuationTaskId = continuationTaskId ?? operation.ContinuationTaskId,
+            StartupHandoffMessageId = startupHandoffMessageId ?? operation.StartupHandoffMessageId,
+            KnownGoodCheckpointId = knownGoodCheckpointId ?? operation.KnownGoodCheckpointId,
             LastError = lastError is null ? operation.LastError : lastError
         };
 

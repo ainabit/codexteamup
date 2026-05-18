@@ -55,6 +55,236 @@ function Normalize-BusRoot([string]$busRoot)
     return [System.IO.Path]::GetFullPath($busRoot).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar).ToLowerInvariant()
 }
 
+function Get-KnownGoodCheckpoint([string]$sourceCwd)
+{
+    if ([string]::IsNullOrWhiteSpace($sourceCwd))
+    {
+        return $null
+    }
+
+    $checkpointPath = Join-Path $sourceCwd ".codexteamup/runtime/checkpoints/known-good.json"
+    if (-not (Test-Path -LiteralPath $checkpointPath -PathType Leaf))
+    {
+        return $null
+    }
+
+    try
+    {
+        $content = Get-Content -LiteralPath $checkpointPath -Raw
+        return ConvertFrom-Json -InputObject $content
+    }
+    catch
+    {
+        Write-Phase "warning known-good checkpoint read failed: $($_.Exception.Message)"
+        return $null
+    }
+}
+
+function Resolve-RollbackTarget([object]$operation)
+{
+    $fromFallback = if ([string]::IsNullOrWhiteSpace($operation.FallbackCwd))
+    {
+        $null
+    }
+    else
+    {
+        @{
+            Cwd = $operation.FallbackCwd
+            BusRoot = $operation.FallbackBusRoot
+            NoPublish = $true
+        }
+    }
+
+    if ($null -ne $fromFallback -and (Test-Path -LiteralPath $fromFallback.Cwd -PathType Container))
+    {
+        return $fromFallback
+    }
+
+    $checkpoint = Get-KnownGoodCheckpoint -sourceCwd $operation.SourceCwd
+    if ($null -eq $checkpoint -or [string]::IsNullOrWhiteSpace($checkpoint.CheckoutCwd))
+    {
+        return $null
+    }
+
+    if (-not (Test-Path -LiteralPath $checkpoint.CheckoutCwd -PathType Container))
+    {
+        return $null
+    }
+
+    return @{
+        Cwd = $checkpoint.CheckoutCwd
+        BusRoot = if ([string]::IsNullOrWhiteSpace($checkpoint.BusRoot)) { $null } else { $checkpoint.BusRoot }
+        NoPublish = if ($checkpoint.PSObject.Properties.Match("UseNoPublishOnRecovery").Count -gt 0)
+        {
+            $checkpoint.UseNoPublishOnRecovery
+        }
+        else
+        {
+            $true
+        }
+    }
+}
+
+function Get-ExchangeRoot([string]$operationTargetBusRoot)
+{
+    if ([string]::IsNullOrWhiteSpace($operationTargetBusRoot))
+    {
+        return $null
+    }
+
+    $busRoot = Resolve-Path -LiteralPath $operationTargetBusRoot -ErrorAction SilentlyContinue
+    if ($null -eq $busRoot)
+    {
+        return $null
+    }
+
+    $busParent = Split-Path -Parent $busRoot.Path
+    if ((Split-Path -Leaf $busParent).ToLowerInvariant() -eq ".codexteamup")
+    {
+        return Join-Path $busParent "exchange"
+    }
+
+    return Join-Path (Split-Path -Parent $operationTargetBusRoot) ".codexteamup/exchange"
+}
+
+function Update-ExchangeCorrelation([string]$exchangeRoot, [string]$correlationId, [object]$envelope)
+{
+    if ([string]::IsNullOrWhiteSpace($exchangeRoot) -or [string]::IsNullOrWhiteSpace($correlationId))
+    {
+        return
+    }
+
+    $correlationDirectory = Join-Path $exchangeRoot "correlations"
+    New-Item -ItemType Directory -Force -Path $correlationDirectory | Out-Null
+    $correlationPath = Join-Path $correlationDirectory "$correlationId.json"
+
+    $existing = $null
+    if (Test-Path -LiteralPath $correlationPath -PathType Leaf)
+    {
+        $raw = Get-Content -LiteralPath $correlationPath -Raw
+        $existing = if ([string]::IsNullOrWhiteSpace($raw)) { $null } else { ConvertFrom-Json -InputObject $raw }
+    }
+
+    if ($null -eq $existing)
+    {
+        $existing = [pscustomobject]@{
+            CorrelationId = $correlationId
+            CreatedAt = [DateTimeOffset]::Now
+            UpdatedAt = [DateTimeOffset]::Now
+            MessageIds = @($envelope.MessageId)
+            LastMessageId = $envelope.MessageId
+            LastStatus = $envelope.Status
+        }
+    }
+    else
+    {
+        $messageIds = if ($existing.MessageIds) { @($existing.MessageIds) } else { @() }
+        if ($messageIds -notcontains $envelope.MessageId)
+        {
+            $messageIds += $envelope.MessageId
+        }
+
+        $existing = [pscustomobject]@{
+            CorrelationId = $correlationId
+            CreatedAt = if ($existing.CreatedAt) { $existing.CreatedAt } else { [DateTimeOffset]::Now }
+            UpdatedAt = [DateTimeOffset]::Now
+            MessageIds = $messageIds
+            LastMessageId = $envelope.MessageId
+            LastStatus = $envelope.Status
+        }
+    }
+
+    $tempPath = "${correlationPath}.tmp"
+    $existing | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $tempPath -Encoding UTF8
+    Move-Item -LiteralPath $tempPath -Destination $correlationPath -Force
+}
+
+function New-RestartHandoff([object]$operation)
+{
+    $messageId = "restart-handoff-$([guid]::NewGuid().ToString("N"))"
+    $exchangeRoot = Get-ExchangeRoot $operation.TargetBusRoot
+    if ([string]::IsNullOrWhiteSpace($exchangeRoot))
+    {
+        throw "Target exchange root not resolvable from bus root $($operation.TargetBusRoot)"
+    }
+
+    $inboxDirectory = Join-Path $exchangeRoot "inbox\system\restart"
+    New-Item -ItemType Directory -Force -Path $inboxDirectory | Out-Null
+
+    $payload = @{
+        operationId = $operation.Id
+        operationPath = (Resolve-Path -LiteralPath $script:OperationPath).Path
+        sourceCwd = $operation.SourceCwd
+        sourceBusRoot = $operation.SourceBusRoot
+        targetCwd = $operation.TargetCwd
+        targetBusRoot = $operation.TargetBusRoot
+        targetAgentId = $operation.TargetAgentId
+    }
+
+    $envelope = [pscustomobject]@{
+        MessageId = $messageId
+        Kind = "restart"
+        TargetScope = "system"
+        TargetProject = Split-Path -Leaf $operation.TargetCwd
+        TargetAgentId = $operation.TargetAgentId
+        TargetThreadName = $operation.TargetAgentId
+        CorrelationId = $operation.Id
+        CausationId = $operation.Id
+        CreatedAt = [DateTimeOffset]::Now
+        ExpiresAt = [DateTimeOffset]::Now.AddHours(4)
+        PayloadType = "application/json"
+        Payload = $payload
+        AttemptCount = 0
+        Status = "pending"
+    }
+
+    $messagePath = Join-Path $inboxDirectory "$messageId.json"
+    $tempPath = "$messagePath.tmp"
+    $envelope | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $tempPath -Encoding UTF8
+    Move-Item -LiteralPath $tempPath -Destination $messagePath -Force
+
+    Update-ExchangeCorrelation -exchangeRoot $exchangeRoot -correlationId $operation.Id -envelope $envelope
+
+    return @{
+        MessageId = $messageId
+        MessagePath = $messagePath
+        Envelope = $envelope
+    }
+}
+
+function Wait-ForRestartProgress([string]$operationPath, [int]$TimeoutSeconds = 120, [int]$IntervalSeconds = 2)
+{
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline)
+    {
+        Start-Sleep -Seconds $IntervalSeconds
+        if (-not (Test-Path -LiteralPath $operationPath -PathType Leaf))
+        {
+            continue
+        }
+
+        $current = Get-Operation $operationPath
+        if ($null -eq $current)
+        {
+            continue
+        }
+
+        $status = Get-ObjectPropertyValue $current "Status"
+        if ([string]::IsNullOrWhiteSpace($status))
+        {
+            continue
+        }
+
+        $normalized = $status.ToLowerInvariant()
+        if ($normalized -in @("continuation_dispatched", "completed", "failed", "rolled_back"))
+        {
+            return $normalized
+        }
+    }
+
+    return $null
+}
+
 function Get-Operation([string]$path)
 {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf))
@@ -158,7 +388,7 @@ function Invoke-WithRetries([scriptblock]$Action, [string]$Context)
     }
 }
 
-function Start-StartupScript([string]$cwd, [int]$preservePid)
+function Start-StartupScript([string]$cwd, [int]$preservePid, [switch]$NoPublish)
 {
     $startupScript = Join-Path $cwd "scripts/start-codexteamup.ps1"
     if (-not (Test-Path -LiteralPath $startupScript -PathType Leaf))
@@ -173,6 +403,10 @@ function Start-StartupScript([string]$cwd, [int]$preservePid)
         "-ForceStopExisting",
         "-PreservePid", $preservePid
     )
+    if ($NoPublish)
+    {
+        $argsList += "-NoPublish"
+    }
     Write-BootstrapLog "launching startup script detached for $cwd"
     $process = Start-Process "pwsh" -ArgumentList $argsList -WorkingDirectory $cwd -WindowStyle Hidden -PassThru
     if ($null -eq $process)
@@ -217,69 +451,6 @@ function Get-TargetHealth([string]$expectedBusRoot, [int]$TimeoutSeconds = 120, 
     }
 
     return $false
-}
-
-function Resolve-CliRunner([string]$rootCwd)
-{
-    $publishedCli = Join-Path $rootCwd ".ctu/tools/ctu/CodexTeamUp.Cli.exe"
-    if (Test-Path -LiteralPath $publishedCli -PathType Leaf)
-    {
-        return @{
-            FileName = (Resolve-Path -LiteralPath $publishedCli).Path
-            ArgumentPrefix = @()
-        }
-    }
-
-    $cliProject = Join-Path $rootCwd "src/CodexTeamUp.Cli/CodexTeamUp.Cli.csproj"
-    if (Test-Path -LiteralPath $cliProject -PathType Leaf)
-    {
-        return @{
-            FileName = "dotnet"
-            ArgumentPrefix = @("run", "--project", $cliProject, "--")
-        }
-    }
-
-    throw "No CLI executable found in $rootCwd."
-}
-
-function Invoke-Cli([string]$rootCwd, [string[]]$Arguments)
-{
-    $runner = Resolve-CliRunner $rootCwd
-    $processArguments = @($runner.ArgumentPrefix) + $Arguments
-    $outputLines = @()
-
-    $previous = Get-Location
-    try
-    {
-        Set-Location $rootCwd
-        if ($runner.FileName -ieq "dotnet")
-        {
-            $outFile = [IO.Path]::GetTempFileName()
-            $errFile = [IO.Path]::GetTempFileName()
-            $process = Start-Process "dotnet" -ArgumentList $processArguments -NoNewWindow -Wait -PassThru -RedirectStandardOutput $outFile -RedirectStandardError $errFile
-            if ($process.ExitCode -ne 0)
-            {
-                $errorOutput = if (Test-Path $errFile) { Get-Content -LiteralPath $errFile -Raw } else { "" }
-                throw "CLI invocation failed with exit code $($process.ExitCode): $errorOutput"
-            }
-            $outputLines = if (Test-Path $outFile) { Get-Content -LiteralPath $outFile } else { @() }
-            Remove-Item -LiteralPath $outFile, $errFile -ErrorAction SilentlyContinue
-        }
-        else
-        {
-            $outputLines = & $runner.FileName @processArguments
-            if ($LASTEXITCODE -ne 0)
-            {
-                throw "CLI invocation failed with exit code $LASTEXITCODE."
-            }
-        }
-    }
-    finally
-    {
-        Set-Location $previous
-    }
-
-    return $outputLines
 }
 
 function Stop-SourceStartupConsoles([string]$sourceCwd, [int]$preservePid)
@@ -330,69 +501,6 @@ function Stop-SourceStartupConsoles([string]$sourceCwd, [int]$preservePid)
     }
 }
 
-function New-ContinuationTask([object]$operation)
-{
-    $from = if ([string]::IsNullOrWhiteSpace($operation.RequestedByAgentId)) { $operation.TargetAgentId } else { $operation.RequestedByAgentId }
-    $title = if ([string]::IsNullOrWhiteSpace($operation.ContinueTitle)) { "Continue after restart" } else { $operation.ContinueTitle }
-    $prompt = if ([string]::IsNullOrWhiteSpace($operation.ContinuePrompt))
-    {
-        "Please continue the source task after restart and inspect the state in the operation record."
-    }
-    else
-    {
-        $operation.ContinuePrompt
-    }
-
-    $promptPath = Join-Path $env:TEMP ("ctu-restart-continue-prompt-$($operation.Id).txt")
-    Set-Content -LiteralPath $promptPath -Value $prompt -Encoding UTF8
-
-    $args = @(
-        "--bus-root", $operation.TargetBusRoot,
-        "bus", "task", "create",
-        "--from", $from,
-        "--to", $operation.TargetAgentId,
-        "--title", $title,
-        "--prompt-file", $promptPath,
-        "--project", (Split-Path -Leaf $operation.TargetCwd),
-        "--cwd", $operation.TargetCwd
-    )
-    if (-not [string]::IsNullOrWhiteSpace($operation.RequestedByAgentId))
-    {
-        $args += "--return-to", $operation.RequestedByAgentId
-    }
-
-    $output = Invoke-Cli $operation.TargetCwd $args
-    Remove-Item -LiteralPath $promptPath -ErrorAction SilentlyContinue
-
-    $taskId = ($output | ForEach-Object {
-        if ($_ -match '^created:\s*(\S+)')
-        {
-            return $Matches[1]
-        }
-    } | Select-Object -First 1)
-
-    if ([string]::IsNullOrWhiteSpace($taskId))
-    {
-        throw "Unable to parse continuation task id from CLI output."
-    }
-
-    return $taskId
-}
-
-function Send-Continuation([object]$operation, [string]$taskId)
-{
-    $args = @(
-        "--bus-root", $operation.TargetBusRoot,
-        "dispatch",
-        "--task-id", $taskId,
-        "--to-agent", $operation.TargetAgentId,
-        "--yes"
-    )
-
-    $dispatchOutput = Invoke-Cli $operation.TargetCwd $args
-    return $dispatchOutput
-}
-
 function Update-Phases([string]$status, [string]$phase, [string]$helperPid = $null, [string]$continuationTaskId = $null, [string]$error = $null)
 {
     script:Operation = Write-Operation -Operation $script:Operation -Status $status -HelperPid $helperPid -ContinuationTaskId $continuationTaskId -LastError $phase
@@ -433,18 +541,35 @@ try
     $script:Operation = Write-Operation -Operation $script:Operation -Status "target_healthy" -LastError "phase=continuation_create"
 
     Write-Phase "continuation_create"
-    $createdTaskId = New-ContinuationTask -operation $script:Operation
-    $dispatchedOutput = Send-Continuation -operation $script:Operation -taskId $createdTaskId
+    $handoff = New-RestartHandoff -operation $script:Operation
+    $handoffId = $handoff.MessageId
+    Write-Phase "handoff_written id=$handoffId path=$($handoff.MessagePath)"
+    $script:Operation = Write-Operation -Operation $script:Operation -Status "continuation_enqueued" -ContinuationTaskId $handoffId -LastError "phase=continuation_handoff_written id=$handoffId"
 
-    if ($null -eq $dispatchedOutput)
+    $handoffStatus = Wait-ForRestartProgress -operationPath $script:OperationPath -TimeoutSeconds 60
+    if ($handoffStatus -eq "continuation_dispatched")
     {
-        throw "Continuation task was enqueued but dispatch failed."
+        Write-Phase "continuation_dispatched"
+        $script:Operation = Write-Operation -Operation $script:Operation -Status "continuation_dispatched" -ContinuationTaskId $handoffId -LastError "phase=continuation_dispatched"
+        $script:Operation = Write-Operation -Operation $script:Operation -Status "completed" -ContinuationTaskId $handoffId -LastError "phase=completed"
+        Write-Phase "completed"
+        exit 0
     }
 
-    Write-Phase "continuation_dispatched"
-    $script:Operation = Write-Operation -Operation $script:Operation -Status "continuation_dispatched" -ContinuationTaskId $createdTaskId -LastError "phase=continuation_dispatched"
-    $script:Operation = Write-Operation -Operation $script:Operation -Status "completed" -ContinuationTaskId $createdTaskId -LastError "phase=completed"
-    Write-Phase "completed"
+    if ($handoffStatus -eq "completed")
+    {
+        Write-Phase "completed"
+        $script:Operation = Write-Operation -Operation $script:Operation -Status "completed" -ContinuationTaskId $handoffId -LastError "phase=completed"
+        exit 0
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($handoffStatus))
+    {
+        Write-Phase "operation_terminal_status=$handoffStatus"
+    }
+
+    Write-Phase "continuation_waited"
+    Write-Host "continuation handoff is enqueued at $handoffId; waiting for target runtime import"
     exit 0
 }
 catch
@@ -453,14 +578,37 @@ catch
     Write-Phase "error $errorMessage"
     $script:Operation = Write-Operation -Operation $script:Operation -Status $script:Operation.Status -LastError "phase=error:$errorMessage"
 
-    if (-not [string]::IsNullOrWhiteSpace($script:Operation.FallbackCwd))
+    if ($null -ne (Resolve-RollbackTarget -operation $script:Operation))
     {
         Write-Phase "rollback_starting"
         $script:Operation = Write-Operation -Operation $script:Operation -Status "rollback_starting" -LastError $errorMessage
-        $fallbackProcess = Start-StartupScript $script:Operation.FallbackCwd $supervisorPid
-        $script:Operation = Write-Operation -Operation $script:Operation -Status "rolled_back" -LastError "phase=rollback_complete pid=$($fallbackProcess.ProcessId)"
-        Write-Phase "rolled_back"
-        exit 1
+        $fallbackTarget = Resolve-RollbackTarget -operation $script:Operation
+        try
+        {
+            $fallbackProcess = Start-StartupScript -cwd $fallbackTarget.Cwd -preservePid $supervisorPid -NoPublish:$fallbackTarget.NoPublish
+            $fallbackBusRoot = if ([string]::IsNullOrWhiteSpace($fallbackTarget.BusRoot))
+            {
+                Join-Path $fallbackTarget.Cwd ".codexteamup\agentbus"
+            }
+            else
+            {
+                $fallbackTarget.BusRoot
+            }
+
+            if (-not (Get-TargetHealth -expectedBusRoot $fallbackBusRoot -TimeoutSeconds 120))
+            {
+                throw "Rollback startup health check failed for $($fallbackTarget.Cwd)"
+            }
+
+            $script:Operation = Write-Operation -Operation $script:Operation -Status "rolled_back" -LastError "phase=rollback_complete pid=$($fallbackProcess.ProcessId)"
+            Write-Phase "rolled_back"
+            exit 1
+        }
+        catch
+        {
+            $script:Operation = Write-Operation -Operation $script:Operation -Status "failed" -LastError "rollback_failed:$($_.Exception.Message)"
+            throw
+        }
     }
 
     $script:Operation = Write-Operation -Operation $script:Operation -Status "failed" -LastError $errorMessage

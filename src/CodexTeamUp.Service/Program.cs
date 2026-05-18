@@ -36,11 +36,22 @@ var controllerPolicy = new ReloadableCtuControllerPolicy(
 var controller = ReloadableCtuController.CreateDefault(defaultBusRoot, appServer, controllerLogger, controllerPolicy);
 var registry = McpToolRegistry.CreateDefault(controller, controllerLogger);
 var jsonOptions = new JsonSerializerOptions(JsonFile.Options) { WriteIndented = false };
+var serviceProjectRoot = ResolveProjectRootForBus(defaultBusRoot);
+new KnownGoodRuntimeCheckpointStore(defaultBusRoot).WriteHealthy(
+    serviceProjectRoot,
+    defaultBusRoot,
+    controller.Status.PluginPath,
+    controller.Status.ActiveType,
+    appServer.Status.PluginPath,
+    appServer.Status.ActiveType,
+    isVerified: false,
+    verificationSource: "service_boot");
 
 using var shutdown = new CancellationTokenSource();
 var parentMonitor = parentProcessId is int pid
     ? MonitorParentProcessAsync(pid, shutdown)
     : Task.CompletedTask;
+var startupSweepTask = RunControllerStartupSweepLoopAsync(controller, controllerLogger, shutdown.Token);
 
 var listener = new TcpListener(IPAddress.Loopback, port);
 listener.Start();
@@ -75,8 +86,42 @@ try
 finally
 {
     shutdown.Cancel();
+    await startupSweepTask.ConfigureAwait(false);
     listener.Stop();
     await parentMonitor.ConfigureAwait(false);
+}
+
+static async Task RunControllerStartupSweepAsync(ICtuController controller, CtuJsonLogger? logger, CancellationToken cancellationToken)
+{
+    var heartbeatDelay = TimeSpan.FromMilliseconds(500);
+    try
+    {
+        await controller.RunStartupSweepAsync(cancellationToken).ConfigureAwait(false);
+    }
+    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+    {
+        return;
+    }
+    catch (Exception ex)
+    {
+        logger?.Error("service.controller_startup_sweep.failed", ex);
+    }
+
+    try
+    {
+        await Task.Delay(heartbeatDelay, cancellationToken).ConfigureAwait(false);
+    }
+    catch (OperationCanceledException)
+    {
+    }
+}
+
+static async Task RunControllerStartupSweepLoopAsync(ICtuController controller, CtuJsonLogger? logger, CancellationToken cancellationToken)
+{
+    while (!cancellationToken.IsCancellationRequested)
+    {
+        await RunControllerStartupSweepAsync(controller, logger, cancellationToken).ConfigureAwait(false);
+    }
 }
 
 async Task HandleClientAsync(TcpClient client)
