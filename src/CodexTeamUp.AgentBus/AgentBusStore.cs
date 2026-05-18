@@ -689,11 +689,29 @@ public sealed class AgentBusStore
         }
     }
 
+    /// <summary>Serializes event appends to avoid concurrent writers corrupting JSONL event rows.</summary>
     private void AppendEvent(AgentBusEvent evt)
     {
         Directory.CreateDirectory(RootDirectory);
         var lineOptions = new JsonSerializerOptions(JsonFile.Options) { WriteIndented = false };
-        File.AppendAllText(EventsPath, JsonSerializer.Serialize(evt, lineOptions) + Environment.NewLine);
+        var line = JsonSerializer.Serialize(evt, lineOptions) + Environment.NewLine;
+        const int lockWaitAttempts = 100;
+        const int lockWaitMilliseconds = 5;
+
+        for (var attempt = 0; attempt < lockWaitAttempts; attempt++)
+        {
+            using var appendLock = TryCreateLock("events.append.lock");
+            if (appendLock is null)
+            {
+                Thread.Sleep(lockWaitMilliseconds);
+                continue;
+            }
+
+            File.AppendAllText(EventsPath, line);
+            return;
+        }
+
+        throw new IOException("Timed out acquiring event append lock.");
     }
 
     private AgentRegistryDocument ReadRegistry()
@@ -824,7 +842,7 @@ public sealed class AgentBusStore
         var path = Path.Combine(LocksDirectory, name);
         try
         {
-            return new FileStream(path, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None);
+            return new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
         }
         catch (IOException)
         {

@@ -19,6 +19,7 @@ var tests = new (string Name, Func<Task> Body)[]
     ("AgentBus registry and result wait", () => Task.Run(AgentBusRegistryAndResultWait)),
     ("AgentBus clear tasks deletes task queues", () => Task.Run(AgentBusClearTasksDeletesTaskQueues)),
     ("AgentBus tiny result wait does not throw", () => Task.Run(AgentBusTinyResultWaitDoesNotThrow)),
+    ("AgentBus event append is safe under parallel writes", () => Task.Run(AgentBusEventAppendIsSafeUnderParallelWrites)),
     ("Codex state reader parses rollout metadata", () => Task.Run(CodexStateReaderParsesRollouts)),
     ("SafeText redacts obvious secrets", () => Task.Run(SafeTextRedactsSecrets)),
     ("CTU JSON logger writes redacted machine and human logs", () => Task.Run(CtuJsonLoggerWritesRedactedMachineAndHumanLogs)),
@@ -67,6 +68,7 @@ var tests = new (string Name, Func<Task> Body)[]
     ("MCP registry ACKs deferred task dispatch", () => Task.Run(McpRegistryAcksDeferredTaskDispatch)),
     ("Controller delivery loop waits before retrying queued team message", () => Task.Run(ControllerDeliveryLoopWaitsBeforeRetryingQueuedMessage)),
     ("Controller delivery loop supersedes older queued tasks for same target", () => Task.Run(ControllerDeliveryLoopSupersedesOlderQueuedTasks)),
+    ("Controller delivery loop fails open task for retired agent", () => Task.Run(ControllerDeliveryLoopFailsOpenTaskForRetiredAgent)),
     ("Controller delivery loop recovers stale claimed task", () => Task.Run(ControllerDeliveryLoopRecoversStaleClaimedTask)),
     ("Controller result notify retry persists metadata and retries from startup sweep", () => Task.Run(ControllerResultNotifyRetryPersistsMetadataAndRetries)),
     ("Controller guardian evaluates result into continuity state", () => Task.Run(ControllerGuardianEvaluatesResultIntoContinuityState)),
@@ -90,6 +92,7 @@ var tests = new (string Name, Func<Task> Body)[]
     ("MCP team send message enqueues by default", () => Task.Run(McpTeamSendMessageEnqueuesByDefault)),
     ("MCP team send message waits for result", () => Task.Run(McpTeamSendMessageWaitsForResult)),
     ("MCP team send message defers stalled wakeup quickly", () => Task.Run(McpTeamSendMessageDefersStalledWakeupQuickly)),
+    ("Bridge dispatch to retired agent is blocked", () => Task.Run(McpBridgeDispatchTaskBlocksRetiredTarget)),
     ("MCP registry recreates stale ctu agent threads", () => Task.Run(McpRegistryRecreatesStaleCtuAgentThreads)),
     ("MCP registry creates replacement when display name changes", () => Task.Run(McpRegistryCreatesReplacementWhenDisplayNameChanges)),
     ("MCP registry retries thread naming until created thread is visible", () => Task.Run(McpRegistryRetriesThreadNamingUntilCreatedThreadIsVisible)),
@@ -321,6 +324,37 @@ static void AgentBusTinyResultWaitDoesNotThrow()
 
     var result = bus.WaitForResult(task.Id, TimeSpan.FromMilliseconds(1));
     True(result is null);
+}
+
+static void AgentBusEventAppendIsSafeUnderParallelWrites()
+{
+    var root = NewTestDirectory();
+    var bus = new AgentBusStore(Path.Combine(root, ".codexteamup/agentbus"));
+    bus.Initialize();
+
+    const int writes = 240;
+    var startingCount = bus.ListEvents().Count;
+
+    var tasks = Enumerable.Range(0, writes)
+        .Select(i => Task.Run(() => bus.RecordEvent(new AgentBusEvent
+        {
+            Timestamp = DateTimeOffset.Now,
+            Type = "agentbus.test.event_append",
+            Message = $"parallel-{i}"
+        })))
+        .ToArray();
+
+    Task.WaitAll(tasks);
+
+    var lines = File.ReadAllLines(Path.Combine(root, ".codexteamup/agentbus/events.jsonl"))
+        .Where(line => !string.IsNullOrWhiteSpace(line))
+        .ToList();
+    var parsed = bus.ListEvents(5000)
+        .Where(evt => string.Equals(evt.Type, "agentbus.test.event_append", StringComparison.Ordinal))
+        .ToList();
+
+    Equal(startingCount + writes, lines.Count);
+    Equal(writes, parsed.Count);
 }
 
 static void AgentBusClearTasksDeletesTaskQueues()
@@ -1903,6 +1937,52 @@ static void McpTeamSendMessageDefersStalledWakeupQuickly()
     True(doc.RootElement.GetProperty("wakeup").GetProperty("deferred").GetBoolean());
     True(!doc.RootElement.TryGetProperty("wait", out var wait) || wait.ValueKind == JsonValueKind.Null);
     True(bus.ListEvents().Any(evt => evt.Type == "team.message.deferred"));
+}
+
+static void McpBridgeDispatchTaskBlocksRetiredTarget()
+{
+    var root = NewTestDirectory();
+    var busRoot = Path.Combine(root, ".codexteamup", "agentbus");
+    var bus = new AgentBusStore(busRoot);
+    bus.Initialize();
+    bus.RegisterAgent(new AgentDefinition
+    {
+        Id = "ctu/wrapper",
+        Role = "Wrapper",
+        ThreadId = "thread-wrapper",
+        Cwd = root,
+        Status = "retired",
+        ReturnTo = "ctu/architect"
+    });
+
+    var task = bus.CreateTask(
+        "ctu/architect",
+        "ctu/wrapper",
+        "Retired agent task",
+        "Do not dispatch to retired agent.",
+        "codexteamup",
+        root,
+        [],
+        "ctu/architect");
+
+    var appServer = new FakeAppServerClient("""{"data":[{"id":"thread-wrapper","name":"ctu/wrapper","cwd":"ROOT","status":"idle"}]}"""
+        .Replace("ROOT", JsonEscaped(root), StringComparison.Ordinal));
+    var registry = McpToolRegistry.CreateDefault(busRoot, appServer);
+    var args = JsonSerializer.Deserialize<JsonElement>($$"""
+    {
+      "busRoot": {{JsonSerializer.Serialize(busRoot)}},
+      "taskId": {{JsonSerializer.Serialize(task.Id)}}
+    }
+    """);
+
+    _ = registry.InvokeAsync("bridge_dispatch_task", args).GetAwaiter().GetResult();
+
+    Equal(0, appServer.SentTurns.Count);
+    Equal(0, bus.ListTasks("ctu/wrapper", "open").Count());
+    var failedResult = bus.WaitForResult(task.Id, TimeSpan.FromMilliseconds(100));
+    Equal("failed", failedResult?.Status);
+    Equal("ctu/controller", failedResult?.From);
+    True(bus.ListEvents(300).Any(evt => evt.TaskId == task.Id && evt.Type == "task.dispatch_blocked_retired_agent"));
 }
 
 static void McpRegistryRecreatesStaleCtuAgentThreads()
@@ -3548,6 +3628,46 @@ static void ControllerGuardianDoesNotRedispatchClaimedTask()
     Equal(ExecutionContinuityStateKind.WaitingOnWorker, state?.State);
     Equal(false, state?.ShouldContinue);
     True(bus.ListEvents(300).Any(evt => evt.Type == "continuity.dispatch_satisfied"));
+}
+
+static void ControllerDeliveryLoopFailsOpenTaskForRetiredAgent()
+{
+    var root = NewTestDirectory();
+    var busRoot = Path.Combine(root, ".codexteamup", "agentbus");
+    var bus = new AgentBusStore(busRoot);
+    bus.Initialize();
+    bus.RegisterAgent(new AgentDefinition
+    {
+        Id = "ctu/wrapper",
+        Role = "Wrapper",
+        DisplayName = "ctu/wrapper",
+        ThreadId = "thread-wrapper",
+        Cwd = root,
+        ReturnTo = "ctu/architect",
+        Status = "retired"
+    });
+
+    var task = bus.CreateTask(
+        "ctu/architect",
+        "ctu/wrapper",
+        "Should not dispatch",
+        "Do not deliver work to retired agents.",
+        "codexteamup",
+        root,
+        [],
+        "ctu/architect");
+
+    var appServer = new FakeAppServerClient("""{"data":[]}""");
+    var controller = new DefaultCtuController(busRoot, appServer);
+    controller.RunStartupSweepAsync().GetAwaiter().GetResult();
+
+    Equal(0, appServer.SentTurns.Count);
+    Equal(0, bus.ListTasks(status: "open").Count);
+    Equal(1, bus.ListTasks(status: "failed").Count(taskItem => taskItem.Id == task.Id));
+    var result = bus.WaitForResult(task.Id, TimeSpan.FromMilliseconds(50));
+    Equal("failed", result?.Status);
+    Equal("ctu/controller", result?.From);
+    True(bus.ListEvents(300).Any(evt => evt.TaskId == task.Id && evt.Type == "task.dispatch_blocked_retired_agent"));
 }
 
 static void ControllerGuardianResumesNotifyFromContinuityState()

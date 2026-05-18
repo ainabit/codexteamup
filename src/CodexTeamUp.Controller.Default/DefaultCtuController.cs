@@ -200,6 +200,12 @@ public sealed class DefaultCtuController : ICtuController
 
     private async Task TryDeliverQueuedTaskAsync(AgentBusStore bus, AgentBusTask task, CancellationToken cancellationToken)
     {
+        var targetAgent = string.IsNullOrWhiteSpace(task.To) ? null : bus.FindAgent(task.To);
+        if (TryHandleRetiredTaskDispatch(bus, task, targetAgent?.Status))
+        {
+            return;
+        }
+
         task = bus.UpdateTask(task.Id, existing => existing with
         {
             DeliveryAttempts = existing.DeliveryAttempts + 1,
@@ -2549,6 +2555,16 @@ public sealed class DefaultCtuController : ICtuController
     {
         var task = bus.FindTask(taskId) ?? throw new FileNotFoundException("Task not found.");
         var agent = await EnsureAgentBoundAsync(bus, appServer, task.To, task.Cwd, cancellationToken).ConfigureAwait(false);
+        if (TryHandleRetiredTaskDispatch(bus, task, agent.Status))
+        {
+            return new DispatchTaskResult(
+                false,
+                null,
+                $"Target agent {task.To} is retired and cannot receive queued work.",
+                false,
+                null,
+                null);
+        }
 
         var message = BuildTaskWakeMessage(task.Id, task.To, DefaultArchitectFor(task.To));
         var wakeup = await SendTurnWhenReadyAsync(appServer, agent.ThreadId!, message, task.Cwd, RuntimeSettings(agent), wakeupTimeout, cancellationToken).ConfigureAwait(false);
@@ -2582,6 +2598,38 @@ public sealed class DefaultCtuController : ICtuController
             wakeup.Deferred,
             wakeup.InitialStatus,
             wakeup.FinalStatus);
+    }
+
+    private static bool TryHandleRetiredTaskDispatch(AgentBusStore bus, AgentBusTask task, string? status)
+    {
+        if (!string.Equals(status, "retired", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var failureMessage = $"Target agent {task.To} is retired and cannot receive queued work.";
+        bus.RecordEvent(new AgentBusEvent
+        {
+            Timestamp = DateTimeOffset.Now,
+            Type = "task.dispatch_blocked_retired_agent",
+            TaskId = task.Id,
+            From = task.From,
+            To = task.To,
+            Message = failureMessage
+        });
+        bus.WriteResult(
+            task.Id,
+            $"{failureMessage} Reassign the task to an active agent.",
+            "failed",
+            "ctu/controller",
+            task.ReturnTo ?? task.From,
+            null,
+            [],
+            [],
+            nextSuggestedAction: $"Reassign {task.Id} away from retired agent {task.To}.",
+            outcome: "failed");
+
+        return true;
     }
 
     private async Task<ResultNotifyAttempt> AttemptResultNotifyAsync(
