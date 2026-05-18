@@ -15,6 +15,7 @@ public sealed class ExchangeStore
         CorrelationsDirectory = Path.Combine(RootDirectory, "correlations");
         DeadLetterDirectory = Path.Combine(RootDirectory, "deadletter");
         InboxDirectory = Path.Combine(RootDirectory, "inbox");
+        StartupDirectory = Path.Combine(RootDirectory, "startup");
         LeasesDirectory = Path.Combine(RootDirectory, "leases");
         OutboxDirectory = Path.Combine(RootDirectory, "outbox");
         PayloadsDirectory = Path.Combine(RootDirectory, "payloads");
@@ -22,6 +23,7 @@ public sealed class ExchangeStore
 
     public string RootDirectory { get; }
     public string InboxDirectory { get; }
+    public string StartupDirectory { get; }
     public string OutboxDirectory { get; }
     public string DeadLetterDirectory { get; }
     public string LeasesDirectory { get; }
@@ -31,6 +33,10 @@ public sealed class ExchangeStore
     public void Initialize()
     {
         Directory.CreateDirectory(InboxDirectory);
+        Directory.CreateDirectory(StartupDirectory);
+        Directory.CreateDirectory(Path.Combine(StartupDirectory, ExchangeTargetScope.System));
+        Directory.CreateDirectory(Path.Combine(StartupDirectory, ExchangeTargetScope.Project));
+        Directory.CreateDirectory(Path.Combine(StartupDirectory, ExchangeTargetScope.Agent));
         Directory.CreateDirectory(Path.Combine(InboxDirectory, ExchangeTargetScope.System));
         Directory.CreateDirectory(Path.Combine(InboxDirectory, ExchangeTargetScope.Project));
         Directory.CreateDirectory(Path.Combine(InboxDirectory, ExchangeTargetScope.Agent));
@@ -84,7 +90,18 @@ public sealed class ExchangeStore
     public IReadOnlyList<(string Path, ExchangeEnvelope Envelope)> ListPendingSystemMessages(string kind, int limit)
     {
         Initialize();
-        return EnumerateEnvelopeFiles(kind, limit)
+        return ListPendingMessages(InboxSystemMessageKindDirectory(kind), limit);
+    }
+
+    public IReadOnlyList<(string Path, ExchangeEnvelope Envelope)> ListPendingStartupSystemMessages(string kind, int limit)
+    {
+        Initialize();
+        return ListPendingMessages(StartupSystemMessageKindDirectory(kind), limit);
+    }
+
+    private IReadOnlyList<(string Path, ExchangeEnvelope Envelope)> ListPendingMessages(string directory, int limit)
+    {
+        return EnumerateEnvelopeFiles(directory, limit)
             .Select(path => new
             {
                 Path = path,
@@ -227,9 +244,8 @@ public sealed class ExchangeStore
         }
     }
 
-    private IEnumerable<string> EnumerateEnvelopeFiles(string kind, int limit)
+    private IEnumerable<string> EnumerateEnvelopeFiles(string directory, int limit)
     {
-        var directory = Path.Combine(InboxDirectory, ExchangeTargetScope.System, kind);
         if (!Directory.Exists(directory))
         {
             yield break;
@@ -251,6 +267,13 @@ public sealed class ExchangeStore
     {
         if (string.Equals(envelope.TargetScope, ExchangeTargetScope.System, StringComparison.OrdinalIgnoreCase))
         {
+            if (string.Equals(envelope.Kind, ExchangeEnvelopeKind.Restart, StringComparison.OrdinalIgnoreCase))
+            {
+                var startupKindPath = StartupSystemMessageKindDirectory(envelope.Kind);
+                Directory.CreateDirectory(startupKindPath);
+                return Path.Combine(startupKindPath, $"{envelope.MessageId}.json");
+            }
+
             var kindPath = Path.Combine(InboxDirectory, ExchangeTargetScope.System, envelope.Kind);
             Directory.CreateDirectory(kindPath);
             return Path.Combine(kindPath, $"{envelope.MessageId}.json");
@@ -305,4 +328,10 @@ public sealed class ExchangeStore
         };
         JsonFile.WriteAtomic(path, updated);
     }
+
+    private string StartupSystemMessageKindDirectory(string kind)
+        => Path.Combine(StartupDirectory, ExchangeTargetScope.System, kind);
+
+    private string InboxSystemMessageKindDirectory(string kind)
+        => Path.Combine(InboxDirectory, ExchangeTargetScope.System, kind);
 }

@@ -260,7 +260,7 @@ The helper should materialize that as a startup handoff envelope in the target c
 For restart specifically, use the exchange channel itself as the durable message:
 
 ```text
-.codexteamup/exchange/inbox/system/restart/<message-id>.json
+.codexteamup/exchange/startup/system/restart/<message-id>.json
 ```
 
 That file is the restart continuation contract. When CTU starts and the controller runtime is up, the first startup sweep should read pending `system/restart` envelopes, lease them, validate the linked restart operation, and only then perform the internal dispatch into AgentBus or the controller's system action flow.
@@ -285,7 +285,7 @@ The helper should:
 4. poll target service health until:
    - service is healthy,
    - `defaultBusRoot` matches the target checkout,
-5. ensure the startup handoff envelope exists in the target exchange inbox,
+5. ensure the startup handoff envelope exists under `.codexteamup/exchange/startup/system/restart/` in the target checkout,
 6. let the target controller/runtime loop import and route that handoff,
 7. mark `completed`.
 
@@ -312,7 +312,7 @@ Restart completion depends on a controller-owned runtime loop.
 
 That loop should:
 
-1. scan `.codexteamup/exchange/inbox/**`,
+1. scan startup handoffs under `.codexteamup/exchange/startup/**` and runtime ingress under `.codexteamup/exchange/inbox/**`,
 2. lease pending envelopes,
 3. import startup handoffs and external requests, with `system/restart` processed first during startup,
 4. translate them into AgentBus tasks or restart/system actions,

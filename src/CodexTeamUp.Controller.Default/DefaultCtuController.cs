@@ -2017,7 +2017,7 @@ public sealed class DefaultCtuController : ICtuController
     private async Task ProcessStartupSweepAsync(CancellationToken cancellationToken)
     {
         var exchange = new ExchangeStore(_defaultBusRoot);
-        var messages = exchange.ListPendingSystemMessages(ExchangeEnvelopeKind.Restart, Math.Max(1, _controllerPolicy.Policy.WaitResultTimeoutCapSeconds));
+        var messages = exchange.ListPendingStartupSystemMessages(ExchangeEnvelopeKind.Restart, Math.Max(1, _controllerPolicy.Policy.WaitResultTimeoutCapSeconds));
         if (messages.Count == 0)
         {
             return;

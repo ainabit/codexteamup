@@ -208,8 +208,8 @@ function New-RestartHandoff([object]$operation)
         throw "Target exchange root not resolvable from bus root $($operation.TargetBusRoot)"
     }
 
-    $inboxDirectory = Join-Path $exchangeRoot "inbox\system\restart"
-    New-Item -ItemType Directory -Force -Path $inboxDirectory | Out-Null
+    $startupDirectory = Join-Path $exchangeRoot "startup\system\restart"
+    New-Item -ItemType Directory -Force -Path $startupDirectory | Out-Null
 
     $payload = @{
         operationId = $operation.Id
@@ -238,7 +238,7 @@ function New-RestartHandoff([object]$operation)
         Status = "pending"
     }
 
-    $messagePath = Join-Path $inboxDirectory "$messageId.json"
+    $messagePath = Join-Path $startupDirectory "$messageId.json"
     $tempPath = "$messagePath.tmp"
     $envelope | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $tempPath -Encoding UTF8
     Move-Item -LiteralPath $tempPath -Destination $messagePath -Force

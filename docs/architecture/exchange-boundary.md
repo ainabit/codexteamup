@@ -19,6 +19,9 @@ That includes:
   inbox/system/
   inbox/project/
   inbox/agent/
+  startup/system/
+  startup/project/
+  startup/agent/
   outbox/
   deadletter/
   leases/
@@ -59,14 +62,16 @@ The controller runtime owns the sweep/import policy for this channel:
 4. translate into AgentBus tasks or controller system actions;
 5. emit success, outbox, or dead-letter evidence.
 
+`startup` follows the same schema as `inbox` but is intentionally scoped to startup-only handoffs before full runtime resume.
+
 If future channels exist, they should still land on this same envelope/correlation model before workflow routing.
 
 ## Restart usage
 
-Restart uses:
+Restart currently uses:
 
 ```text
-.codexteamup/exchange/inbox/system/restart/<message-id>.json
+.codexteamup/exchange/startup/system/restart/<message-id>.json
 ```
 
 That durable envelope is what the new CTU runtime reads during startup before it internally dispatches the continuation.

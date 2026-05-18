@@ -9,7 +9,7 @@ Direct continuation delivery immediately after `target_healthy` proved fragile. 
 
 ## Decision
 
-Restart continuation is delivered as a durable startup handoff message in the exchange inbox. The newly started CTU runtime reads that message during startup sweep and performs the internal dispatch itself.
+Restart continuation is delivered as a durable startup handoff message under `.codexteamup/exchange/startup/system/restart/` in the target checkout. The newly started CTU runtime reads that message during startup sweep and performs the internal dispatch itself.
 
 ## Rejected alternative
 

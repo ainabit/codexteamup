@@ -2306,6 +2306,10 @@ static void ExchangeHandoffLeaseAndCompletionFlow()
     SeedRestartCheckout(targetCwd);
     var sourceBusRoot = Path.Combine(sourceCwd, ".codexteamup", "agentbus");
     var targetBusRoot = Path.Combine(targetCwd, ".codexteamup", "agentbus");
+    var exchangeRoot = Path.Combine(Path.GetDirectoryName(targetBusRoot)!, "exchange");
+
+    var sourceExchange = new ExchangeStore(sourceBusRoot);
+    True(sourceExchange.ListPendingStartupSystemMessages(ExchangeEnvelopeKind.Restart, 10).Count == 0);
 
     var operationStore = new RestartOperationStore(sourceBusRoot);
     var operation = operationStore.Create(
@@ -2323,14 +2327,22 @@ static void ExchangeHandoffLeaseAndCompletionFlow()
 
     var exchange = new ExchangeStore(targetBusRoot);
     var envelope = exchange.CreateRestartHandoff(operationStore.OperationPath(operation.Id), operation);
-    var pending = exchange.ListPendingSystemMessages(ExchangeEnvelopeKind.Restart, 10);
+    var startupExpectedPath = Path.Combine(
+        exchangeRoot,
+        "startup",
+        ExchangeTargetScope.System,
+        ExchangeEnvelopeKind.Restart,
+        $"{envelope.MessageId}.json");
+    var pending = exchange.ListPendingStartupSystemMessages(ExchangeEnvelopeKind.Restart, 10);
     Equal(1, pending.Count);
+    Equal(startupExpectedPath, pending.Single().Path);
+    True(!File.Exists(Path.Combine(exchangeRoot, "inbox", ExchangeTargetScope.System, ExchangeEnvelopeKind.Restart, $"{envelope.MessageId}.json")));
 
     using var lease = exchange.TryAcquireLease(pending[0].Path, "ctu-controller", TimeSpan.FromMinutes(1));
     True(lease is not null);
 
     exchange.Complete(pending[0].Path, lease!.Envelope);
-    pending = exchange.ListPendingSystemMessages(ExchangeEnvelopeKind.Restart, 10);
+    pending = exchange.ListPendingStartupSystemMessages(ExchangeEnvelopeKind.Restart, 10);
     Equal(0, pending.Count);
 }
 
@@ -2406,6 +2418,7 @@ static void ControllerStartupSweepImportsRestartHandoff()
 
     var sourceBusRoot = Path.Combine(sourceCwd, ".codexteamup", "agentbus");
     var targetBusRoot = Path.Combine(targetCwd, ".codexteamup", "agentbus");
+    var exchangeRoot = Path.Combine(Path.GetDirectoryName(targetBusRoot)!, "exchange");
 
     var targetBus = new AgentBusStore(targetBusRoot);
     targetBus.Initialize();
@@ -2422,7 +2435,6 @@ static void ControllerStartupSweepImportsRestartHandoff()
 
     var operationStore = new RestartOperationStore(sourceBusRoot);
     var targetExchange = new ExchangeStore(targetBusRoot);
-    var sourceExchange = new ExchangeStore(sourceBusRoot);
     var operation = operationStore.Create(
         requestedByAgentId: "ctu/architect",
         sourceCwd: sourceCwd,
@@ -2437,6 +2449,10 @@ static void ControllerStartupSweepImportsRestartHandoff()
         expectedTargetBranch: null);
 
     var envelope = targetExchange.CreateRestartHandoff(operationStore.OperationPath(operation.Id), operation);
+    Equal(1, targetExchange.ListPendingStartupSystemMessages(ExchangeEnvelopeKind.Restart, 10).Count);
+    Equal(0, targetExchange.ListPendingSystemMessages(ExchangeEnvelopeKind.Restart, 10).Count);
+    True(!File.Exists(Path.Combine(exchangeRoot, "inbox", ExchangeTargetScope.System, ExchangeEnvelopeKind.Restart, $"{envelope.MessageId}.json")));
+    True(File.Exists(Path.Combine(exchangeRoot, "startup", ExchangeTargetScope.System, ExchangeEnvelopeKind.Restart, $"{envelope.MessageId}.json")));
 
     var appServer = new FakeAppServerClient(
         $$"""
@@ -2448,7 +2464,7 @@ static void ControllerStartupSweepImportsRestartHandoff()
     var controller = new DefaultCtuController(targetBusRoot, appServer);
     controller.RunStartupSweepAsync().GetAwaiter().GetResult();
 
-    Equal(0, sourceExchange.ListPendingSystemMessages(ExchangeEnvelopeKind.Restart, 10).Count);
+    Equal(0, targetExchange.ListPendingStartupSystemMessages(ExchangeEnvelopeKind.Restart, 10).Count);
     var reloaded = operationStore.Find(operation.Id);
     Equal(RestartOperationStatus.ContinuationDispatched, reloaded?.Status);
     Equal(envelope.MessageId, reloaded?.StartupHandoffMessageId);
@@ -2469,6 +2485,7 @@ static void ControllerStartupSweepPersistsRestartContinuationAsResumePendingExte
 
     var sourceBusRoot = Path.Combine(sourceCwd, ".codexteamup", "agentbus");
     var targetBusRoot = Path.Combine(targetCwd, ".codexteamup", "agentbus");
+    var exchangeRoot = Path.Combine(Path.GetDirectoryName(targetBusRoot)!, "exchange");
 
     var targetBus = new AgentBusStore(targetBusRoot);
     targetBus.Initialize();
@@ -2498,7 +2515,12 @@ static void ControllerStartupSweepPersistsRestartContinuationAsResumePendingExte
         continuePrompt: "Resume from restart handoff.",
         expectedTargetBranch: null);
 
-    targetExchange.CreateRestartHandoff(operationStore.OperationPath(operation.Id), operation);
+    var handoff = targetExchange.CreateRestartHandoff(operationStore.OperationPath(operation.Id), operation);
+    var startupMessage = targetExchange.ListPendingStartupSystemMessages(ExchangeEnvelopeKind.Restart, 10).Single();
+    Equal(1, targetExchange.ListPendingStartupSystemMessages(ExchangeEnvelopeKind.Restart, 10).Count);
+    Equal(handoff.MessageId, startupMessage.Envelope.MessageId);
+    True(!File.Exists(Path.Combine(exchangeRoot, "inbox", ExchangeTargetScope.System, ExchangeEnvelopeKind.Restart, $"{handoff.MessageId}.json")));
+    True(File.Exists(startupMessage.Path));
 
     var appServer = new FakeAppServerClient("""{"data":[]}""");
     var controller = new DefaultCtuController(targetBusRoot, appServer);
