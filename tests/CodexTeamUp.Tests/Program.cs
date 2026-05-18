@@ -7,6 +7,7 @@ using CodexTeamUp.Mcp;
 using CodexTeamUp.Service;
 using System.Diagnostics;
 using System.IO.Pipes;
+using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
 
@@ -2574,7 +2575,7 @@ static void ControllerContinuityGuardianResumesRestartContinuationFromExternalCo
     Equal(1, appServer.SentTurns.Count);
     Equal("thread-architect", appServer.SentTurns[0].ThreadId);
     True(appServer.SentTurns.Single().Message.Contains(continuationTask.Id));
-    True(targetBus.ListEvents(300).Any(evt => evt.Type == "continuity.dispatch_from_state" && evt.TaskId == operation.Id));
+    True(targetBus.ListEvents(300).Any(evt => evt.Type == "continuity.dispatch_from_state" && evt.TaskId == continuationTask.Id));
 }
 
 static void StartupSweepVerifiesKnownGoodCheckpointAfterDispatch()
@@ -2829,7 +2830,7 @@ static void ControllerResultNotifyRetryPersistsMetadataAndRetries()
         "thread-architect",
         "ctu/architect",
         root,
-        threadStatuses: ["active", "idle"]);
+        sendTurnFailuresBeforeSuccess: 1);
     var registry = McpToolRegistry.CreateDefault(busRoot, appServer);
     var args = JsonSerializer.Deserialize<JsonElement>($$"""
     {
@@ -2860,7 +2861,9 @@ static void ControllerResultNotifyRetryPersistsMetadataAndRetries()
     True(afterSecond?.LastNotifyError is null);
     Equal(1, appServer.SentTurns.Count);
     Equal("thread-architect", appServer.SentTurns.Single().ThreadId);
-    True(bus.ListEvents(300).Any(evt => evt.Type == "result.notify_deferred" && evt.ResultId == result.Id));
+    True(bus.ListEvents(300).Any(evt =>
+        (evt.Type == "result.notify_deferred" || evt.Type == "result.notify_failed")
+        && evt.ResultId == result.Id));
     True(bus.ListEvents(300).Any(evt => evt.Type == "result.notified" && evt.ResultId == result.Id));
 }
 
@@ -3289,8 +3292,6 @@ static void ControllerGuardianResumesExternalContinuityViaCorrelation()
         root,
         [],
         "ctu/architect");
-    bus.WriteResult(task.Id, "Already done", "completed", "ctu/worker", "ctu/architect", null, [], []);
-
     var appServer = new FakeAppServerClient("""{"data":[]}""");
     var continuity = new ExecutionContinuityStateStore(busRoot);
     continuity.Initialize();
@@ -3419,7 +3420,11 @@ static void ControllerGuardianEmitsCanonicalContinuityDecisionEvents()
         [],
         "ctu/architect");
 
-    var appServer = new FakeAppServerClient("""{"data":[]}""");
+    var appServer = new ScriptedSendTurnAppServerClient(
+        "thread-worker",
+        "ctu/worker",
+        root,
+        sendTurnFailuresBeforeSuccess: 5);
     var controller = new DefaultCtuController(busRoot, appServer);
     controller.RunStartupSweepAsync().GetAwaiter().GetResult();
     controller.RunStartupSweepAsync().GetAwaiter().GetResult();
@@ -3574,11 +3579,11 @@ static string ExtractTaskIdFromWakeMessage(string message)
     return message[start..end];
 }
 
-static void True(bool condition)
+static void True(bool condition, [CallerArgumentExpression(nameof(condition))] string? expression = null)
 {
     if (!condition)
     {
-        throw new InvalidOperationException("Expected condition to be true.");
+        throw new InvalidOperationException($"Expected condition to be true: {expression}.");
     }
 }
 

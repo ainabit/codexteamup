@@ -99,9 +99,9 @@ public sealed class DefaultCtuController : ICtuController
         try
         {
             await ProcessStartupSweepAsync(cancellationToken).ConfigureAwait(false);
-            await ProcessTaskDeliveryAsync(cancellationToken).ConfigureAwait(false);
             await ProcessResultNotificationRetriesAsync(cancellationToken).ConfigureAwait(false);
             await ProcessContinuityGuardianAsync(cancellationToken).ConfigureAwait(false);
+            await ProcessTaskDeliveryAsync(cancellationToken).ConfigureAwait(false);
             await ProcessGuardianHeartbeatAsync(cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex)
@@ -209,7 +209,13 @@ public sealed class DefaultCtuController : ICtuController
 
         try
         {
-            var dispatchResult = await DispatchTaskAsync(bus, _appServer, task.Id, ControllerWakeupTimeout(), cancellationToken).ConfigureAwait(false);
+            var dispatchResult = await DispatchTaskAsync(
+                bus,
+                _appServer,
+                task.Id,
+                ControllerWakeupTimeout(),
+                cancellationToken,
+                recordDeliveryAttempt: false).ConfigureAwait(false);
             if (cancellationToken.IsCancellationRequested)
             {
                 bus.UpdateTask(task.Id, existing => existing with { LastDeliveryError = "delivery canceled" });
@@ -222,6 +228,16 @@ public sealed class DefaultCtuController : ICtuController
                 {
                     LastDeliveryError = SafeText.Preview(dispatchResult.Error, 180) ?? "wake-up did not succeed",
                     LastDeliveryAttemptAt = DateTimeOffset.Now
+                });
+                bus.RecordEvent(new AgentBusEvent
+                {
+                    Timestamp = DateTimeOffset.Now,
+                    Type = "task.delivery_failed",
+                    TaskId = task.Id,
+                    From = task.From,
+                    To = task.To,
+                    Message = SafeText.Preview(dispatchResult.Error, 180) ?? "wake-up did not succeed",
+                    Payload = new { deferred = dispatchResult.Deferred }
                 });
             }
 
@@ -421,6 +437,11 @@ public sealed class DefaultCtuController : ICtuController
                     continue;
                 }
 
+                if (IsNonTerminalRepeatForSameOutcome(existing, targetState, result.Id))
+                {
+                    continue;
+                }
+
                 var nextState = BuildContinuityState(
                     result.TaskId,
                     existing,
@@ -542,6 +563,14 @@ public sealed class DefaultCtuController : ICtuController
             && !ExecutionContinuityStateKind.TerminalStates.Contains(targetState);
     }
 
+    private static bool IsNonTerminalRepeatForSameOutcome(ExecutionContinuityState? existing, string targetState, string outcomeRef)
+    {
+        return existing is not null
+            && !ExecutionContinuityStateKind.TerminalStates.Contains(existing.State)
+            && string.Equals(existing.State, targetState, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(existing.LastOutcomeRef, outcomeRef, StringComparison.OrdinalIgnoreCase);
+    }
+
     private async Task ProcessContinuityActionStatesAsync(AgentBusStore bus, ExecutionContinuityStateStore continuity, CancellationToken cancellationToken)
     {
         var latestStates = continuity.ListStates()
@@ -653,6 +682,21 @@ public sealed class DefaultCtuController : ICtuController
                 ExecutionContinuityStateKind.Completed,
                 "task_done",
                 "Task is already done.");
+            return;
+        }
+
+        if (task.LastDeliveryAttemptAt is not null
+            && task.DeliveryAttempts > 0
+            && string.IsNullOrWhiteSpace(task.LastDeliveryError))
+        {
+            RecordContinuityDispatchSatisfied(
+                bus,
+                continuity,
+                state,
+                task,
+                ExecutionContinuityStateKind.WaitingOnWorker,
+                "task_dispatched",
+                "Task already has a successful delivery attempt.");
             return;
         }
 
@@ -1142,7 +1186,7 @@ public sealed class DefaultCtuController : ICtuController
             return false;
         }
 
-        if (state.ShouldContinue && IsContinuityDecisionDispatchState(state.State))
+        if (state.ShouldContinue && !IsContinuityDecisionDispatchState(state.State))
         {
             return false;
         }
@@ -2070,10 +2114,11 @@ public sealed class DefaultCtuController : ICtuController
             throw new FileNotFoundException($"Restart operation was not found at {sourceOperationPath}");
         }
 
-        if (operation.SourceBusRoot is null || !Directory.Exists(operation.SourceBusRoot))
+        if (string.IsNullOrWhiteSpace(operation.SourceBusRoot))
         {
             throw new DirectoryNotFoundException($"Restart source bus root is not available: {operation.SourceBusRoot}");
         }
+        Directory.CreateDirectory(operation.SourceBusRoot);
 
         if (operation.Status is RestartOperationStatus.Completed or RestartOperationStatus.RolledBack or RestartOperationStatus.Failed)
         {
@@ -2089,14 +2134,28 @@ public sealed class DefaultCtuController : ICtuController
         var task = existingTask ?? await CreateRestartContinuationTaskAsync(targetBus, operation).ConfigureAwait(false);
         var taskId = task.Id;
 
-        var targetAgent = await EnsureAgentBoundAsync(
-            targetBus,
-            _appServer,
-            operation.TargetAgentId,
-            operation.TargetCwd,
-            cancellationToken).ConfigureAwait(false);
+        AgentDefinition? targetAgent = null;
+        try
+        {
+            targetAgent = await EnsureAgentBoundAsync(
+                targetBus,
+                _appServer,
+                operation.TargetAgentId,
+                operation.TargetCwd,
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (InvalidOperationException ex)
+        {
+            _logger?.Info("controller.startup_sweep.target_not_callable", new
+            {
+                operation.Id,
+                operation.TargetAgentId,
+                error = SafeText.Preview(ex.Message, 180)
+            });
+            targetAgent = targetBus.FindAgent(operation.TargetAgentId);
+        }
 
-        if (string.IsNullOrWhiteSpace(targetAgent.ThreadId))
+        if (string.IsNullOrWhiteSpace(targetAgent?.ThreadId))
         {
             var store = new RestartOperationStore(operation.SourceBusRoot);
             operation = store.UpdateStatus(
@@ -2388,13 +2447,26 @@ public sealed class DefaultCtuController : ICtuController
         IAppServerClient appServer,
         string taskId,
         TimeSpan wakeupTimeout,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool recordDeliveryAttempt = true)
     {
         var task = bus.FindTask(taskId) ?? throw new FileNotFoundException("Task not found.");
         var agent = await EnsureAgentBoundAsync(bus, appServer, task.To, task.Cwd, cancellationToken).ConfigureAwait(false);
 
         var message = BuildTaskWakeMessage(task.Id, task.To, DefaultArchitectFor(task.To));
         var wakeup = await SendTurnWhenReadyAsync(appServer, agent.ThreadId!, message, task.Cwd, RuntimeSettings(agent), wakeupTimeout, cancellationToken).ConfigureAwait(false);
+        if (recordDeliveryAttempt)
+        {
+            bus.UpdateTask(task.Id, existing => existing with
+            {
+                DeliveryAttempts = existing.DeliveryAttempts + 1,
+                LastDeliveryAttemptAt = DateTimeOffset.Now,
+                LastDeliveryError = wakeup.Result.Succeeded
+                    ? null
+                    : SafeText.Preview(wakeup.Result.Error, 180) ?? "wake-up did not succeed"
+            });
+        }
+
         bus.RecordEvent(new AgentBusEvent
         {
             Timestamp = DateTimeOffset.Now,
@@ -2437,11 +2509,14 @@ public sealed class DefaultCtuController : ICtuController
 
         try
         {
+            var effectiveRequestedAgentId = string.IsNullOrWhiteSpace(requestedAgentId)
+                ? currentResult.To
+                : requestedAgentId;
             var target = await ResolveNotifyTargetAsync(
                 bus,
                 appServer,
                 requestedThreadId,
-                requestedAgentId,
+                effectiveRequestedAgentId,
                 currentResult,
                 cwd,
                 cancellationToken).ConfigureAwait(false);

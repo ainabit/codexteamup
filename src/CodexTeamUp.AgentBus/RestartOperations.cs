@@ -4,11 +4,17 @@ using CodexTeamUp.Core;
 
 namespace CodexTeamUp.AgentBus;
 
+/// <summary>
+/// Names the supported restart operation families persisted by CTU.
+/// </summary>
 public static class RestartOperationKind
 {
     public const string CtuDesktopRestart = "ctu.desktop-restart";
 }
 
+/// <summary>
+/// Defines the durable lifecycle states for a CTU restart handoff.
+/// </summary>
 public static class RestartOperationStatus
 {
     public const string Prepared = "prepared";
@@ -24,6 +30,9 @@ public static class RestartOperationStatus
     public const string Failed = "failed";
 }
 
+/// <summary>
+/// Captures one durable restart request and the continuation handoff state.
+/// </summary>
 public sealed record RestartOperationRecord
 {
     public required string Id { get; init; }
@@ -49,6 +58,9 @@ public sealed record RestartOperationRecord
     public string? KnownGoodCheckpointId { get; init; }
 }
 
+/// <summary>
+/// Persists restart operation records and validates lifecycle transitions.
+/// </summary>
 public sealed class RestartOperationStore
 {
     public RestartOperationStore(string busRoot)
@@ -238,6 +250,8 @@ public sealed class RestartOperationStore
         return (currentStatus, nextStatus) switch
         {
             (RestartOperationStatus.Prepared, RestartOperationStatus.HelperStarted) => true,
+            (RestartOperationStatus.Prepared, RestartOperationStatus.ContinuationEnqueued) => true,
+            (RestartOperationStatus.Prepared, RestartOperationStatus.ContinuationDispatched) => true,
             (RestartOperationStatus.Prepared, RestartOperationStatus.Failed) => true,
             (RestartOperationStatus.HelperStarted, RestartOperationStatus.StoppingSource) => true,
             (RestartOperationStatus.HelperStarted, RestartOperationStatus.Failed) => true,
