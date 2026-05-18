@@ -130,7 +130,17 @@ Codex Desktop may start multiple wrapped `app-server` processes. Only the visibl
 
 Visible Codex Desktop threads should be named with their agent id/display name. Normal controller policy should pass the display name at thread creation and call the explicit thread naming path before the first prime turn when a thread is created or rebound. For short ACK/NACK live smoke paths, the controller may use `prime=false setName=false` to avoid fragile Desktop rename or prime calls before the AgentBus registration is usable; those paths must still pass the intended display name into thread creation and include the exact agent id in the first dispatched task or prime fallback. The first line of every prime prompt should also be the exact agent id as a fallback for Desktop title generation.
 
-`docs/ctu-runtime-architecture.md` is the binding architecture reference. Read it before changing CTU runtime, MCP, app-server adapter, controller, AgentBus, logging, or orchestration code. New runtime changes must preserve its layer split: MCP and app-server adapters stay thin; workflow lives in the hot-reloadable controller runtime; AgentBus remains durable truth.
+`docs/architecture/README.md` is the binding architecture entrypoint. Read it before changing CTU runtime, MCP, app-server adapter, controller, AgentBus, exchange, logging, acceptance flow, or orchestration code.
+
+Architecture governance is split deliberately:
+
+- `docs/architecture/**`: binding current-state architecture rules
+- `docs/adr/**`: durable decision history and rationale
+- `docs/initiatives/**`: active execution tracks and definition of done
+- `docs/operations/**`: startup, testing, recovery, and runtime inspection guidance
+- `docs/logbook.md`: reverse-chronological journal of notable CTU milestones, failures, and redesigns
+
+New runtime changes must preserve the architecture split: MCP and app-server adapters stay thin; workflow lives in the hot-reloadable controller runtime; AgentBus remains CTU's internal durable truth; external ingress/egress and restart startup handoffs use the exchange boundary.
 
 ## Reactivity And ACK/NACK
 
@@ -179,6 +189,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\test-codexteamup.ps1 -Coverag
 
 Coverage uses the repo-local .NET tool manifest and `coverlet.console`. The default line threshold is 80 percent. If the current baseline is below that threshold, add focused tests rather than lowering the architecture target.
 
+New production behavior must come with focused deterministic tests. Live smoke tests are evidence for runtime integration; they do not replace unit or deterministic controller/service tests. When you add or change controller flow, restart behavior, AgentBus semantics, exchange/channel logic, or service/API behavior, write or extend tests in the same branch before treating the slice as done.
+
 For changes to CTU service, wrapper, MCP tools, AgentBus, thread binding, wakeups, runtime settings, or agent orchestration, also run at least the relevant live Codex Desktop smoke test:
 
 ```powershell
@@ -208,6 +220,16 @@ When the user asks for the CTU tests or smoke tests, notify `ctu/tester` through
 - broad orchestration changes: deterministic safety net plus `-LiveAll`
 
 The tester should report exact commands, pass/fail status, run id for live tests, cleanup status, and any blockers.
+
+## Code Documentation
+
+Keep source code lightly documented for human maintainers.
+
+- Add short English summary comments for important classes, records, and interfaces.
+- The summary should say what the type owns or is responsible for, not restate the type name.
+- Keep the comments brief. One or two short sentences is enough.
+- Add or update the summary when a class changes responsibility in a meaningful way.
+- Prefer type-level documentation over noisy inline comments. Use inline comments only where local control flow is genuinely non-obvious.
 
 ## Codex Desktop Git Directives
 

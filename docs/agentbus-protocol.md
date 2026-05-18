@@ -2,6 +2,8 @@
 
 `.codexteamup/agentbus` is the durable truth for inter-thread coordination. Desktop app-server calls only wake threads; task content and results live here.
 
+AgentBus is the internal CTU-native coordination store. If CTU needs file-based ingress/egress for outside producers or restart startup handoffs, that lives in an adjacent exchange boundary under `.codexteamup/exchange`, not by inventing parallel semantics inside `tasks/open`.
+
 ## Layout
 
 ```text
@@ -17,6 +19,19 @@
   locks/*.lock
   inbox/<agent-id>/
 ```
+
+Separate external exchange layouts may live alongside AgentBus, for example:
+
+```text
+.codexteamup/exchange/
+  inbox/
+  outbox/
+  deadletter/
+  payloads/
+  correlations/
+```
+
+Those files are imported or exported by controller-owned runtime loops. They are not a second ad hoc task format for visible workers to manually poll.
 
 ## Lifecycle
 
