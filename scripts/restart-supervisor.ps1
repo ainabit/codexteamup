@@ -173,26 +173,16 @@ function Start-StartupScript([string]$cwd, [int]$preservePid)
         "-ForceStopExisting",
         "-PreservePid", $preservePid
     )
-    Write-BootstrapLog "launching startup script in-process for $cwd"
-    $previous = Get-Location
-    try
+    Write-BootstrapLog "launching startup script detached for $cwd"
+    $process = Start-Process "pwsh" -ArgumentList $argsList -WorkingDirectory $cwd -WindowStyle Hidden -PassThru
+    if ($null -eq $process)
     {
-        Set-Location $cwd
-        & "pwsh" @argsList
-        $exitCode = $LASTEXITCODE
-    }
-    finally
-    {
-        Set-Location $previous
-    }
-
-    if ($exitCode -ne 0)
-    {
-        throw "Startup script for $cwd exited with code $exitCode."
+        throw "Could not start startup script in $cwd."
     }
 
     return @{
-        ExitCode = $exitCode
+        ExitCode = $null
+        ProcessId = $process.Id
     }
 }
 
@@ -429,7 +419,7 @@ try
 
     Write-Phase "starting_target"
     $startupProcess = Start-StartupScript $script:Operation.TargetCwd $supervisorPid
-    $script:Operation = Write-Operation -Operation $script:Operation -Status "starting_target" -LastError "phase=starting_target_launch"
+    $script:Operation = Write-Operation -Operation $script:Operation -Status "starting_target" -LastError "phase=starting_target_launch pid=$($startupProcess.ProcessId)"
     $script:Operation = Write-Operation -Operation $script:Operation -Status "starting_target" -LastError "phase=starting_target_wait_health"
 
     $healthy = Get-TargetHealth -expectedBusRoot $script:Operation.TargetBusRoot
@@ -468,7 +458,7 @@ catch
         Write-Phase "rollback_starting"
         $script:Operation = Write-Operation -Operation $script:Operation -Status "rollback_starting" -LastError $errorMessage
         $fallbackProcess = Start-StartupScript $script:Operation.FallbackCwd $supervisorPid
-        $script:Operation = Write-Operation -Operation $script:Operation -Status "rolled_back" -LastError "phase=rollback_complete"
+        $script:Operation = Write-Operation -Operation $script:Operation -Status "rolled_back" -LastError "phase=rollback_complete pid=$($fallbackProcess.ProcessId)"
         Write-Phase "rolled_back"
         exit 1
     }
