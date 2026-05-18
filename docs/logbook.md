@@ -4,6 +4,10 @@ Reverse chronological notes about the build journey, notable failures, redesigns
 
 ## 2026-05-18
 
+- Restart semantics were tightened around a CTU session manifest instead of best-effort process discovery. Startup now records launcher/Desktop/service/wrapper PIDs, and restart uses that source-session record so switching to `codexteamup.acceptance` can close the old startup console before launching the target checkout through the normal KISS PowerShell entrypoint.
+- Live restart testing exposed two concrete guardrail gaps: `codexteamup.acceptance` was initially on an older branch commit, and a PowerShell-written startup handoff used PascalCase JSON that the controller rejected.
+- The fix made restart startup handoffs canonical camelCase, made exchange reads case-insensitive for compatibility, and deadletters malformed envelopes so one bad file cannot stall the controller sweep.
+- The deterministic safety net was also isolated from live CTU environment variables after `CTU_CONTROLLER_PLUGIN_PATH` leaked from the running runtime into the test process.
 - The intermediate global `ctu/projectlead` guardian heartbeat was removed from runtime code, controller policy, and binding docs. Carry-through is now intentionally agent-owned: an agent either finishes, hands off, asks a human, fails, or schedules its own deduplicated continuation.
 - ADR-0006 replaced the global projectlead heartbeat as the normal carry-through mechanism with agent-owned continuations:
   - every result declares `done`, `handed_off`, `self_continue`, `human`, or `failed`;

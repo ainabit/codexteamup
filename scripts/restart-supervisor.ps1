@@ -168,29 +168,29 @@ function Update-ExchangeCorrelation([string]$exchangeRoot, [string]$correlationI
     if ($null -eq $existing)
     {
         $existing = [pscustomobject]@{
-            CorrelationId = $correlationId
-            CreatedAt = [DateTimeOffset]::Now
-            UpdatedAt = [DateTimeOffset]::Now
-            MessageIds = @($envelope.MessageId)
-            LastMessageId = $envelope.MessageId
-            LastStatus = $envelope.Status
+            correlationId = $correlationId
+            createdAt = [DateTimeOffset]::Now
+            updatedAt = [DateTimeOffset]::Now
+            messageIds = @($envelope.messageId)
+            lastMessageId = $envelope.messageId
+            lastStatus = $envelope.status
         }
     }
     else
     {
-        $messageIds = if ($existing.MessageIds) { @($existing.MessageIds) } else { @() }
-        if ($messageIds -notcontains $envelope.MessageId)
+        $messageIds = if ($existing.messageIds) { @($existing.messageIds) } elseif ($existing.MessageIds) { @($existing.MessageIds) } else { @() }
+        if ($messageIds -notcontains $envelope.messageId)
         {
-            $messageIds += $envelope.MessageId
+            $messageIds += $envelope.messageId
         }
 
         $existing = [pscustomobject]@{
-            CorrelationId = $correlationId
-            CreatedAt = if ($existing.CreatedAt) { $existing.CreatedAt } else { [DateTimeOffset]::Now }
-            UpdatedAt = [DateTimeOffset]::Now
-            MessageIds = $messageIds
-            LastMessageId = $envelope.MessageId
-            LastStatus = $envelope.Status
+            correlationId = $correlationId
+            createdAt = if ($existing.createdAt) { $existing.createdAt } elseif ($existing.CreatedAt) { $existing.CreatedAt } else { [DateTimeOffset]::Now }
+            updatedAt = [DateTimeOffset]::Now
+            messageIds = $messageIds
+            lastMessageId = $envelope.messageId
+            lastStatus = $envelope.status
         }
     }
 
@@ -222,20 +222,20 @@ function New-RestartHandoff([object]$operation)
     }
 
     $envelope = [pscustomobject]@{
-        MessageId = $messageId
-        Kind = "restart"
-        TargetScope = "system"
-        TargetProject = Split-Path -Leaf $operation.TargetCwd
-        TargetAgentId = $operation.TargetAgentId
-        TargetThreadName = $operation.TargetAgentId
-        CorrelationId = $operation.Id
-        CausationId = $operation.Id
-        CreatedAt = [DateTimeOffset]::Now
-        ExpiresAt = [DateTimeOffset]::Now.AddHours(4)
-        PayloadType = "application/json"
-        Payload = $payload
-        AttemptCount = 0
-        Status = "pending"
+        messageId = $messageId
+        kind = "restart"
+        targetScope = "system"
+        targetProject = Split-Path -Leaf $operation.TargetCwd
+        targetAgentId = $operation.TargetAgentId
+        targetThreadName = $operation.TargetAgentId
+        correlationId = $operation.Id
+        causationId = $operation.Id
+        createdAt = [DateTimeOffset]::Now
+        expiresAt = [DateTimeOffset]::Now.AddHours(4)
+        payloadType = "application/json"
+        payload = $payload
+        attemptCount = 0
+        status = "pending"
     }
 
     $messagePath = Join-Path $startupDirectory "$messageId.json"
@@ -310,6 +310,154 @@ function Get-ObjectPropertyValue([Parameter(Mandatory=$true)] $object, [Paramete
     }
 
     return $property.Value
+}
+
+function Get-SessionPropertyValue($session, [Parameter(Mandatory=$true)][string]$Name)
+{
+    if ($null -eq $session)
+    {
+        return $null
+    }
+
+    $property = $session.PSObject.Properties[$Name]
+    if ($null -ne $property)
+    {
+        return $property.Value
+    }
+
+    $pascalName = if ($Name.Length -gt 1)
+    {
+        $Name.Substring(0, 1).ToUpperInvariant() + $Name.Substring(1)
+    }
+    else
+    {
+        $Name.ToUpperInvariant()
+    }
+
+    $property = $session.PSObject.Properties[$pascalName]
+    if ($null -ne $property)
+    {
+        return $property.Value
+    }
+
+    return $null
+}
+
+function Normalize-PathForCompare([string]$path)
+{
+    if ([string]::IsNullOrWhiteSpace($path))
+    {
+        return ""
+    }
+
+    return [System.IO.Path]::GetFullPath($path).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+}
+
+function Read-SourceSessionManifest([string]$sourceCwd)
+{
+    if ([string]::IsNullOrWhiteSpace($sourceCwd))
+    {
+        return $null
+    }
+
+    $manifestPath = Join-Path $sourceCwd ".ctu\sessions\current.json"
+    if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf))
+    {
+        return $null
+    }
+
+    try
+    {
+        $raw = Get-Content -LiteralPath $manifestPath -Raw
+        if ([string]::IsNullOrWhiteSpace($raw))
+        {
+            return $null
+        }
+
+        return ConvertFrom-Json -InputObject $raw
+    }
+    catch
+    {
+        Write-Phase "warning source session manifest read failed: $($_.Exception.Message)"
+        return $null
+    }
+}
+
+function Stop-SourceSessionPid(
+    [int]$processId,
+    [string[]]$expectedProcessNames,
+    [string]$label,
+    [int]$preservePid)
+{
+    if ($processId -le 0 -or $processId -eq $PID -or ($preservePid -gt 0 -and $processId -eq $preservePid))
+    {
+        return
+    }
+
+    $process = Get-Process -Id $processId -ErrorAction SilentlyContinue
+    if ($null -eq $process)
+    {
+        return
+    }
+
+    if ($expectedProcessNames.Count -gt 0 -and -not ($expectedProcessNames -contains $process.ProcessName))
+    {
+        Write-Phase "warning skipped session $label pid=$processId because process is $($process.ProcessName)"
+        return
+    }
+
+    try
+    {
+        Write-Phase "stopping source session $label pid=$processId"
+        Stop-Process -Id $processId -Force -ErrorAction Stop
+    }
+    catch
+    {
+        Write-Phase "warning source session $label pid=$processId stop failed: $($_.Exception.Message)"
+    }
+}
+
+function Stop-SourceSessionProcesses([string]$sourceCwd, [int]$preservePid)
+{
+    $session = Read-SourceSessionManifest -sourceCwd $sourceCwd
+    if ($null -eq $session)
+    {
+        return
+    }
+
+    $sessionCheckout = Get-SessionPropertyValue -session $session -Name "checkoutCwd"
+    if ([string]::IsNullOrWhiteSpace($sessionCheckout))
+    {
+        return
+    }
+
+    if (-not (Normalize-PathForCompare $sessionCheckout).Equals((Normalize-PathForCompare $sourceCwd), [StringComparison]::OrdinalIgnoreCase))
+    {
+        Write-Phase "warning skipped source session manifest for different checkout $sessionCheckout"
+        return
+    }
+
+    $wrapperPids = Get-SessionPropertyValue -session $session -Name "wrapperPids"
+    foreach ($wrapperPid in @($wrapperPids))
+    {
+        if ($null -ne $wrapperPid)
+        {
+            Stop-SourceSessionPid -processId ([int]$wrapperPid) -expectedProcessNames @("CodexTeamUp.CodexWrapper") -label "wrapper" -preservePid $preservePid
+        }
+    }
+
+    foreach ($entry in @(
+        [pscustomobject]@{ Property = "servicePid"; Expected = @("CodexTeamUp.Service"); Label = "service" },
+        [pscustomobject]@{ Property = "desktopPid"; Expected = @("Codex", "codex"); Label = "desktop" },
+        [pscustomobject]@{ Property = "launcherPid"; Expected = @("pwsh", "powershell"); Label = "startup-console" }
+    ))
+    {
+        $value = Get-SessionPropertyValue -session $session -Name $entry.Property
+        if ($null -ne $value)
+        {
+            Stop-SourceSessionPid -processId ([int]$value) -expectedProcessNames $entry.Expected -label $entry.Label -preservePid $preservePid
+        }
+    }
 }
 
 function Set-ObjectPropertyValue([Parameter(Mandatory=$true)] $object, [Parameter(Mandatory=$true)][string]$Name, $Value)
@@ -408,6 +556,7 @@ function Start-StartupScript([string]$cwd, [int]$preservePid, [switch]$NoPublish
     }
 
     $argsList = @(
+        "-NoExit",
         "-ExecutionPolicy", "Bypass",
         "-File", $startupScript,
         "-RestartSupervisorMode",
@@ -419,7 +568,7 @@ function Start-StartupScript([string]$cwd, [int]$preservePid, [switch]$NoPublish
         $argsList += "-NoPublish"
     }
     Write-BootstrapLog "launching startup script detached for $cwd"
-    $process = Start-Process "pwsh" -ArgumentList $argsList -WorkingDirectory $cwd -WindowStyle Hidden -PassThru
+    $process = Start-Process "pwsh" -ArgumentList $argsList -WorkingDirectory $cwd -WindowStyle Normal -PassThru
     if ($null -eq $process)
     {
         throw "Could not start startup script in $cwd."
@@ -539,6 +688,7 @@ try
 
     Write-Phase "stopping_source"
     $script:Operation = Write-Operation -Operation $script:Operation -Status "stopping_source" -LastError "phase=stopping_source"
+    Stop-SourceSessionProcesses -sourceCwd $script:Operation.SourceCwd -preservePid $supervisorPid
     Stop-SourceStartupConsoles -sourceCwd $script:Operation.SourceCwd -preservePid $supervisorPid
     $script:Operation = Write-Operation -Operation $script:Operation -Status "starting_target" -LastError "phase=stopping_source_done"
 

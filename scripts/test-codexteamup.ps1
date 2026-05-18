@@ -222,30 +222,58 @@ Invoke-CheckedWithBuildRetry -Name "dotnet build" -Command { dotnet build --no-r
 Write-Host ""
 Write-Host "Running deterministic test suite..."
 $testDll = Join-Path $ArtifactsPath "bin/CodexTeamUp.Tests/debug/CodexTeamUp.Tests.dll"
-Invoke-Checked -Name "deterministic test suite" -Command { dotnet $testDll }
+$testControllerPlugin = Join-Path (Split-Path -Parent $testDll) "CodexTeamUp.Controller.Default.dll"
+$previousControllerPluginPath = [Environment]::GetEnvironmentVariable("CTU_CONTROLLER_PLUGIN_PATH", "Process")
+$previousControllerPluginType = [Environment]::GetEnvironmentVariable("CTU_CONTROLLER_PLUGIN_TYPE", "Process")
+$previousTestRepoRoot = [Environment]::GetEnvironmentVariable("CTU_TEST_REPO_ROOT", "Process")
+try {
+    Set-Item -LiteralPath "Env:CTU_CONTROLLER_PLUGIN_PATH" -Value $testControllerPlugin
+    Set-Item -LiteralPath "Env:CTU_TEST_REPO_ROOT" -Value $repoRoot
+    Remove-Item -LiteralPath "Env:CTU_CONTROLLER_PLUGIN_TYPE" -ErrorAction SilentlyContinue
 
-if ($Coverage) {
-    Write-Host ""
-    Write-Host "Running coverage gate..."
-    if ([string]::IsNullOrWhiteSpace($CoverageOutput)) {
-        $CoverageOutput = Join-Path $ArtifactsPath "coverage"
+    Invoke-Checked -Name "deterministic test suite" -Command { dotnet $testDll }
+
+    if ($Coverage) {
+        Write-Host ""
+        Write-Host "Running coverage gate..."
+        if ([string]::IsNullOrWhiteSpace($CoverageOutput)) {
+            $CoverageOutput = Join-Path $ArtifactsPath "coverage"
+        }
+
+        New-Item -ItemType Directory -Force -Path $CoverageOutput | Out-Null
+        Invoke-Checked -Name "dotnet tool restore" -Command { dotnet tool restore }
+        Invoke-Checked -Name "coverage gate" -Command {
+            dotnet tool run coverlet $testDll `
+                --target "dotnet" `
+                --targetargs "`"$testDll`"" `
+                --format cobertura `
+                --output "$CoverageOutput/" `
+                --include "[CodexTeamUp.*]*" `
+                --exclude "[CodexTeamUp.Tests]*" `
+                --exclude-by-file "**/CodexTeamUp.CodexWrapper/Program.cs" `
+                --exclude-by-file "**/System.Text.RegularExpressions.Generator/**/*.cs" `
+                --threshold $CoverageThreshold `
+                --threshold-type line `
+                --threshold-stat total
+        }
+    }
+} finally {
+    if ($null -eq $previousControllerPluginPath) {
+        Remove-Item -LiteralPath "Env:CTU_CONTROLLER_PLUGIN_PATH" -ErrorAction SilentlyContinue
+    } else {
+        Set-Item -LiteralPath "Env:CTU_CONTROLLER_PLUGIN_PATH" -Value $previousControllerPluginPath
     }
 
-    New-Item -ItemType Directory -Force -Path $CoverageOutput | Out-Null
-    Invoke-Checked -Name "dotnet tool restore" -Command { dotnet tool restore }
-    Invoke-Checked -Name "coverage gate" -Command {
-        dotnet tool run coverlet $testDll `
-            --target "dotnet" `
-            --targetargs "`"$testDll`"" `
-            --format cobertura `
-            --output "$CoverageOutput/" `
-            --include "[CodexTeamUp.*]*" `
-            --exclude "[CodexTeamUp.Tests]*" `
-            --exclude-by-file "**/CodexTeamUp.CodexWrapper/Program.cs" `
-            --exclude-by-file "**/System.Text.RegularExpressions.Generator/**/*.cs" `
-            --threshold $CoverageThreshold `
-            --threshold-type line `
-            --threshold-stat total
+    if ($null -eq $previousControllerPluginType) {
+        Remove-Item -LiteralPath "Env:CTU_CONTROLLER_PLUGIN_TYPE" -ErrorAction SilentlyContinue
+    } else {
+        Set-Item -LiteralPath "Env:CTU_CONTROLLER_PLUGIN_TYPE" -Value $previousControllerPluginType
+    }
+
+    if ($null -eq $previousTestRepoRoot) {
+        Remove-Item -LiteralPath "Env:CTU_TEST_REPO_ROOT" -ErrorAction SilentlyContinue
+    } else {
+        Set-Item -LiteralPath "Env:CTU_TEST_REPO_ROOT" -Value $previousTestRepoRoot
     }
 }
 

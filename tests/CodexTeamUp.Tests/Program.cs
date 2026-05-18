@@ -101,7 +101,12 @@ var tests = new (string Name, Func<Task> Body)[]
     ("Restart operation status updates are idempotent", () => Task.Run(RestartOperationStatusUpdateIsIdempotent)),
     ("Restart operation preserves imported continuation task id", () => Task.Run(RestartOperationPreservesImportedContinuationTaskId)),
     ("Restart operation records checkpoint id", () => Task.Run(RestartOperationPersistsStartupHandoffAndKnownGood)),
+    ("Startup script records CTU session manifest", () => Task.Run(StartupScriptRecordsCtuSessionManifest)),
+    ("Restart supervisor replaces manifest session and leaves target console visible", () => Task.Run(RestartSupervisorUsesSessionManifestAndVisibleTargetStartup)),
+    ("Restart helper supervisor console is transient", () => Task.Run(RestartHelperSupervisorConsoleIsTransient)),
     ("Exchange restart handoff supports lease and completion flow", () => Task.Run(ExchangeHandoffLeaseAndCompletionFlow)),
+    ("Exchange restart handoff accepts PowerShell casing", () => Task.Run(ExchangeHandoffAcceptsPowerShellCasing)),
+    ("Exchange startup sweep isolates malformed envelopes", () => Task.Run(ExchangeStartupSweepIsolatesMalformedEnvelope)),
     ("Known-good checkpoint store records runtime", () => Task.Run(KnownGoodRuntimeCheckpointStoreRecordsRuntime)),
     ("Known-good checkpoint requires explicit verification", () => Task.Run(KnownGoodCheckpointRequiresExplicitVerification)),
     ("Startup sweep verifies known-good checkpoint on successful continuation dispatch", () => Task.Run(StartupSweepVerifiesKnownGoodCheckpointAfterDispatch)),
@@ -2094,6 +2099,41 @@ static void AgentBusDashboardCreatesSnapshot()
     True(snapshot.Events.Count > 0);
 }
 
+static void StartupScriptRecordsCtuSessionManifest()
+{
+    var text = File.ReadAllText(Path.Combine(TestRepoRoot(), "scripts", "start-codexteamup.ps1"));
+
+    True(text.Contains(".ctu\\sessions", StringComparison.Ordinal));
+    True(text.Contains("Write-CtuSessionManifest", StringComparison.Ordinal));
+    True(text.Contains("launcherPid = $PID", StringComparison.Ordinal));
+    True(text.Contains("desktopPid = $desktopPid", StringComparison.Ordinal));
+    True(text.Contains("servicePid = $servicePid", StringComparison.Ordinal));
+    True(text.Contains("wrapperPids = @(Get-CtuWrapperProcessIds)", StringComparison.Ordinal));
+    True(text.Contains("Add-CtuSessionProcessCandidates", StringComparison.Ordinal));
+    True(text.Contains("ServiceProcessId", StringComparison.Ordinal));
+}
+
+static void RestartSupervisorUsesSessionManifestAndVisibleTargetStartup()
+{
+    var text = File.ReadAllText(Path.Combine(TestRepoRoot(), "scripts", "restart-supervisor.ps1"));
+
+    True(text.Contains("Read-SourceSessionManifest", StringComparison.Ordinal));
+    True(text.Contains("Stop-SourceSessionProcesses", StringComparison.Ordinal));
+    True(text.Contains("launcherPid", StringComparison.Ordinal));
+    True(text.Contains("startup-console", StringComparison.Ordinal));
+    True(text.Contains("\"-NoExit\"", StringComparison.Ordinal));
+    True(text.Contains("-WindowStyle Normal", StringComparison.Ordinal));
+    True(text.Contains("Stop-SourceSessionProcesses -sourceCwd", StringComparison.Ordinal));
+}
+
+static void RestartHelperSupervisorConsoleIsTransient()
+{
+    var text = File.ReadAllText(Path.Combine(TestRepoRoot(), "src", "CodexTeamUp.Controller.Default", "DefaultCtuController.cs"));
+
+    True(text.Contains("var command = $\"-ExecutionPolicy Bypass -File", StringComparison.Ordinal));
+    True(!text.Contains("var command = $\"-NoExit -ExecutionPolicy Bypass -File", StringComparison.Ordinal));
+}
+
 static void RestartOperationLifecycleAndPersistence()
 {
     var root = NewTestDirectory();
@@ -2391,6 +2431,82 @@ static void ExchangeHandoffLeaseAndCompletionFlow()
     exchange.Complete(pending[0].Path, lease!.Envelope);
     pending = exchange.ListPendingStartupSystemMessages(ExchangeEnvelopeKind.Restart, 10);
     Equal(0, pending.Count);
+}
+
+static void ExchangeHandoffAcceptsPowerShellCasing()
+{
+    var root = NewTestDirectory();
+    var sourceCwd = Path.Combine(root, "source-checkout");
+    var targetCwd = Path.Combine(root, "target-checkout");
+    SeedRestartCheckout(sourceCwd);
+    SeedRestartCheckout(targetCwd);
+    var targetBusRoot = Path.Combine(targetCwd, ".codexteamup", "agentbus");
+    var exchange = new ExchangeStore(targetBusRoot);
+    exchange.Initialize();
+
+    var startupDirectory = Path.Combine(
+        Path.GetDirectoryName(targetBusRoot)!,
+        "exchange",
+        "startup",
+        ExchangeTargetScope.System,
+        ExchangeEnvelopeKind.Restart);
+    Directory.CreateDirectory(startupDirectory);
+    var messagePath = Path.Combine(startupDirectory, "restart-handoff-pwsh.json");
+    File.WriteAllText(messagePath, """
+        {
+          "MessageId": "restart-handoff-pwsh",
+          "Kind": "restart",
+          "TargetScope": "system",
+          "TargetProject": "target-checkout",
+          "TargetAgentId": "ctu/architect",
+          "TargetThreadName": "ctu/architect",
+          "CorrelationId": "restart-test",
+          "CausationId": "restart-test",
+          "CreatedAt": "2026-05-18T12:00:00+00:00",
+          "ExpiresAt": "2026-05-18T16:00:00+00:00",
+          "PayloadType": "application/json",
+          "Payload": {
+            "operationId": "restart-test",
+            "operationPath": "S:\\tmp\\operation.json",
+            "targetAgentId": "ctu/architect"
+          },
+          "AttemptCount": 0,
+          "Status": "pending"
+        }
+        """);
+
+    var pending = exchange.ListPendingStartupSystemMessages(ExchangeEnvelopeKind.Restart, 10);
+    Equal(1, pending.Count);
+    Equal("restart-handoff-pwsh", pending.Single().Envelope.MessageId);
+
+    using var lease = exchange.TryAcquireLease(messagePath, "ctu-controller", TimeSpan.FromMinutes(1));
+    True(lease is not null);
+    Equal("restart-handoff-pwsh", lease!.Envelope.MessageId);
+}
+
+static void ExchangeStartupSweepIsolatesMalformedEnvelope()
+{
+    var root = NewTestDirectory();
+    var targetCwd = Path.Combine(root, "target-checkout");
+    SeedRestartCheckout(targetCwd);
+    var targetBusRoot = Path.Combine(targetCwd, ".codexteamup", "agentbus");
+    var exchange = new ExchangeStore(targetBusRoot);
+    exchange.Initialize();
+
+    var startupDirectory = Path.Combine(
+        Path.GetDirectoryName(targetBusRoot)!,
+        "exchange",
+        "startup",
+        ExchangeTargetScope.System,
+        ExchangeEnvelopeKind.Restart);
+    Directory.CreateDirectory(startupDirectory);
+    var malformedPath = Path.Combine(startupDirectory, "broken.json");
+    File.WriteAllText(malformedPath, """{ "messageId": "broken" }""");
+
+    var pending = exchange.ListPendingStartupSystemMessages(ExchangeEnvelopeKind.Restart, 10);
+    Equal(0, pending.Count);
+    True(!File.Exists(malformedPath));
+    True(Directory.GetFiles(Path.Combine(Path.GetDirectoryName(targetBusRoot)!, "exchange", "deadletter"), "invalid-*-broken.json").Length == 1);
 }
 
 static void KnownGoodRuntimeCheckpointStoreRecordsRuntime()
@@ -3665,6 +3781,23 @@ static string NewTestDirectory()
     var root = Path.Combine(baseRoot, Guid.NewGuid().ToString("N"));
     Directory.CreateDirectory(root);
     return root;
+}
+
+static string TestRepoRoot()
+{
+    var fromEnv = Environment.GetEnvironmentVariable("CTU_TEST_REPO_ROOT");
+    if (!string.IsNullOrWhiteSpace(fromEnv) && File.Exists(Path.Combine(fromEnv, "CodexTeamUp.slnx")))
+    {
+        return fromEnv;
+    }
+
+    var current = Environment.CurrentDirectory;
+    if (File.Exists(Path.Combine(current, "CodexTeamUp.slnx")))
+    {
+        return current;
+    }
+
+    throw new InvalidOperationException("CTU_TEST_REPO_ROOT must point to the CodexTeamUp repository root.");
 }
 
 static string JsonEscaped(string value)

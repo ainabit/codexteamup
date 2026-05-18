@@ -2327,7 +2327,7 @@ public sealed class DefaultCtuController : ICtuController
             throw new FileNotFoundException($"Restart supervisor script not found at {supervisorPath}.");
         }
 
-        var command = $"-NoExit -ExecutionPolicy Bypass -File {QuoteProcessArgument(supervisorPath)} -OperationPath {QuoteProcessArgument(operationPath)}";
+        var command = $"-ExecutionPolicy Bypass -File {QuoteProcessArgument(supervisorPath)} -OperationPath {QuoteProcessArgument(operationPath)}";
         var process = new Process
         {
             StartInfo = new ProcessStartInfo

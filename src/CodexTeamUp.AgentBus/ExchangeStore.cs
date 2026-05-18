@@ -101,28 +101,37 @@ public sealed class ExchangeStore
 
     private IReadOnlyList<(string Path, ExchangeEnvelope Envelope)> ListPendingMessages(string directory, int limit)
     {
-        return EnumerateEnvelopeFiles(directory, limit)
-            .Select(path => new
+        var pending = new List<(string Path, ExchangeEnvelope Envelope)>();
+        foreach (var path in EnumerateEnvelopeFiles(directory, limit))
+        {
+            var envelope = TryReadEnvelope(path);
+            if (envelope is null)
             {
-                Path = path,
-                Envelope = JsonFile.Read<ExchangeEnvelope>(path)
-            })
-            .Where(row => row.Envelope is not null)
-            .Where(row => string.Equals(row.Envelope.Status, ExchangeEnvelopeStatus.Pending, StringComparison.OrdinalIgnoreCase)
-                || (string.Equals(row.Envelope.Status, ExchangeEnvelopeStatus.Leased, StringComparison.OrdinalIgnoreCase)
-                    && row.Envelope.LeaseExpiresAt is { } leaseExpiry
-                    && leaseExpiry <= DateTimeOffset.Now))
-            .Where(row => row.Envelope.NotBefore is null || row.Envelope.NotBefore <= DateTimeOffset.Now)
+                continue;
+            }
+
+            var isPending = string.Equals(envelope.Status, ExchangeEnvelopeStatus.Pending, StringComparison.OrdinalIgnoreCase);
+            var isExpiredLease = string.Equals(envelope.Status, ExchangeEnvelopeStatus.Leased, StringComparison.OrdinalIgnoreCase)
+                && envelope.LeaseExpiresAt is { } leaseExpiry
+                && leaseExpiry <= DateTimeOffset.Now;
+            if ((!isPending && !isExpiredLease) || envelope.NotBefore > DateTimeOffset.Now)
+            {
+                continue;
+            }
+
+            pending.Add((path, envelope));
+        }
+
+        return pending
             .OrderBy(row => row.Envelope.CreatedAt)
             .Take(Math.Max(1, limit))
-            .Select(row => (Path: row.Path, Envelope: row.Envelope!))
             .ToList();
     }
 
     public LeaseHandle? TryAcquireLease(string envelopePath, string owner, TimeSpan leaseDuration)
     {
         Initialize();
-        var envelope = JsonFile.Read<ExchangeEnvelope>(envelopePath);
+        var envelope = TryReadEnvelope(envelopePath);
         if (envelope is null)
         {
             return null;
@@ -260,6 +269,41 @@ public sealed class ExchangeStore
             {
                 yield break;
             }
+        }
+    }
+
+    private ExchangeEnvelope? TryReadEnvelope(string path)
+    {
+        try
+        {
+            return JsonFile.Read<ExchangeEnvelope>(path);
+        }
+        catch (Exception ex) when (ex is JsonException or InvalidOperationException or IOException or UnauthorizedAccessException)
+        {
+            DeadLetterInvalidEnvelope(path, ex.Message);
+            return null;
+        }
+    }
+
+    private void DeadLetterInvalidEnvelope(string envelopePath, string lastError)
+    {
+        try
+        {
+            Directory.CreateDirectory(DeadLetterDirectory);
+            var stamp = DateTimeOffset.Now.ToString("yyyyMMddHHmmssfff");
+            var sourceName = Path.GetFileName(envelopePath);
+            var deadPath = Path.Combine(DeadLetterDirectory, $"invalid-{stamp}-{sourceName}");
+            if (File.Exists(envelopePath))
+            {
+                File.Move(envelopePath, deadPath, overwrite: true);
+            }
+
+            var errorPath = $"{deadPath}.error.txt";
+            File.WriteAllText(errorPath, SafeText.Redact(lastError));
+        }
+        catch
+        {
+            // Invalid external messages must not take down the controller sweep.
         }
     }
 
