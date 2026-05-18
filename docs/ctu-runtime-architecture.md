@@ -82,7 +82,7 @@ Only `self_continue` may register a scheduled continuation. That continuation ta
 
 The controller runtime owns continuation scheduling policy: when a continuation becomes due and the same agent has no open or claimed work for that chain, the controller creates a durable AgentBus task and then performs best-effort dispatch through normal wakeup policy. It must not call Desktop directly outside the controller delivery policy.
 
-A central `ctu/projectlead` or guardian heartbeat is no longer the normal carry-through mechanism. It may exist only as fallback/recovery: detect stale plans, missing outcomes, expired continuations, or stranded chains; surface them in the dashboard; and, if policy allows, enqueue a recovery task through AgentBus. The fallback must not manufacture routine progress when the owning agent should have written `self_continue`, `handed_off`, `human`, `failed`, or `done`.
+There is no central `ctu/projectlead` or guardian heartbeat in the runtime path. Future recovery may explicitly detect stale plans, missing outcomes, expired continuations, or stranded chains; surface them in the dashboard; and enqueue recovery tasks through AgentBus. That recovery must remain separate from routine carry-through and must not manufacture progress when the owning agent should have written `self_continue`, `handed_off`, `human`, `failed`, or `done`.
 
 The dashboard must show continuations centrally: pending, due, dispatched, expired, deduped, and blocked-by-human entries should be visible by agent, chain, source task/result, next action, and next wakeup time.
 

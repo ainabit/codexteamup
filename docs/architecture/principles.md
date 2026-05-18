@@ -16,7 +16,7 @@ PowerShell is for bootstrap, recovery, publish, and diagnostics. Normal coordina
 
 ## 4. Agent outcomes drive execution continuity
 
-Every AgentBus result must declare the agent's structured outcome: `done`, `handed_off`, `self_continue`, `human`, or `failed`. Only `self_continue` schedules a later deduplicated wakeup for the same agent. A central `ctu/projectlead` heartbeat is a fallback/recovery mechanism, not the normal continuation path.
+Every AgentBus result must declare the agent's structured outcome: `done`, `handed_off`, `self_continue`, `human`, or `failed`. Only `self_continue` schedules a later deduplicated wakeup for the same agent. There is no global `ctu/projectlead` heartbeat in the runtime path; central recovery must be an explicit stale-chain analysis flow, not hidden routine progress.
 
 ## 5. The service/API layer stays thin
 

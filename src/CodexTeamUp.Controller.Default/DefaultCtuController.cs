@@ -1209,89 +1209,6 @@ public sealed class DefaultCtuController : ICtuController
         return now - task.LastDeliveryAttemptAt.Value >= retryDelay;
     }
 
-    private async Task ProcessGuardianHeartbeatAsync(CancellationToken cancellationToken)
-    {
-        var policy = _controllerPolicy.Policy;
-        if (!policy.GuardianHeartbeatEnabled)
-        {
-            return;
-        }
-
-        var planPath = GuardianHeartbeatPlanPath(policy);
-        if (!File.Exists(planPath))
-        {
-            return;
-        }
-
-        var statusDirectory = GuardianHeartbeatStatusDirectory(policy);
-        var status = ReadGuardianHeartbeatStatus(statusDirectory);
-        if (IsTerminalGuardianHeartbeatStatus(status))
-        {
-            return;
-        }
-
-        if (!ShouldSendGuardianHeartbeat(statusDirectory, policy.GuardianHeartbeatIntervalSeconds))
-        {
-            return;
-        }
-
-        var bus = new AgentBusStore(_defaultBusRoot);
-        var targetAgentId = string.IsNullOrWhiteSpace(policy.GuardianHeartbeatAgentId)
-            ? "ctu/projectlead"
-            : policy.GuardianHeartbeatAgentId!;
-        if (HasOpenOrClaimedTaskFor(bus, targetAgentId))
-        {
-            return;
-        }
-
-        var agent = bus.FindAgent(targetAgentId);
-        if (agent is null || string.IsNullOrWhiteSpace(agent.ThreadId))
-        {
-            RecordGuardianHeartbeatSkipped(bus, targetAgentId, "guardian agent is not registered with a thread");
-            WriteGuardianHeartbeatStamp(statusDirectory);
-            return;
-        }
-
-        var thread = await FindGuardianThreadAsync(appServer: _appServer, agent, cancellationToken).ConfigureAwait(false);
-        if (thread is null)
-        {
-            RecordGuardianHeartbeatSkipped(bus, targetAgentId, "guardian thread was not visible");
-            WriteGuardianHeartbeatStamp(statusDirectory);
-            return;
-        }
-
-        if (IsBusyThreadStatus(thread.Status))
-        {
-            RecordGuardianHeartbeatSkipped(bus, targetAgentId, $"guardian thread is busy ({thread.Status})");
-            return;
-        }
-
-        SetGuardianHeartbeatStatus(statusDirectory, "running");
-        WriteGuardianHeartbeatStamp(statusDirectory);
-        var cwd = agent.Cwd ?? CtuProjectLayout.ProjectRootForBusRoot(_defaultBusRoot);
-        var task = bus.CreateTask(
-            "ctu/guardian",
-            targetAgentId,
-            "Guardian heartbeat: continue active plan",
-            BuildGuardianHeartbeatPrompt(planPath, statusDirectory, targetAgentId),
-            new DirectoryInfo(cwd).Name,
-            cwd,
-            [],
-            "ctu/architect");
-        bus.RecordEvent(new AgentBusEvent
-        {
-            Timestamp = DateTimeOffset.Now,
-            Type = "guardian.heartbeat_enqueued",
-            TaskId = task.Id,
-            From = "ctu/guardian",
-            To = targetAgentId,
-            Message = $"Guardian heartbeat enqueued for {targetAgentId}.",
-            Payload = new { planPath, statusDirectory, status }
-        });
-
-        await TryDeliverQueuedTaskAsync(bus, task, cancellationToken).ConfigureAwait(false);
-    }
-
     private async Task ProcessAgentContinuationsAsync(CancellationToken cancellationToken)
     {
         var bus = new AgentBusStore(_defaultBusRoot);
@@ -1325,7 +1242,7 @@ public sealed class DefaultCtuController : ICtuController
                 continue;
             }
 
-            var thread = await FindGuardianThreadAsync(_appServer, agent, cancellationToken).ConfigureAwait(false);
+            var thread = await FindAgentThreadAsync(_appServer, agent, cancellationToken).ConfigureAwait(false);
             if (thread is null)
             {
                 RecordContinuationWakeFailure(bus, continuation, $"Agent {continuation.Owner} thread is not visible.");
@@ -1429,99 +1346,13 @@ public sealed class DefaultCtuController : ICtuController
         """;
     }
 
-    private string GuardianHeartbeatPlanPath(CtuControllerPolicy policy)
-    {
-        var configured = BlankToNull(policy.GuardianHeartbeatPlanFile);
-        return Path.IsPathRooted(configured ?? string.Empty)
-            ? configured!
-            : Path.Combine(CtuProjectLayout.StateRootForBusRoot(_defaultBusRoot), configured ?? Path.Combine("guardian", "plan.md"));
-    }
-
-    private string GuardianHeartbeatStatusDirectory(CtuControllerPolicy policy)
-    {
-        var configured = BlankToNull(policy.GuardianHeartbeatStatusDirectory);
-        return Path.IsPathRooted(configured ?? string.Empty)
-            ? configured!
-            : Path.Combine(CtuProjectLayout.StateRootForBusRoot(_defaultBusRoot), configured ?? Path.Combine("guardian", "status"));
-    }
-
-    private static string ReadGuardianHeartbeatStatus(string statusDirectory)
-    {
-        if (!Directory.Exists(statusDirectory))
-        {
-            return "open";
-        }
-
-        return Directory.EnumerateFiles(statusDirectory, "*", SearchOption.TopDirectoryOnly)
-            .Select(path => Path.GetFileName(path).Trim().ToLowerInvariant())
-            .FirstOrDefault(IsKnownGuardianHeartbeatStatus)
-            ?? "open";
-    }
-
-    private static bool IsKnownGuardianHeartbeatStatus(string status)
-    {
-        return status is "pending" or "open" or "running" or "closed" or "done" or "failed" or "human";
-    }
-
-    private static bool IsTerminalGuardianHeartbeatStatus(string status)
-    {
-        return status is "closed" or "done" or "failed" or "human";
-    }
-
-    private static bool ShouldSendGuardianHeartbeat(string statusDirectory, int intervalSeconds)
-    {
-        var stamp = GuardianHeartbeatStampPath(statusDirectory);
-        if (!File.Exists(stamp))
-        {
-            return true;
-        }
-
-        var lastHeartbeatAt = File.GetLastWriteTimeUtc(stamp);
-        return DateTimeOffset.UtcNow - new DateTimeOffset(lastHeartbeatAt, TimeSpan.Zero) >= TimeSpan.FromSeconds(intervalSeconds);
-    }
-
-    private static void WriteGuardianHeartbeatStamp(string statusDirectory)
-    {
-        Directory.CreateDirectory(statusDirectory);
-        File.WriteAllText(GuardianHeartbeatStampPath(statusDirectory), string.Empty);
-    }
-
-    private static string GuardianHeartbeatStampPath(string statusDirectory)
-    {
-        return Path.Combine(statusDirectory, ".last-heartbeat");
-    }
-
-    private static void SetGuardianHeartbeatStatus(string statusDirectory, string status)
-    {
-        Directory.CreateDirectory(statusDirectory);
-        foreach (var path in Directory.EnumerateFiles(statusDirectory, "*", SearchOption.TopDirectoryOnly)
-            .Where(path => IsKnownGuardianHeartbeatStatus(Path.GetFileName(path).Trim().ToLowerInvariant()))
-            .ToList())
-        {
-            File.Delete(path);
-        }
-
-        File.WriteAllText(Path.Combine(statusDirectory, status), string.Empty);
-    }
-
     private static bool HasOpenOrClaimedTaskFor(AgentBusStore bus, string agentId)
     {
         return bus.ListTasks(agentId, "open").Count > 0
             || bus.ListTasks(agentId, "claimed").Count > 0;
     }
 
-    private static void RecordGuardianHeartbeatSkipped(AgentBusStore bus, string targetAgentId, string reason)
-    {
-        bus.RecordEvent(new AgentBusEvent
-        {
-            Timestamp = DateTimeOffset.Now,
-            Type = "guardian.heartbeat_skipped",
-            To = targetAgentId,
-            Message = reason
-        });
-    }
-
-    private static async Task<CodexThreadRecord?> FindGuardianThreadAsync(
+    private static async Task<CodexThreadRecord?> FindAgentThreadAsync(
         IAppServerClient appServer,
         AgentDefinition agent,
         CancellationToken cancellationToken)
@@ -1537,27 +1368,6 @@ public sealed class DefaultCtuController : ICtuController
             string.Equals(thread.Id, agent.ThreadId, StringComparison.OrdinalIgnoreCase)
             || string.Equals(thread.Name, agent.DisplayName, StringComparison.OrdinalIgnoreCase)
             || string.Equals(thread.Name, agent.Id, StringComparison.OrdinalIgnoreCase));
-    }
-
-    private static string BuildGuardianHeartbeatPrompt(string planPath, string statusDirectory, string targetAgentId)
-    {
-        return $"""
-        Guardian heartbeat for {targetAgentId}.
-
-        Read the active plan:
-        {planPath}
-
-        Read and update the zero-byte status marker directory:
-        {statusDirectory}
-
-        Status marker protocol:
-        - pending/open/running means the plan is not terminal.
-        - closed/done means the plan is complete.
-        - failed means the plan cannot continue technically.
-        - human means a real human decision is required.
-
-        Inspect AgentBus tasks, results, and recent events. If the plan is not terminal, either create and dispatch the next concrete CTU task, re-drive a stale owner, or write a result that names the real blocker. Do not stop after diagnosis if the next action is clear.
-        """;
     }
 
     private void RegisterDefaultTools(string busRoot, IAppServerClient appServer)

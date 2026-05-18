@@ -121,31 +121,8 @@ Continuation policy should cover:
 
 The controller must not create continuation work from `done`, `handed_off`, `human`, or `failed` outcomes.
 
-## Guardian Heartbeat Fallback
+## Recovery Boundary
 
-The controller may still run a lightweight guardian heartbeat from the startup/sweep loop for recovery. It is fallback policy, not the normal execution-continuity mechanism.
+The former global `ctu/projectlead` guardian heartbeat has been removed from controller policy and runtime code. Routine execution continuity must come from result outcomes plus same-agent continuations.
 
-Existing guardian policy fields are recovery controls:
-
-- `guardianHeartbeatEnabled`
-- `guardianHeartbeatAgentId`
-- `guardianHeartbeatDisplayName`
-- `guardianHeartbeatPlanFile`
-- `guardianHeartbeatStatusDirectory`
-- `guardianHeartbeatIntervalSeconds`
-
-If `guardianHeartbeatPlanFile` is unset, the default is:
-
-```text
-.codexteamup/guardian/plan.md
-```
-
-If `guardianHeartbeatStatusDirectory` is unset, the default is:
-
-```text
-.codexteamup/guardian/status
-```
-
-The status directory contains one marker file named after the current state. `pending`, `open`, and `running` mean the recovery plan may still need movement. `closed`, `done`, `failed`, and `human` stop recovery wakeups.
-
-Use this heartbeat only to recover stale plans, missing outcomes, expired continuations, or stranded chains. It must enqueue durable AgentBus recovery work before dispatching, and it must not replace the owning agent's required `done`, `handed_off`, `self_continue`, `human`, or `failed` result outcome.
+Future recovery may inspect stale plans, missing outcomes, expired continuations, or stranded chains, but it must be explicit analysis that records durable AgentBus evidence and enqueues normal recovery tasks. It must not be a background heartbeat that silently substitutes for the owning agent's required `done`, `handed_off`, `self_continue`, `human`, or `failed` result outcome.

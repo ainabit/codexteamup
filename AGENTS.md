@@ -163,16 +163,11 @@ Use a short ACK/NACK pattern:
 
 Live tests and adapters should prefer short per-call timeouts and explicit polling. A Desktop app-server timeout is not by itself proof that an agent did not receive work; AgentBus events/results are the durable truth.
 
-## Carry-Through Guardian
+## Agent-Owned Continuations
 
-CTU must be able to keep an agreed plan moving without relying on the user to type "weiter". The controller may run a hot-reloadable guardian heartbeat that reads:
+CTU must be able to keep an agreed plan moving without relying on the user to type "weiter". The normal mechanism is agent-owned: every AgentBus result declares `done`, `handed_off`, `self_continue`, `human`, or `failed`. Only `self_continue` may register a deduplicated later wakeup for the same agent.
 
-```text
-.codexteamup/guardian/plan.md
-.codexteamup/guardian/status/<state>
-```
-
-`pending`, `open`, and `running` mean work is still active. `closed`, `done`, `failed`, and `human` are terminal and stop automatic wakeups. When the plan is active and the configured driver agent, normally `ctu/projectlead`, has no open or claimed AgentBus tasks, the controller should enqueue and dispatch a short wakeup task through normal CTU coordination. The heartbeat must not bypass AgentBus or the controller delivery policy.
+The controller processes due continuations from `.codexteamup/agentbus/continuations/open`, creates a normal AgentBus task for the owning agent, and dispatches it through the same controller delivery policy used for all other work. There is no global `ctu/projectlead` heartbeat in the runtime path. Central recovery may be added later as explicit stale-chain analysis, but it must not replace the owning agent's outcome decision or bypass AgentBus.
 
 ## Operating Model
 

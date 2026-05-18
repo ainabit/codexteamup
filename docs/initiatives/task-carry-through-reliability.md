@@ -2,7 +2,7 @@
 
 - Status: active
 - Owner: `ctu/architect`
-- Recovery monitor: `ctu/projectlead` (interim fallback only)
+- Recovery monitor: none in runtime; future stale-chain recovery must be explicit.
 
 ## Goal
 
@@ -13,7 +13,7 @@ Prevent stalls after partial reviews by making CTU execution continuity agent-ow
 - Normal carry-through is now driven by structured AgentBus result outcomes, not by a global projectlead heartbeat.
 - Every result must declare `done`, `handed_off`, `self_continue`, `human`, or `failed`.
 - Only `self_continue` registers a deduplicated later wakeup for the same agent.
-- `ctu/projectlead` remains a fallback/recovery monitor for stale or malformed chains, not the normal progress driver.
+- The global `ctu/projectlead` heartbeat is removed; stale or malformed chains require explicit recovery analysis instead of background progress manufacture.
 - The dashboard must centrally show continuation state across agents.
 
 ## Priority shift (2026-05-18)
@@ -60,7 +60,7 @@ Prevent stalls after partial reviews by making CTU execution continuity agent-ow
 2. Add required result outcome capture to `agentbus_write_result` and result files.
 3. Add deduplicated `self_continue` registry and due-time controller scheduling for the same agent.
 4. Add durable notify retry path and attempt metadata persistence.
-5. Add stale claimed-task recovery and fallback projectlead recovery for missing/malformed outcomes.
+5. Add stale claimed-task recovery and explicit stale-chain recovery evidence for missing/malformed outcomes.
 6. Add dashboard continuation visibility and explicit proof checks.
 7. Run gated verification (then restart/acceptance resume unblocks).
 
@@ -95,5 +95,5 @@ Resume/restart acceptance is permitted only when all are true:
   - `self_continue` registers a deduplicated same-agent wakeup.
   - `handed_off` points to another owner or task without also scheduling self-wakeup.
   - `human` blocks automatic wakeup and is visible in the dashboard.
-  - projectlead heartbeat is only a recovery surface for stale or malformed chains.
+  - no global projectlead heartbeat exists in the runtime path.
   - no passive review-only terminal state.

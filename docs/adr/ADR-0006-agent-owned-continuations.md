@@ -25,7 +25,7 @@ Only `self_continue` registers a later wakeup. The scheduled continuation target
 
 The controller runtime owns the due-time policy and dispatches the continuation through normal AgentBus task creation plus best-effort Desktop wakeup. The fixed API layer does not own continuation policy.
 
-A central `ctu/projectlead` heartbeat is retained only as fallback/recovery. It may detect missing outcomes, stale chains, expired continuations, or stranded plans and surface them for recovery, but it is not the normal path for routine carry-through.
+The global `ctu/projectlead` heartbeat is removed from the runtime path. Central recovery may be introduced later as explicit stale-chain analysis that surfaces missing outcomes, expired continuations, or stranded plans, but it must not act as routine carry-through.
 
 The dashboard must show continuations centrally so humans can see pending, due, dispatched, expired, deduped, and human-blocked follow-ups across agents.
 
@@ -35,4 +35,4 @@ The dashboard must show continuations centrally so humans can see pending, due, 
 - Normal continuation ownership remains with the worker that has context.
 - Duplicate wakeups are controlled at the continuation-registration layer instead of by chat convention.
 - Dashboard visibility becomes part of the architecture contract, not a later UX nice-to-have.
-- Recovery logic can still exist, but it must not hide missing or malformed agent outcomes.
+- Recovery logic can still exist as explicit analysis, but it must not hide missing or malformed agent outcomes.
