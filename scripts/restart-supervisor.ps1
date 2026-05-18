@@ -556,7 +556,6 @@ function Start-StartupScript([string]$cwd, [int]$preservePid, [switch]$NoPublish
     }
 
     $argsList = @(
-        "-NoExit",
         "-ExecutionPolicy", "Bypass",
         "-File", $startupScript,
         "-RestartSupervisorMode",

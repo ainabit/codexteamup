@@ -18,8 +18,8 @@ This ledger is local and immediate. Later, selected items can be mirrored into G
 - **Observed in:** live restart from `codexteamup` to `codexteamup.acceptance`.
 - **Symptom:** the old user-started PowerShell window stayed open while the restart helper opened another window, making it unclear which CTU session was actually active.
 - **Cause:** cleanup relied mainly on command-line matching for `scripts/start-codexteamup.ps1`. If CTU was started from an already-open interactive PowerShell, the command line could later look like plain `pwsh`/`powershell` and no longer identify the original startup window.
-- **Fix:** startup now writes `.ctu/sessions/current.json` with launcher, Desktop, service, and wrapper PIDs. The restart supervisor reads that manifest, stops the source session by PID with process-name checks, starts the target checkout through the normal startup script in a visible PowerShell, and keeps the supervisor console transient.
-- **Regression:** deterministic script tests assert session manifest recording, source-session cleanup, visible target startup, and no persistent supervisor `-NoExit`.
+- **Fix:** startup now writes `.ctu/sessions/current.json` with launcher, Desktop, service, and wrapper PIDs. The restart supervisor reads that manifest, stops the source session by PID with process-name checks, starts the target checkout through the normal startup script, and keeps automated restart/startup consoles transient.
+- **Regression:** deterministic script tests assert session manifest recording, source-session cleanup, target startup through the normal script, and no persistent supervisor `-NoExit`.
 
 ### 2026-05-18 - Restart supervisor wrote non-canonical startup handoff JSON
 

@@ -4,7 +4,7 @@ Reverse chronological notes about the build journey, notable failures, redesigns
 
 ## 2026-05-18
 
-- Restart semantics were tightened around a CTU session manifest instead of best-effort process discovery. Startup now records launcher/Desktop/service/wrapper PIDs, and restart uses that source-session record so switching to `codexteamup.acceptance` can close the old startup console before launching the target checkout through the normal KISS PowerShell entrypoint.
+- Restart semantics were tightened around a CTU session manifest instead of best-effort process discovery. Startup now records launcher/Desktop/service/wrapper PIDs, and restart uses that source-session record so switching to `codexteamup.acceptance` can close the old startup console before launching the target checkout through the normal KISS PowerShell entrypoint. Automated restart starts are intentionally transient so test windows do not stay open after health is reached.
 - Live restart testing exposed two concrete guardrail gaps: `codexteamup.acceptance` was initially on an older branch commit, and a PowerShell-written startup handoff used PascalCase JSON that the controller rejected.
 - The fix made restart startup handoffs canonical camelCase, made exchange reads case-insensitive for compatibility, and deadletters malformed envelopes so one bad file cannot stall the controller sweep.
 - The deterministic safety net was also isolated from live CTU environment variables after `CTU_CONTROLLER_PLUGIN_PATH` leaked from the running runtime into the test process.

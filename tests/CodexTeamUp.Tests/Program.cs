@@ -102,7 +102,7 @@ var tests = new (string Name, Func<Task> Body)[]
     ("Restart operation preserves imported continuation task id", () => Task.Run(RestartOperationPreservesImportedContinuationTaskId)),
     ("Restart operation records checkpoint id", () => Task.Run(RestartOperationPersistsStartupHandoffAndKnownGood)),
     ("Startup script records CTU session manifest", () => Task.Run(StartupScriptRecordsCtuSessionManifest)),
-    ("Restart supervisor replaces manifest session and leaves target console visible", () => Task.Run(RestartSupervisorUsesSessionManifestAndVisibleTargetStartup)),
+    ("Restart supervisor replaces manifest session and keeps target startup transient", () => Task.Run(RestartSupervisorUsesSessionManifestAndTransientTargetStartup)),
     ("Restart helper supervisor console is transient", () => Task.Run(RestartHelperSupervisorConsoleIsTransient)),
     ("Exchange restart handoff supports lease and completion flow", () => Task.Run(ExchangeHandoffLeaseAndCompletionFlow)),
     ("Exchange restart handoff accepts PowerShell casing", () => Task.Run(ExchangeHandoffAcceptsPowerShellCasing)),
@@ -2113,7 +2113,7 @@ static void StartupScriptRecordsCtuSessionManifest()
     True(text.Contains("ServiceProcessId", StringComparison.Ordinal));
 }
 
-static void RestartSupervisorUsesSessionManifestAndVisibleTargetStartup()
+static void RestartSupervisorUsesSessionManifestAndTransientTargetStartup()
 {
     var text = File.ReadAllText(Path.Combine(TestRepoRoot(), "scripts", "restart-supervisor.ps1"));
 
@@ -2121,7 +2121,7 @@ static void RestartSupervisorUsesSessionManifestAndVisibleTargetStartup()
     True(text.Contains("Stop-SourceSessionProcesses", StringComparison.Ordinal));
     True(text.Contains("launcherPid", StringComparison.Ordinal));
     True(text.Contains("startup-console", StringComparison.Ordinal));
-    True(text.Contains("\"-NoExit\"", StringComparison.Ordinal));
+    True(!text.Contains("\"-NoExit\"", StringComparison.Ordinal));
     True(text.Contains("-WindowStyle Normal", StringComparison.Ordinal));
     True(text.Contains("Stop-SourceSessionProcesses -sourceCwd", StringComparison.Ordinal));
 }
