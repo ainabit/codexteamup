@@ -7,6 +7,8 @@ $ErrorActionPreference = "Stop"
 
 Set-StrictMode -Version Latest
 
+$script:BootstrapLogPath = "$OperationPath.supervisor.log"
+
 $terminalStatuses = @(
     "completed",
     "rolled_back",
@@ -29,6 +31,18 @@ $validTransitions = @{
 function Write-Phase([string]$Message)
 {
     Write-Host "restart:$Message"
+    Write-BootstrapLog $Message
+}
+
+function Write-BootstrapLog([string]$Message)
+{
+    try
+    {
+        Add-Content -LiteralPath $script:BootstrapLogPath -Value ("{0:o} {1}" -f [DateTimeOffset]::Now, $Message) -Encoding UTF8
+    }
+    catch
+    {
+    }
 }
 
 function Normalize-BusRoot([string]$busRoot)
@@ -57,9 +71,33 @@ function Get-Operation([string]$path)
     return $content | ConvertFrom-Json
 }
 
+function Get-ObjectPropertyValue([Parameter(Mandatory=$true)] $object, [Parameter(Mandatory=$true)][string]$Name)
+{
+    $property = $object.PSObject.Properties[$Name]
+    if ($null -eq $property)
+    {
+        return $null
+    }
+
+    return $property.Value
+}
+
+function Set-ObjectPropertyValue([Parameter(Mandatory=$true)] $object, [Parameter(Mandatory=$true)][string]$Name, $Value)
+{
+    $property = $object.PSObject.Properties[$Name]
+    if ($null -eq $property)
+    {
+        Add-Member -InputObject $object -NotePropertyName $Name -NotePropertyValue $Value -Force
+        return
+    }
+
+    $property.Value = $Value
+}
+
 function Write-Operation([Parameter(Mandatory=$true)] $operation, [string]$Status, [string]$HelperPid = $null, [string]$ContinuationTaskId = $null, [string]$LastError = $null)
 {
-    $currentStatus = if ($operation.Status) { $operation.Status.ToLowerInvariant() } else { "" }
+    $currentStatusValue = Get-ObjectPropertyValue $operation "Status"
+    $currentStatus = if ($currentStatusValue) { $currentStatusValue.ToLowerInvariant() } else { "" }
     $nextStatus = if ($Status) { $Status.ToLowerInvariant() } else { $currentStatus }
     if (-not ($currentStatus -eq "" -or $currentStatus -eq $nextStatus))
     {
@@ -69,25 +107,26 @@ function Write-Operation([Parameter(Mandatory=$true)] $operation, [string]$Statu
         }
     }
 
-    $operation.Status = $nextStatus
+    Set-ObjectPropertyValue $operation "Status" $nextStatus
     if (-not [string]::IsNullOrWhiteSpace($HelperPid))
     {
-        $operation.HelperPid = $HelperPid
+        Set-ObjectPropertyValue $operation "HelperPid" $HelperPid
     }
 
     if (-not [string]::IsNullOrWhiteSpace($ContinuationTaskId))
     {
-        $operation.ContinuationTaskId = $ContinuationTaskId
+        Set-ObjectPropertyValue $operation "ContinuationTaskId" $ContinuationTaskId
     }
 
     if ($null -ne $LastError)
     {
-        $operation.LastError = $LastError
+        Set-ObjectPropertyValue $operation "LastError" $LastError
     }
 
-    if ($terminalStatuses -contains $nextStatus -and -not $operation.CompletedAt)
+    $completedAt = Get-ObjectPropertyValue $operation "CompletedAt"
+    if ($terminalStatuses -contains $nextStatus -and -not $completedAt)
     {
-        $operation.CompletedAt = [DateTimeOffset]::Now
+        Set-ObjectPropertyValue $operation "CompletedAt" ([DateTimeOffset]::Now)
     }
 
     $tempPath = "${script:OperationPath}.tmp"
@@ -134,18 +173,27 @@ function Start-StartupScript([string]$cwd, [int]$preservePid)
         "-ForceStopExisting",
         "-PreservePid", $preservePid
     )
-    $process = Start-Process "pwsh" -ArgumentList $argsList -WorkingDirectory $cwd -NoNewWindow -Wait -PassThru
-    if ($null -eq $process)
+    Write-BootstrapLog "launching startup script in-process for $cwd"
+    $previous = Get-Location
+    try
     {
-        throw "Could not start startup script in $cwd."
+        Set-Location $cwd
+        & "pwsh" @argsList
+        $exitCode = $LASTEXITCODE
+    }
+    finally
+    {
+        Set-Location $previous
     }
 
-    if ($process.ExitCode -ne 0)
+    if ($exitCode -ne 0)
     {
-        throw "Startup script for $cwd exited with code $($process.ExitCode)."
+        throw "Startup script for $cwd exited with code $exitCode."
     }
 
-    return $process
+    return @{
+        ExitCode = $exitCode
+    }
 }
 
 function Test-TargetHealthy([string]$expectedBusRoot)
@@ -365,7 +413,9 @@ function Update-Phases([string]$status, [string]$phase, [string]$helperPid = $nu
 }
 
 $script:OperationPath = (Resolve-Path -LiteralPath $OperationPath).Path
+Write-BootstrapLog "resolved operation path $script:OperationPath"
 $script:Operation = Get-Operation $script:OperationPath
+Write-BootstrapLog "loaded operation status=$($script:Operation.Status)"
 
 try
 {
@@ -379,7 +429,7 @@ try
 
     Write-Phase "starting_target"
     $startupProcess = Start-StartupScript $script:Operation.TargetCwd $supervisorPid
-    $script:Operation = Write-Operation -Operation $script:Operation -Status "starting_target" -LastError "phase=starting_target_launch pid=$($startupProcess.Id)"
+    $script:Operation = Write-Operation -Operation $script:Operation -Status "starting_target" -LastError "phase=starting_target_launch"
     $script:Operation = Write-Operation -Operation $script:Operation -Status "starting_target" -LastError "phase=starting_target_wait_health"
 
     $healthy = Get-TargetHealth -expectedBusRoot $script:Operation.TargetBusRoot
@@ -418,7 +468,7 @@ catch
         Write-Phase "rollback_starting"
         $script:Operation = Write-Operation -Operation $script:Operation -Status "rollback_starting" -LastError $errorMessage
         $fallbackProcess = Start-StartupScript $script:Operation.FallbackCwd $supervisorPid
-        $script:Operation = Write-Operation -Operation $script:Operation -Status "rolled_back" -LastError "phase=rollback_complete pid=$($fallbackProcess.Id)"
+        $script:Operation = Write-Operation -Operation $script:Operation -Status "rolled_back" -LastError "phase=rollback_complete"
         Write-Phase "rolled_back"
         exit 1
     }
