@@ -60,6 +60,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\test-live-multi-agent-orchest
 
 Every `test-codexteamup.ps1` run writes a Markdown safety report under `.codexteamup/reports` unless `-ReportPath` is provided. The report lists each high-level testcase with category, status, failure reason, and details so the run is inspectable without reading the full console log. Use `-LiveAll` as the repeatable "all current CTU features except fresh-clone acceptance" package.
 
+At the end of `-LiveAll`, the runner archives and retires all `ctu-test/*` smoke agents except the manually maintained `ctu-test/architect`, unless `-KeepLiveAgents` is set. This keeps `codexteamup.test` small after full safety-net runs while preserving AgentBus audit files.
+
 During execution, deterministic tests print progress as `RUN <current>/<total> <testcase>` before each testcase and live smoke scenarios print `Running live smoke <current>/<total>: <scenario>`. The goal is that a human can see which capability is being checked even while the run is still active.
 
 Live smoke tool calls use a short per-call timeout, defaulting to 10 seconds, so Desktop/app-server stalls fail with a clear phase instead of blocking the runner for many minutes. Override with `-ToolTimeoutSeconds` only for diagnostics.

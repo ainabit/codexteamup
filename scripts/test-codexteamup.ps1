@@ -15,6 +15,7 @@ param(
     [int]$ToolTimeoutSeconds = 10,
     [switch]$Restore,
     [switch]$KeepLiveAgents,
+    [switch]$CleanupAllTestAgents,
     [switch]$Coverage,
     [int]$CoverageThreshold = 80,
     [string]$CoverageOutput = "",
@@ -46,6 +47,7 @@ if ($PSVersionTable.PSEdition -ne "Core") {
         $forward += @("-ToolTimeoutSeconds", $ToolTimeoutSeconds)
         if ($Restore) { $forward += "-Restore" }
         if ($KeepLiveAgents) { $forward += "-KeepLiveAgents" }
+        if ($CleanupAllTestAgents) { $forward += "-CleanupAllTestAgents" }
         if ($Coverage) { $forward += "-Coverage" }
         $forward += @("-CoverageThreshold", $CoverageThreshold)
         if (-not [string]::IsNullOrWhiteSpace($CoverageOutput)) { $forward += @("-CoverageOutput", $CoverageOutput) }
@@ -406,6 +408,7 @@ $scenarios = if ($LiveAll) {
 } else {
     @($LiveScenario)
 }
+$scenarios = @($scenarios)
 
 $baseRunId = $RunId
 if ([string]::IsNullOrWhiteSpace($baseRunId)) {
@@ -458,6 +461,37 @@ for ($scenarioIndex = 0; $scenarioIndex -lt $scenarios.Count; $scenarioIndex++) 
         Add-ReportRow -Category "Live smoke" -TestCase "$scenario scenario" -Status "failed" -Reason ($reasonLines -join " ")
         Write-SafetyReport
         throw "live smoke $scenario failed with exit code $liveExitCode."
+    }
+}
+
+if (($LiveAll -or $CleanupAllTestAgents) -and -not $KeepLiveAgents) {
+    Write-Host ""
+    Write-Host "Running live cleanup: ctu-test/* except ctu-test/architect"
+    $cleanupArgs = @(
+        "-ExecutionPolicy", "Bypass",
+        "-File", (Join-Path $repoRoot "scripts/test-live-multi-agent-orchestration.ps1"),
+        "-ServiceUrl", $ServiceUrl,
+        "-Workspace", $Workspace,
+        "-RunId", $baseRunId,
+        "-TimeoutSeconds", $TimeoutSeconds,
+        "-ToolTimeoutSeconds", $ToolTimeoutSeconds,
+        "-CleanupOnly",
+        "-CleanupAllTestAgents"
+    )
+
+    $cleanupOutput = & $powerShellRunner @cleanupArgs 2>&1
+    $cleanupExitCode = $LASTEXITCODE
+    foreach ($lineObject in $cleanupOutput) {
+        Write-Host ([string]$lineObject)
+    }
+
+    if ($cleanupExitCode -eq 0) {
+        Add-ReportRow -Category "Live cleanup" -TestCase "Archive/retire ctu-test/* except ctu-test/architect" -Status "passed"
+    } else {
+        $reasonLines = @($cleanupOutput | Select-Object -Last 8 | ForEach-Object { [string]$_ })
+        Add-ReportRow -Category "Live cleanup" -TestCase "Archive/retire ctu-test/* except ctu-test/architect" -Status "failed" -Reason ($reasonLines -join " ")
+        Write-SafetyReport
+        throw "live cleanup failed with exit code $cleanupExitCode."
     }
 }
 

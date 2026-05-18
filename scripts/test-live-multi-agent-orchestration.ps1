@@ -10,6 +10,7 @@ param(
     [int]$ToolTimeoutSeconds = 10,
     [switch]$Cleanup,
     [switch]$CleanupOnly,
+    [switch]$CleanupAllTestAgents,
     [switch]$NoArchiveThreads,
     [switch]$ForceCleanup
 )
@@ -313,6 +314,17 @@ function Assert-SafeCleanupPrefix {
 
 function Get-TestAgents {
     $agents = Invoke-CtuTool -Name "agentbus_list_agents" -Arguments @{ cwd = $Workspace }
+    if ($CleanupAllTestAgents) {
+        return @($agents.agents) | Where-Object {
+            (
+                $_.id -like "$Prefix/*" -or
+                $_.displayName -like "$Prefix/*"
+            ) -and
+            $_.id -ne "$Prefix/architect" -and
+            $_.displayName -ne "$Prefix/architect"
+        }
+    }
+
     @($agents.agents) | Where-Object {
         $_.id -like "$agentPrefix/*" -or $_.displayName -like "$agentPrefix/*"
     }
@@ -322,7 +334,8 @@ function Invoke-TestCleanup {
     Assert-SafeCleanupPrefix
     $agents = @(Get-TestAgents)
     if ($agents.Count -eq 0) {
-        Write-Host "Cleanup: no test agents found for $agentPrefix."
+        $cleanupLabel = if ($CleanupAllTestAgents) { "$Prefix/* except $Prefix/architect" } else { $agentPrefix }
+        Write-Host "Cleanup: no test agents found for $cleanupLabel."
         return
     }
 
@@ -353,7 +366,8 @@ function Invoke-TestCleanup {
         $retired += 1
     }
 
-    Write-Host "Cleanup: archived $archived thread(s), retired $retired agent binding(s) for $agentPrefix."
+    $cleanupLabel = if ($CleanupAllTestAgents) { "$Prefix/* except $Prefix/architect" } else { $agentPrefix }
+    Write-Host "Cleanup: archived $archived thread(s), retired $retired agent binding(s) for $cleanupLabel."
 }
 
 if ($CleanupOnly) {
@@ -362,7 +376,11 @@ if ($CleanupOnly) {
     Write-Host "  workspace: $Workspace"
     Write-Host "  run id:    $RunId"
     Write-Host "  scenario:  $Scenario"
-    Write-Host "  prefix:    $agentPrefix"
+    if ($CleanupAllTestAgents) {
+        Write-Host "  prefix:    $Prefix/* except $Prefix/architect"
+    } else {
+        Write-Host "  prefix:    $agentPrefix"
+    }
     Invoke-TestCleanup
     exit 0
 }
