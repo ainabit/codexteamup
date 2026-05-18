@@ -1,7 +1,7 @@
 param(
     [switch]$Live,
     [switch]$LiveAll,
-    [ValidateSet("surface", "basic", "peer", "replacement", "controller", "controller-suite", "all")]
+    [ValidateSet("surface", "basic", "peer", "replacement", "controller", "controller-suite", "continuation", "error-paths", "queue-first", "stale-claimed", "all")]
     [string]$LiveScenario = "basic",
     [string]$ServiceUrl = "http://127.0.0.1:47319/",
     [string]$Workspace = "",
@@ -92,7 +92,76 @@ if ([string]::IsNullOrWhiteSpace($ReportPath)) {
 }
 
 $ReportPath = [System.IO.Path]::GetFullPath($ReportPath)
+$ProgressPath = Join-Path (Split-Path -Parent $ReportPath) (([System.IO.Path]::GetFileNameWithoutExtension($ReportPath)) + ".progress.md")
+$ProgressJsonPath = Join-Path (Split-Path -Parent $ReportPath) (([System.IO.Path]::GetFileNameWithoutExtension($ReportPath)) + ".progress.json")
 $reportRows = [System.Collections.Generic.List[object]]::new()
+$liveProgressRows = [System.Collections.Generic.List[object]]::new()
+
+function Write-TestProgress {
+    param(
+        [string]$Phase = "",
+        [string]$CurrentScenario = "",
+        [string]$Status = "running",
+        [string]$LastLine = "",
+        [string]$Error = ""
+    )
+
+    $progressDirectory = Split-Path -Parent $ProgressPath
+    if (-not [string]::IsNullOrWhiteSpace($progressDirectory)) {
+        New-Item -ItemType Directory -Force -Path $progressDirectory | Out-Null
+    }
+
+    $total = $script:liveProgressRows.Count
+    $done = @($script:liveProgressRows | Where-Object { $_.Status -eq "passed" -or $_.Status -eq "failed" }).Count
+    $current = @($script:liveProgressRows | Where-Object { $_.Status -eq "running" } | Select-Object -First 1)
+    $currentNumber = if ($null -ne $current) { [int]$current.Number } else { [Math]::Min($done + 1, [Math]::Max($total, 1)) }
+
+    $snapshot = [pscustomobject]@{
+        generated = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss zzz")
+        workspace = $Workspace
+        report = $ReportPath
+        phase = $Phase
+        currentScenario = $CurrentScenario
+        status = $Status
+        liveCurrent = $currentNumber
+        liveTotal = $total
+        completed = $done
+        lastLine = $LastLine
+        error = $Error
+        scenarios = @($script:liveProgressRows)
+    }
+
+    $snapshot | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $ProgressJsonPath -Encoding UTF8
+
+    $lines = [System.Collections.Generic.List[string]]::new()
+    $lines.Add("# CodexTeamUp Safety Progress")
+    $lines.Add("")
+    $lines.Add("- updated: $($snapshot.generated)")
+    $lines.Add("- workspace: $Workspace")
+    $lines.Add("- report: $ReportPath")
+    $lines.Add("- phase: $Phase")
+    $lines.Add("- status: $Status")
+    if ($total -gt 0) {
+        $lines.Add("- live progress: $currentNumber/$total")
+        $lines.Add("- current scenario: $CurrentScenario")
+    }
+    if (-not [string]::IsNullOrWhiteSpace($LastLine)) {
+        $lines.Add("- last line: $LastLine")
+    }
+    if (-not [string]::IsNullOrWhiteSpace($Error)) {
+        $lines.Add("- error: $Error")
+    }
+    if ($total -gt 0) {
+        $lines.Add("")
+        $lines.Add("| # | Scenario | Status | Started | Finished |")
+        $lines.Add("| --- | --- | --- | --- | --- |")
+        foreach ($row in $script:liveProgressRows) {
+            $lines.Add("| $($row.Number) | $(Convert-ReportCell $row.Scenario) | $(Convert-ReportCell $row.Status) | $(Convert-ReportCell $row.StartedAt) | $(Convert-ReportCell $row.FinishedAt) |")
+        }
+    }
+
+    Set-Content -LiteralPath $ProgressPath -Value $lines -Encoding UTF8
+}
 
 function Add-ReportRow {
     param(
@@ -302,18 +371,22 @@ Write-Host "CodexTeamUp safety net"
 Write-Host "  workspace: $Workspace"
 Write-Host "  artifacts: $ArtifactsPath"
 Write-Host "  report:    $ReportPath"
+Write-Host "  progress:  $ProgressPath"
 Write-Host ""
 
+Write-TestProgress -Phase "restore" -Status "running" -LastLine "Running dotnet restore"
 Write-Host "Running restore..."
 Invoke-Checked -Name "dotnet restore" -Command { dotnet restore --disable-parallel --artifacts-path $ArtifactsPath }
 Add-ReportRow -Category "Build" -TestCase "Restore solution packages" -Status "passed" -Details "dotnet restore --artifacts-path"
 Write-Host ""
 
+Write-TestProgress -Phase "build" -Status "running" -LastLine "Running dotnet build"
 Write-Host "Running build..."
 Invoke-CheckedWithBuildRetry -Name "dotnet build" -Command { dotnet build --no-restore --disable-build-servers --artifacts-path $ArtifactsPath /p:UseSharedCompilation=false }
 Add-ReportRow -Category "Build" -TestCase "Build solution into isolated artifacts" -Status "passed" -Details "No src/bin or src/obj runtime dependency"
 
 Write-Host ""
+Write-TestProgress -Phase "deterministic" -Status "running" -LastLine "Running deterministic test suite"
 Write-Host "Running deterministic test suite..."
 $testDll = Join-Path $ArtifactsPath "bin/CodexTeamUp.Tests/debug/CodexTeamUp.Tests.dll"
 $testControllerPlugin = Join-Path (Split-Path -Parent $testDll) "CodexTeamUp.Controller.Default.dll"
@@ -346,6 +419,7 @@ try {
         }
 
         Write-SafetyReport
+        Write-TestProgress -Phase "deterministic" -Status "failed" -Error "deterministic test suite failed with exit code $deterministicExitCode"
         throw "deterministic test suite failed with exit code $deterministicExitCode."
     }
 
@@ -397,18 +471,29 @@ try {
 if (-not $Live -and -not $LiveAll) {
     Write-Host ""
     Write-Host "PASS CodexTeamUp deterministic safety net"
+    Write-TestProgress -Phase "complete" -Status "passed" -LastLine "PASS deterministic safety net"
     Write-SafetyReport
     exit 0
 }
 
 $scenarios = if ($LiveAll) {
-    @("controller-suite", "basic", "peer", "replacement", "surface")
+    @("controller-suite", "basic", "peer", "replacement", "surface", "queue-first", "continuation", "error-paths", "stale-claimed")
 } elseif ($LiveScenario -eq "all") {
-    @("controller-suite", "basic", "peer", "replacement", "surface")
+    @("controller-suite", "basic", "peer", "replacement", "surface", "queue-first", "continuation", "error-paths", "stale-claimed")
 } else {
     @($LiveScenario)
 }
 $scenarios = @($scenarios)
+for ($scenarioIndex = 0; $scenarioIndex -lt $scenarios.Count; $scenarioIndex++) {
+    $script:liveProgressRows.Add([pscustomobject]@{
+        Number = $scenarioIndex + 1
+        Scenario = $scenarios[$scenarioIndex]
+        Status = "pending"
+        StartedAt = ""
+        FinishedAt = ""
+    })
+}
+Write-TestProgress -Phase "live" -Status "running" -CurrentScenario $scenarios[0] -LastLine "Preparing live smoke scenarios"
 
 $baseRunId = $RunId
 if ([string]::IsNullOrWhiteSpace($baseRunId)) {
@@ -418,6 +503,10 @@ if ([string]::IsNullOrWhiteSpace($baseRunId)) {
 for ($scenarioIndex = 0; $scenarioIndex -lt $scenarios.Count; $scenarioIndex++) {
     $scenario = $scenarios[$scenarioIndex]
     $scenarioNumber = $scenarioIndex + 1
+    $progressRow = $script:liveProgressRows[$scenarioIndex]
+    $progressRow.Status = "running"
+    $progressRow.StartedAt = Get-Date -Format "HH:mm:ss"
+    Write-TestProgress -Phase "live" -Status "running" -CurrentScenario $scenario -LastLine "Running live smoke ${scenarioNumber}/$($scenarios.Count): $scenario"
     $scenarioRunId = if ($scenarios.Count -eq 1) {
         $baseRunId
     } else {
@@ -446,19 +535,29 @@ for ($scenarioIndex = 0; $scenarioIndex -lt $scenarios.Count; $scenarioIndex++) 
         $powerShellRunner = (Get-Command powershell -ErrorAction Stop).Source
     }
 
-    $liveOutput = & $powerShellRunner @liveArgs 2>&1
-    $liveExitCode = $LASTEXITCODE
-    foreach ($lineObject in $liveOutput) {
-        Write-Host ([string]$lineObject)
+    $liveOutputBuffer = [System.Collections.Generic.List[string]]::new()
+    & $powerShellRunner @liveArgs 2>&1 | ForEach-Object {
+        $line = [string]$_
+        $liveOutputBuffer.Add($line)
+        Write-Host $line
+        Write-TestProgress -Phase "live" -Status "running" -CurrentScenario $scenario -LastLine $line
     }
+    $liveExitCode = $LASTEXITCODE
+    $liveOutput = @($liveOutputBuffer)
 
     $liveText = ($liveOutput | ForEach-Object { [string]$_ }) -join "`n"
     if ($liveExitCode -eq 0) {
         $details = if ($liveText -match "PASS live CTU .+ smoke run ([^\r\n]+)") { "run $($Matches[1].Trim())" } else { "scenario completed" }
         Add-ReportRow -Category "Live smoke" -TestCase "$scenario scenario" -Status "passed" -Details $details
+        $progressRow.Status = "passed"
+        $progressRow.FinishedAt = Get-Date -Format "HH:mm:ss"
+        Write-TestProgress -Phase "live" -Status "running" -CurrentScenario $scenario -LastLine "PASS live smoke ${scenarioNumber}/$($scenarios.Count): $scenario"
     } else {
         $reasonLines = @($liveOutput | Select-Object -Last 8 | ForEach-Object { [string]$_ })
         Add-ReportRow -Category "Live smoke" -TestCase "$scenario scenario" -Status "failed" -Reason ($reasonLines -join " ")
+        $progressRow.Status = "failed"
+        $progressRow.FinishedAt = Get-Date -Format "HH:mm:ss"
+        Write-TestProgress -Phase "live" -Status "failed" -CurrentScenario $scenario -Error ($reasonLines -join " ")
         Write-SafetyReport
         throw "live smoke $scenario failed with exit code $liveExitCode."
     }
@@ -467,6 +566,7 @@ for ($scenarioIndex = 0; $scenarioIndex -lt $scenarios.Count; $scenarioIndex++) 
 if (($LiveAll -or $CleanupAllTestAgents) -and -not $KeepLiveAgents) {
     Write-Host ""
     Write-Host "Running live cleanup: ctu-test/* except ctu-test/architect"
+    Write-TestProgress -Phase "cleanup" -Status "running" -LastLine "Running live cleanup"
     $cleanupArgs = @(
         "-ExecutionPolicy", "Bypass",
         "-File", (Join-Path $repoRoot "scripts/test-live-multi-agent-orchestration.ps1"),
@@ -490,6 +590,7 @@ if (($LiveAll -or $CleanupAllTestAgents) -and -not $KeepLiveAgents) {
     } else {
         $reasonLines = @($cleanupOutput | Select-Object -Last 8 | ForEach-Object { [string]$_ })
         Add-ReportRow -Category "Live cleanup" -TestCase "Archive/retire ctu-test/* except ctu-test/architect" -Status "failed" -Reason ($reasonLines -join " ")
+        Write-TestProgress -Phase "cleanup" -Status "failed" -Error ($reasonLines -join " ")
         Write-SafetyReport
         throw "live cleanup failed with exit code $cleanupExitCode."
     }
@@ -497,4 +598,5 @@ if (($LiveAll -or $CleanupAllTestAgents) -and -not $KeepLiveAgents) {
 
 Write-Host ""
 Write-Host "PASS CodexTeamUp safety net"
+Write-TestProgress -Phase "complete" -Status "passed" -LastLine "PASS CodexTeamUp safety net"
 Write-SafetyReport

@@ -25,7 +25,8 @@ Recent architecture work tightens the runtime around the parts that are most lik
 - Controller runtime files live under `.ctu/runtime`, separate from normal source build output, so local build/test runs are not coupled to the running CTU process.
 - Controller-only fixes can be published and reloaded without restarting CTU, using the controller runtime publish script and the controller reload MCP/HTTP endpoint.
 - CTU now writes both machine JSONL logs and human-readable `.log` files for controller, app-server/API adapter, and wrapper diagnostics under `.codexteamup/logs`.
-- Live smoke tests exercise the real Codex Desktop context: creating a visible agent, having one agent create peer agents, and replacing a stale agent binding.
+- Live smoke tests exercise the real Codex Desktop context: creating a visible agent, having one agent create peer agents, replacing a stale agent binding, proving queue-first delivery, delayed agent-owned continuation wakeups, live error paths, and stale claimed-task recovery.
+- Test runs now write a live progress snapshot beside the safety report so long live suites show the current phase, scenario number, last observed line, and final report target instead of looking like a black box.
 - Desktop wakeups are treated as best-effort delivery. AgentBus remains the durable truth, calls use short ACK/NACK behavior, and controller wakeups are serialized to avoid bursty Desktop app-server cancellations.
 
 ## Visual Walkthrough

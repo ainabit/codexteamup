@@ -4,6 +4,18 @@ All notable CodexTeamUp changes are tracked here by date. The project does not u
 
 ## 2026-05-18
 
+### Live Coordination Safety Net
+
+- Added live Codex Desktop coverage for queue-first UX, delayed agent-owned continuations, negative dispatch/error paths, and stale claimed-task recovery.
+- Taught the controller startup sweep to cover bus roots discovered through MCP calls, so `codexteamup.test` continuation and recovery work is processed by the running controller instead of only the default repo bus.
+- Kept continuity action-state handling ahead of generic task delivery so guardian-driven dispatch still produces the expected continuity events.
+- Added live progress snapshot files beside the safety report so broad runs expose phase, scenario count, current scenario, last observed line, and final report path while they run.
+- Documented the expanded multi-agent orchestration test strategy.
+
+Why this exists:
+
+The real safety net is not just deterministic unit coverage. CTU exists to coordinate visible Codex Desktop agents, so the live tests must prove the coordination behaviors that previously caused stalls: queued work staying queued until dispatch, self-continuation actually waking the same agent again, error paths being visible and durable, and claimed tasks being recovered instead of silently hanging.
+
 ### Fresh Clone Acceptance Path
 
 - Added `scripts/test-fresh-clone-acceptance.ps1` as the smallest acceptance runner for a real fresh clone.

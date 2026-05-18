@@ -40,6 +40,10 @@ The repeatable smoke tests are:
 - `controller`: send one task to the manually provided `ctu-test/architect`; the controller performs the run-scoped orchestration from inside Codex Desktop.
 - `controller-suite`: send one packaged safety-net task to `ctu-test/architect`; the controller creates workers with distinct display names, roles, models, and reasoning depths, then verifies terminal outcomes and self-continuation evidence.
 - `surface`: exercise live CTU MCP and AgentBus surfaces in `codexteamup.test`, including status tools, create/claim/write/wait result flow, result notification to `ctu-test/architect`, and dashboard export.
+- `queue-first`: prove `team_send_message dispatchMode=enqueue` returns a pure queue ACK with no inline wakeup, then prove explicit `bridge_dispatch_task` wakes a worker and produces a result.
+- `continuation`: prove a real worker writes `self_continue`, CTU waits until the continuation is due, creates a self-continuation task, wakes the same worker, and receives a follow-up `done` result.
+- `error-paths`: exercise live negative paths such as missing task dispatch, retired target dispatch, and stale/non-visible thread binding.
+- `stale-claimed`: deliberately claim a worker task without a result, wait for controller stale-claim recovery, and verify the recovered task is delivered and completed.
 - `basic`: create or bind `agent-a`, wake it, and wait for one AgentBus result.
 - `peer`: run `basic`, have `agent-a` create `agent-b` and `agent-c`, and verify `agent-b -> agent-c` communication.
 - `replacement`: run `peer`, mark `agent-b` stale, create or bind a replacement, and verify the replacement handles a task.
@@ -51,6 +55,10 @@ powershell -ExecutionPolicy Bypass -File .\scripts\test-codexteamup.ps1
 powershell -ExecutionPolicy Bypass -File .\scripts\test-codexteamup.ps1 -UseTestWorkspace -Live -LiveScenario controller
 powershell -ExecutionPolicy Bypass -File .\scripts\test-codexteamup.ps1 -UseTestWorkspace -Live -LiveScenario controller-suite
 powershell -ExecutionPolicy Bypass -File .\scripts\test-codexteamup.ps1 -UseTestWorkspace -Live -LiveScenario surface
+powershell -ExecutionPolicy Bypass -File .\scripts\test-codexteamup.ps1 -UseTestWorkspace -Live -LiveScenario queue-first
+powershell -ExecutionPolicy Bypass -File .\scripts\test-codexteamup.ps1 -UseTestWorkspace -Live -LiveScenario continuation
+powershell -ExecutionPolicy Bypass -File .\scripts\test-codexteamup.ps1 -UseTestWorkspace -Live -LiveScenario error-paths
+powershell -ExecutionPolicy Bypass -File .\scripts\test-codexteamup.ps1 -UseTestWorkspace -Live -LiveScenario stale-claimed
 powershell -ExecutionPolicy Bypass -File .\scripts\test-codexteamup.ps1 -UseTestWorkspace -Live -LiveScenario basic
 powershell -ExecutionPolicy Bypass -File .\scripts\test-codexteamup.ps1 -UseTestWorkspace -Live -LiveScenario peer
 powershell -ExecutionPolicy Bypass -File .\scripts\test-codexteamup.ps1 -UseTestWorkspace -Live -LiveScenario replacement
@@ -82,12 +90,16 @@ The live smoke runner checks:
 - direct AgentBus create/claim/write/wait flow,
 - result notification to the manually provided `ctu-test/architect`,
 - dashboard export against the live `codexteamup.test` AgentBus,
+- queue-first enqueue acknowledgement versus explicit task dispatch,
 - optional controller orchestration through a manually provided `ctu-test/architect`,
 - controller-driven agent creation with display names and roles that are intentionally not tied to the agent id,
 - creation and priming of `agent-a`,
 - `agent-a` creating agents, enqueuing tasks for `agent-b` and `agent-c`, and dispatching those tasks separately,
 - runtime settings on `agent-b` and `agent-c`,
 - controller-suite evidence markers for `done`, `human`, `failed`, `handed_off`, and agent-owned `self_continue`,
+- delayed agent-owned `self_continue` wakeup and follow-up `done` result,
+- missing-task, retired-agent, and non-visible-thread negative dispatch paths,
+- stale claimed-task recovery through the controller delivery loop,
 - peer communication from `agent-b` to `agent-c`,
 - replacement of a stale `agent-b` binding,
 - replacement wakeup and result.

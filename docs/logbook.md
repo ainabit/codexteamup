@@ -4,6 +4,11 @@ Reverse chronological notes about the build journey, notable failures, redesigns
 
 ## 2026-05-18
 
+- The live safety net was expanded after the remaining CTU feature gaps became explicit: queue-first UX, real delayed self-continuation, live error paths, and stale claimed-task recovery now have dedicated live smoke scenarios.
+- The first delayed-continuation live test exposed that controller background sweeps were only processing the default repo bus. The controller now tracks bus roots touched through MCP and sweeps those roots too, so `codexteamup.test` work is not starved behind the development repo's AgentBus.
+- A deterministic regression caught that generic delivery must not outrun continuity action-state processing. The startup sweep order now preserves guardian/continuity dispatch semantics before normal queued-task delivery.
+- The broad live test run showed a human-facing observability flaw: scenario progress existed only in the tool stream. Safety runs now write a progress Markdown/JSON snapshot beside the report so long runs show phase, scenario count, current scenario, and last observed line.
+- The end-of-run cleanup path remains important. After a broad live run timed out during manual interruption, the cleanup script retired and archived old `ctu-test/*` agents while preserving `ctu-test/architect`.
 - Restart semantics were tightened around a CTU session manifest instead of best-effort process discovery. Startup now records launcher/Desktop/service/wrapper PIDs, and restart uses that source-session record so switching to `codexteamup.acceptance` can close the old startup console before launching the target checkout through the normal KISS PowerShell entrypoint. Automated restart starts are intentionally transient so test windows do not stay open after health is reached.
 - Live restart testing exposed two concrete guardrail gaps: `codexteamup.acceptance` was initially on an older branch commit, and a PowerShell-written startup handoff used PascalCase JSON that the controller rejected.
 - The fix made restart startup handoffs canonical camelCase, made exchange reads case-insensitive for compatibility, and deadletters malformed envelopes so one bad file cannot stall the controller sweep.

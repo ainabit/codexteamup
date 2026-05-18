@@ -85,6 +85,7 @@ var tests = new (string Name, Func<Task> Body)[]
     ("Controller guardian emits canonical decision events", () => Task.Run(ControllerGuardianEmitsCanonicalContinuityDecisionEvents)),
     ("Controller guardian blocks when notify retries are exhausted", () => Task.Run(ControllerGuardianBlocksOnExhaustedNotifyRetries)),
     ("Controller agent continuation wakes idle owner", () => Task.Run(ControllerAgentContinuationWakesIdleOwner)),
+    ("Controller startup sweep covers MCP-discovered bus roots", () => Task.Run(ControllerStartupSweepCoversMcpDiscoveredBusRoots)),
     ("MCP registry rebinds stale agent before team message", () => Task.Run(McpRegistryRebindsStaleAgentBeforeTeamMessage)),
     ("MCP registry waits for AgentBus result", () => Task.Run(McpRegistryWaitsForAgentBusResult)),
     ("MCP registry clamps invalid AgentBus wait timeout", () => Task.Run(McpRegistryClampsInvalidAgentBusWaitTimeout)),
@@ -4198,6 +4199,73 @@ static void ControllerAgentContinuationWakesIdleOwner()
     controller.RunStartupSweepAsync().GetAwaiter().GetResult();
 
     Equal(1, appServer.SentTurns.Count);
+}
+
+static void ControllerStartupSweepCoversMcpDiscoveredBusRoots()
+{
+    var root = NewTestDirectory();
+    var defaultBusRoot = Path.Combine(root, ".codexteamup", "agentbus");
+    var workspace = Path.Combine(root, "codexteamup.test");
+    var workspaceBusRoot = Path.Combine(workspace, ".codexteamup", "agentbus");
+    Directory.CreateDirectory(workspace);
+
+    var appServer = new ScriptedSendTurnAppServerClient(
+        "thread-live-agent",
+        "ctu-test/live-agent",
+        workspace);
+    var controller = new DefaultCtuController(defaultBusRoot, appServer);
+    var registerArgs = JsonSerializer.Deserialize<JsonElement>($$"""
+    {
+      "cwd": {{JsonSerializer.Serialize(workspace)}},
+      "id": "ctu-test/live-agent",
+      "displayName": "ctu-test/live-agent",
+      "role": "Live test agent",
+      "threadId": "thread-live-agent",
+      "returnTo": "ctu-test/architect",
+      "status": "active"
+    }
+    """);
+
+    _ = controller.InvokeToolAsync("agentbus_register_agent", registerArgs).GetAwaiter().GetResult();
+
+    var workspaceBus = new AgentBusStore(workspaceBusRoot);
+    var task = workspaceBus.CreateTask(
+        "ctu-test/architect",
+        "ctu-test/live-agent",
+        "Known bus continuation",
+        "Continue in the MCP-discovered test workspace.",
+        "codexteamup.test",
+        workspace,
+        [],
+        "ctu-test/architect");
+    workspaceBus.ClaimTask(task.Id, "ctu-test/live-agent");
+    workspaceBus.WriteResult(
+        task.Id,
+        "Needs a follow-up in the same workspace.",
+        "completed",
+        "ctu-test/live-agent",
+        "ctu-test/architect",
+        null,
+        [],
+        [],
+        outcome: "self_continue",
+        continuation: new AgentBusContinuationRequest
+        {
+            Owner = "ctu-test/live-agent",
+            WakeAfterSeconds = 0,
+            DedupeKey = "known-bus-root-continuation",
+            Reason = "Prove the sweep covers a cwd-discovered BusRoot.",
+            MaxAttempts = 2
+        });
+
+    controller.RunStartupSweepAsync().GetAwaiter().GetResult();
+
+    Equal(1, appServer.SentTurns.Count);
+    Equal("thread-live-agent", appServer.SentTurns.Single().ThreadId);
+    Equal(1, workspaceBus.ListTasks("ctu-test/live-agent", "open").Count);
+    Equal(0, workspaceBus.ListContinuations("ctu-test/live-agent", "open").Count);
+    Equal(1, workspaceBus.ListContinuations("ctu-test/live-agent", "done").Count);
+    True(workspaceBus.ListEvents(300).Any(evt => evt.Type == "continuation.wakeup_enqueued"));
 }
 
 static void SeedRestartCheckout(string checkout)

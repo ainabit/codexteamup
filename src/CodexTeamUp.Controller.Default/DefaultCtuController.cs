@@ -26,6 +26,8 @@ public sealed class DefaultCtuController : ICtuController
     private readonly IAppServerClient _appServer;
     private readonly DateTimeOffset _loadedAt = DateTimeOffset.Now;
     private readonly SemaphoreSlim _startupSweepGate = new(1, 1);
+    private readonly object _knownBusRootsGate = new();
+    private readonly HashSet<string> _knownBusRoots = new(StringComparer.OrdinalIgnoreCase);
 
     public DefaultCtuController(
         string busRoot,
@@ -37,6 +39,7 @@ public sealed class DefaultCtuController : ICtuController
         _appServer = appServer;
         _defaultBusRoot = Path.GetFullPath(busRoot);
         _logger = logger;
+        TrackBusRoot(_defaultBusRoot);
         RegisterDefaultTools(busRoot, appServer);
     }
 
@@ -99,11 +102,21 @@ public sealed class DefaultCtuController : ICtuController
 
         try
         {
-            await ProcessStartupSweepAsync(cancellationToken).ConfigureAwait(false);
-            await ProcessResultNotificationRetriesAsync(cancellationToken).ConfigureAwait(false);
-            await ProcessContinuityGuardianAsync(cancellationToken).ConfigureAwait(false);
-            await ProcessAgentContinuationsAsync(cancellationToken).ConfigureAwait(false);
-            await ProcessTaskDeliveryAsync(cancellationToken).ConfigureAwait(false);
+            foreach (var busRoot in KnownBusRootsSnapshot())
+            {
+                try
+                {
+                    await ProcessStartupSweepAsync(busRoot, cancellationToken).ConfigureAwait(false);
+                    await ProcessAgentContinuationsAsync(busRoot, cancellationToken).ConfigureAwait(false);
+                    await ProcessContinuityGuardianAsync(busRoot, cancellationToken).ConfigureAwait(false);
+                    await ProcessTaskDeliveryAsync(busRoot, cancellationToken).ConfigureAwait(false);
+                    await ProcessResultNotificationRetriesAsync(busRoot, cancellationToken).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    _logger?.Error("controller.startup_sweep.bus_failed", ex, new { busRoot });
+                }
+            }
         }
         catch (Exception ex)
         {
@@ -116,10 +129,27 @@ public sealed class DefaultCtuController : ICtuController
         }
     }
 
-    private async Task ProcessTaskDeliveryAsync(CancellationToken cancellationToken)
+    private void TrackBusRoot(string busRoot)
     {
-        var bus = new AgentBusStore(_defaultBusRoot);
-        var continuity = new ExecutionContinuityStateStore(_defaultBusRoot, _controllerPolicy.Policy.ContinuityStateDirectory);
+        var fullPath = Path.GetFullPath(busRoot);
+        lock (_knownBusRootsGate)
+        {
+            _knownBusRoots.Add(fullPath);
+        }
+    }
+
+    private IReadOnlyList<string> KnownBusRootsSnapshot()
+    {
+        lock (_knownBusRootsGate)
+        {
+            return _knownBusRoots.OrderBy(path => path, StringComparer.OrdinalIgnoreCase).ToList();
+        }
+    }
+
+    private async Task ProcessTaskDeliveryAsync(string busRoot, CancellationToken cancellationToken)
+    {
+        var bus = new AgentBusStore(busRoot);
+        var continuity = new ExecutionContinuityStateStore(busRoot, _controllerPolicy.Policy.ContinuityStateDirectory);
         continuity.Initialize();
         var now = DateTimeOffset.Now;
         var staleClaimRecoveryDelay = TimeSpan.FromSeconds(_controllerPolicy.Policy.StaleClaimedTaskRecoverySeconds);
@@ -277,9 +307,9 @@ public sealed class DefaultCtuController : ICtuController
         }
     }
 
-    private async Task ProcessResultNotificationRetriesAsync(CancellationToken cancellationToken)
+    private async Task ProcessResultNotificationRetriesAsync(string busRoot, CancellationToken cancellationToken)
     {
-        var bus = new AgentBusStore(_defaultBusRoot);
+        var bus = new AgentBusStore(busRoot);
         var pendingResults = bus.ListResults()
             .Where(result =>
                 result.NotifyAttempts > 0 &&
@@ -328,10 +358,10 @@ public sealed class DefaultCtuController : ICtuController
         }
     }
 
-    private async Task ProcessContinuityGuardianAsync(CancellationToken cancellationToken)
+    private async Task ProcessContinuityGuardianAsync(string busRoot, CancellationToken cancellationToken)
     {
-        var bus = new AgentBusStore(_defaultBusRoot);
-        var continuity = new ExecutionContinuityStateStore(_defaultBusRoot, _controllerPolicy.Policy.ContinuityStateDirectory);
+        var bus = new AgentBusStore(busRoot);
+        var continuity = new ExecutionContinuityStateStore(busRoot, _controllerPolicy.Policy.ContinuityStateDirectory);
         continuity.Initialize();
         var guardian = ContinuityGuardian();
 
@@ -1285,9 +1315,9 @@ public sealed class DefaultCtuController : ICtuController
             || lastDeliveryError.Contains("timed out", StringComparison.OrdinalIgnoreCase);
     }
 
-    private async Task ProcessAgentContinuationsAsync(CancellationToken cancellationToken)
+    private async Task ProcessAgentContinuationsAsync(string busRoot, CancellationToken cancellationToken)
     {
-        var bus = new AgentBusStore(_defaultBusRoot);
+        var bus = new AgentBusStore(busRoot);
         var due = bus.ListContinuations(status: "open")
             .Where(continuation => continuation.DueAt <= DateTimeOffset.Now)
             .OrderBy(continuation => continuation.DueAt)
@@ -1340,7 +1370,7 @@ public sealed class DefaultCtuController : ICtuController
                 continue;
             }
 
-            var cwd = agent.Cwd ?? CtuProjectLayout.ProjectRootForBusRoot(_defaultBusRoot);
+            var cwd = agent.Cwd ?? CtuProjectLayout.ProjectRootForBusRoot(busRoot);
             var task = bus.CreateTask(
                 "ctu/continuation",
                 continuation.Owner,
@@ -1500,32 +1530,61 @@ public sealed class DefaultCtuController : ICtuController
         }
 
         var threads = AppServerThreadMapper.ParseListResult(list.ResultJson);
-        return threads.FirstOrDefault(thread =>
+        var listed = threads.FirstOrDefault(thread =>
             string.Equals(thread.Id, agent.ThreadId, StringComparison.OrdinalIgnoreCase)
             || string.Equals(thread.Name, agent.DisplayName, StringComparison.OrdinalIgnoreCase)
             || string.Equals(thread.Name, agent.Id, StringComparison.OrdinalIgnoreCase));
+        if (listed is not null)
+        {
+            return listed;
+        }
+
+        if (!string.IsNullOrWhiteSpace(agent.ThreadId)
+            && await ThreadExistsAsync(appServer, agent.ThreadId!, agent.Cwd, cancellationToken).ConfigureAwait(false))
+        {
+            var status = await TryReadThreadStatusAsync(appServer, agent.ThreadId!, agent.Cwd, cancellationToken).ConfigureAwait(false);
+            return new CodexThreadRecord(
+                agent.ThreadId!,
+                agent.DisplayName ?? agent.Id,
+                null,
+                agent.Cwd,
+                "registered-agent",
+                status,
+                null,
+                null,
+                "registered-agent",
+                null);
+        }
+
+        return null;
     }
 
     private void RegisterDefaultTools(string busRoot, IAppServerClient appServer)
     {
         var registry = this;
+        AgentBusStore OpenBus(JsonElement args)
+        {
+            var bus = Bus(args, busRoot);
+            TrackBusRoot(bus.RootDirectory);
+            return bus;
+        }
 
         registry.Register("agentbus_init", (args, _) =>
         {
-            var bus = Bus(args, busRoot);
+            var bus = OpenBus(args);
             bus.Initialize();
             return Task.FromResult<object>(new { busRoot = bus.RootDirectory });
         });
 
         registry.Register("agentbus_list_agents", (args, _) =>
         {
-            var bus = Bus(args, busRoot);
+            var bus = OpenBus(args);
             return Task.FromResult<object>(new { agents = bus.ListAgents() });
         });
 
         registry.Register("agentbus_register_agent", (args, _) =>
         {
-            var bus = Bus(args, busRoot);
+            var bus = OpenBus(args);
             var agent = new AgentDefinition
             {
                 Id = Required(args, "id"),
@@ -1546,7 +1605,7 @@ public sealed class DefaultCtuController : ICtuController
 
         registry.Register("agentbus_create_task", (args, _) =>
         {
-            var bus = Bus(args, busRoot);
+            var bus = OpenBus(args);
             var cwd = Optional(args, "cwd") ?? Environment.CurrentDirectory;
             var task = bus.CreateTask(
                 Required(args, "from"),
@@ -1562,7 +1621,7 @@ public sealed class DefaultCtuController : ICtuController
 
         registry.Register("agentbus_list_tasks", (args, _) =>
         {
-            var bus = Bus(args, busRoot);
+            var bus = OpenBus(args);
             return Task.FromResult<object>(new { tasks = bus.ListTasks(Optional(args, "to"), Optional(args, "status")) });
         });
 
@@ -1573,31 +1632,31 @@ public sealed class DefaultCtuController : ICtuController
                 throw new ArgumentException("agentbus_clear_tasks requires confirm=DELETE.");
             }
 
-            var bus = Bus(args, busRoot);
+            var bus = OpenBus(args);
             return Task.FromResult<object>(new { reset = bus.ClearTasks(Bool(args, "includeResults")) });
         });
 
         registry.Register("agentbus_list_events", (args, _) =>
         {
-            var bus = Bus(args, busRoot);
+            var bus = OpenBus(args);
             return Task.FromResult<object>(new { events = bus.ListEvents(Int(args, "limit", 500)) });
         });
 
         registry.Register("agentbus_list_continuations", (args, _) =>
         {
-            var bus = Bus(args, busRoot);
+            var bus = OpenBus(args);
             return Task.FromResult<object>(new { continuations = bus.ListContinuations(Optional(args, "owner"), Optional(args, "status")) });
         });
 
         registry.Register("agentbus_claim_task", (args, _) =>
         {
-            var bus = Bus(args, busRoot);
+            var bus = OpenBus(args);
             return Task.FromResult<object>(new { task = bus.ClaimTask(Required(args, "taskId"), Optional(args, "owner")) });
         });
 
         registry.Register("agentbus_write_result", (args, _) =>
         {
-            var bus = Bus(args, busRoot);
+            var bus = OpenBus(args);
             var taskId = Required(args, "taskId");
             var task = bus.FindTask(taskId) ?? throw new FileNotFoundException("Task not found.");
             var continuationContext = TryParseContinuationPromptState(task);
@@ -1629,7 +1688,7 @@ public sealed class DefaultCtuController : ICtuController
 
         registry.Register("agentbus_wait_result", (args, ct) =>
         {
-            var bus = Bus(args, busRoot);
+            var bus = OpenBus(args);
             var taskId = Required(args, "taskId");
             var policy = _controllerPolicy.Policy;
             var timeoutSeconds = WaitTimeoutSeconds(
@@ -1721,7 +1780,7 @@ public sealed class DefaultCtuController : ICtuController
 
         registry.Register("bridge_dispatch_task", async (args, ct) =>
         {
-            var bus = Bus(args, busRoot);
+            var bus = OpenBus(args);
             var taskId = Required(args, "taskId");
             if (Defer(args))
             {
@@ -1750,7 +1809,7 @@ public sealed class DefaultCtuController : ICtuController
 
         registry.Register("bridge_notify_result", async (args, ct) =>
         {
-            var bus = Bus(args, busRoot);
+            var bus = OpenBus(args);
             var busResult = bus.FindResult(Required(args, "resultId")) ?? throw new FileNotFoundException("Result not found.");
             var targetThreadArg = Optional(args, "toThread");
             var targetAgentArg = Optional(args, "toAgent") ?? busResult.To;
@@ -1776,7 +1835,7 @@ public sealed class DefaultCtuController : ICtuController
 
         registry.Register("team_discover_agents", async (args, ct) =>
         {
-            var bus = Bus(args, busRoot);
+            var bus = OpenBus(args);
             bus.Initialize();
             var agents = Csv(args, "agents");
             if (agents.Count == 0)
@@ -1820,7 +1879,7 @@ public sealed class DefaultCtuController : ICtuController
 
         registry.Register("team_create_agent", async (args, ct) =>
         {
-            var bus = Bus(args, busRoot);
+            var bus = OpenBus(args);
             bus.Initialize();
             var cwd = Optional(args, "cwd") ?? Environment.CurrentDirectory;
             var spec = new TeamAgentSpec(
@@ -1885,7 +1944,7 @@ public sealed class DefaultCtuController : ICtuController
 
         registry.Register("team_ensure_agents", async (args, ct) =>
         {
-            var bus = Bus(args, busRoot);
+            var bus = OpenBus(args);
             bus.Initialize();
             var cwd = Optional(args, "cwd") ?? Environment.CurrentDirectory;
             var createMissing = !string.Equals(Optional(args, "createMissing"), "false", StringComparison.OrdinalIgnoreCase);
@@ -1964,7 +2023,7 @@ public sealed class DefaultCtuController : ICtuController
 
         registry.Register("team_send_message", async (args, ct) =>
         {
-            var bus = Bus(args, busRoot);
+            var bus = OpenBus(args);
             var from = Required(args, "from");
             var to = Required(args, "to");
             var message = Required(args, "message");
@@ -2060,14 +2119,14 @@ public sealed class DefaultCtuController : ICtuController
 
         registry.Register("team_dashboard_export", (args, _) =>
         {
-            var bus = Bus(args, busRoot);
+            var bus = OpenBus(args);
             var path = AgentBusDashboard.Export(bus, Optional(args, "outputPath"));
             return Task.FromResult<object>(new { path });
         });
 
         registry.Register("ctu_restart_request", (args, _) =>
         {
-            var bus = Bus(args, busRoot);
+            var bus = OpenBus(args);
             var sourceBusRoot = bus.RootDirectory;
             var sourceCwd = RestartOperationStore.NormalizeCheckoutPath(
                 Optional(args, "sourceCwd")
@@ -2136,7 +2195,7 @@ public sealed class DefaultCtuController : ICtuController
             }
 
             RestartOperationRecord? operation = null;
-            var opStore = new RestartOperationStore(Bus(args, busRoot).RootDirectory);
+            var opStore = new RestartOperationStore(OpenBus(args).RootDirectory);
             if (!string.IsNullOrWhiteSpace(operationPath))
             {
                 var resolvedPath = Path.GetFullPath(operationPath);
@@ -2162,9 +2221,9 @@ public sealed class DefaultCtuController : ICtuController
         return;
     }
 
-    private async Task ProcessStartupSweepAsync(CancellationToken cancellationToken)
+    private async Task ProcessStartupSweepAsync(string busRoot, CancellationToken cancellationToken)
     {
-        var exchange = new ExchangeStore(_defaultBusRoot);
+        var exchange = new ExchangeStore(busRoot);
         var messages = exchange.ListPendingStartupSystemMessages(ExchangeEnvelopeKind.Restart, Math.Max(1, _controllerPolicy.Policy.WaitResultTimeoutCapSeconds));
         if (messages.Count == 0)
         {
