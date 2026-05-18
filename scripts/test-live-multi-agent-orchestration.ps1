@@ -3,7 +3,7 @@ param(
     [string]$Workspace = "",
     [string]$RunId = "",
     [string]$Prefix = "ctu-test",
-    [ValidateSet("basic", "peer", "replacement", "controller", "controller-suite", "all")]
+    [ValidateSet("surface", "basic", "peer", "replacement", "controller", "controller-suite", "all")]
     [string]$Scenario = "all",
     [string]$ControllerAgent = "ctu-test/architect",
     [int]$TimeoutSeconds = 900,
@@ -541,6 +541,121 @@ Use forward-slash cwd values in any Git app directives.
         Write-Host "PASS live CTU $Scenario smoke run $RunId"
         Write-Host "  controller: $ControllerAgent"
         Write-Host "  controller result: $($controllerResult.id)"
+        return
+    }
+
+    if ($Scenario -eq "surface") {
+        Write-Host "Checking live CTU MCP surface..."
+        $surfaceAgent = "$agentPrefix/surface-agent"
+        $dashboardPath = "$Workspace/.codexteamup/reports/live-dashboard-$RunId.html"
+
+        Invoke-CtuTool -Name "codex_appserver_adapter_status" | Out-Null
+        Invoke-CtuTool -Name "codex_controller_status" | Out-Null
+        Invoke-CtuTool -Name "codex_controller_policy_status" | Out-Null
+
+        $controller = Get-Agent -Id $ControllerAgent
+        if ($null -eq $controller -or [string]::IsNullOrWhiteSpace($controller.threadId)) {
+            Write-Host "Controller is not bound yet; binding an existing visible Desktop thread named $ControllerAgent."
+            Invoke-CtuTool -Name "team_ensure_agents" -Arguments @{
+                cwd = $Workspace
+                agentsJson = (ConvertTo-Json -InputObject @(
+                    @{
+                        id = $ControllerAgent
+                        displayName = $ControllerAgent
+                        role = "Live smoke test controller. Receives CTU surface notifications."
+                        returnTo = $ControllerAgent
+                        speed = "standard"
+                        reasoningEffort = "medium"
+                    }
+                ) -Depth 40 -Compress)
+                createMissing = "false"
+                prime = "false"
+                setName = "false"
+            } | Out-Null
+        }
+
+        $controller = Require-Agent -Id $ControllerAgent
+
+        Invoke-CtuTool -Name "agentbus_register_agent" -Arguments @{
+            cwd = $Workspace
+            id = $surfaceAgent
+            displayName = $surfaceAgent
+            role = "Live CTU MCP surface probe agent."
+            returnTo = $ControllerAgent
+            status = "active"
+        } | Out-Null
+
+        $taskResponse = Invoke-CtuTool -Name "agentbus_create_task" -Arguments @{
+            cwd = $Workspace
+            from = "ctu-test/runner"
+            to = $surfaceAgent
+            title = "Live smoke: MCP surface task"
+            prompt = "Claim this task, write a result, notify the controller, and export dashboard evidence through the runner."
+            returnTo = $ControllerAgent
+        }
+        $taskId = $taskResponse.task.id
+        Assert-True (-not [string]::IsNullOrWhiteSpace($taskId)) "agentbus_create_task did not return a task id."
+
+        $claimResponse = Invoke-CtuTool -Name "agentbus_claim_task" -Arguments @{
+            cwd = $Workspace
+            taskId = $taskId
+            owner = $surfaceAgent
+        }
+        Assert-True ($claimResponse.task.status -eq "claimed") "agentbus_claim_task did not mark task $taskId as claimed."
+
+        $writeResponse = Invoke-CtuTool -Name "agentbus_write_result" -Arguments @{
+            cwd = $Workspace
+            taskId = $taskId
+            from = $surfaceAgent
+            to = $ControllerAgent
+            status = "completed"
+            outcome = "done"
+            summary = "Live surface probe completed for $RunId."
+            tests = "agentbus_create_task,agentbus_claim_task,agentbus_write_result,agentbus_wait_result,bridge_notify_result,team_dashboard_export"
+        }
+        $resultId = $writeResponse.result.id
+        Assert-True (-not [string]::IsNullOrWhiteSpace($resultId)) "agentbus_write_result did not return a result id."
+
+        $waitResponse = Invoke-CtuTool -Name "agentbus_wait_result" -Arguments @{
+            cwd = $Workspace
+            taskId = $taskId
+            timeoutSeconds = (Get-PollTimeoutSeconds)
+        }
+        Assert-True ($waitResponse.completed -eq $true) "agentbus_wait_result did not find result $resultId."
+
+        $notifyResponse = Invoke-CtuTool -Name "bridge_notify_result" -Arguments @{
+            cwd = $Workspace
+            resultId = $resultId
+            toAgent = $ControllerAgent
+        }
+        Assert-True ($notifyResponse.result.id -eq $resultId) "bridge_notify_result returned a different result id."
+        Assert-True (-not [string]::IsNullOrWhiteSpace($notifyResponse.target.threadId)) "bridge_notify_result did not resolve a target thread."
+
+        $dashboardResponse = Invoke-CtuTool -Name "team_dashboard_export" -Arguments @{
+            cwd = $Workspace
+            outputPath = $dashboardPath
+        }
+        Assert-True (-not [string]::IsNullOrWhiteSpace($dashboardResponse.path)) "team_dashboard_export did not return a path."
+        Assert-True (Test-Path -LiteralPath $dashboardResponse.path) "team_dashboard_export did not write '$($dashboardResponse.path)'."
+
+        $tasksResponse = Invoke-CtuTool -Name "agentbus_list_tasks" -Arguments @{
+            cwd = $Workspace
+            status = "done"
+            to = $surfaceAgent
+        }
+        $listedSurfaceTask = @($tasksResponse.tasks) | Where-Object { $_.id -eq $taskId } | Select-Object -First 1
+        Assert-True ($null -ne $listedSurfaceTask) "agentbus_list_tasks did not include completed surface task $taskId."
+
+        Invoke-CtuTool -Name "agentbus_list_events" -Arguments @{
+            cwd = $Workspace
+            limit = 50
+        } | Out-Null
+
+        Write-Host ""
+        Write-Host "PASS live CTU surface smoke run $RunId"
+        Write-Host "  task: $taskId"
+        Write-Host "  result: $resultId"
+        Write-Host "  dashboard: $($dashboardResponse.path)"
         return
     }
 

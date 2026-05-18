@@ -39,6 +39,7 @@ The repeatable smoke tests are:
 
 - `controller`: send one task to the manually provided `ctu-test/architect`; the controller performs the run-scoped orchestration from inside Codex Desktop.
 - `controller-suite`: send one packaged safety-net task to `ctu-test/architect`; the controller creates workers with distinct display names, roles, models, and reasoning depths, then verifies terminal outcomes and self-continuation evidence.
+- `surface`: exercise live CTU MCP and AgentBus surfaces in `codexteamup.test`, including status tools, create/claim/write/wait result flow, result notification to `ctu-test/architect`, and dashboard export.
 - `basic`: create or bind `agent-a`, wake it, and wait for one AgentBus result.
 - `peer`: run `basic`, have `agent-a` create `agent-b` and `agent-c`, and verify `agent-b -> agent-c` communication.
 - `replacement`: run `peer`, mark `agent-b` stale, create or bind a replacement, and verify the replacement handles a task.
@@ -49,6 +50,7 @@ Useful commands:
 powershell -ExecutionPolicy Bypass -File .\scripts\test-codexteamup.ps1
 powershell -ExecutionPolicy Bypass -File .\scripts\test-codexteamup.ps1 -UseTestWorkspace -Live -LiveScenario controller
 powershell -ExecutionPolicy Bypass -File .\scripts\test-codexteamup.ps1 -UseTestWorkspace -Live -LiveScenario controller-suite
+powershell -ExecutionPolicy Bypass -File .\scripts\test-codexteamup.ps1 -UseTestWorkspace -Live -LiveScenario surface
 powershell -ExecutionPolicy Bypass -File .\scripts\test-codexteamup.ps1 -UseTestWorkspace -Live -LiveScenario basic
 powershell -ExecutionPolicy Bypass -File .\scripts\test-codexteamup.ps1 -UseTestWorkspace -Live -LiveScenario peer
 powershell -ExecutionPolicy Bypass -File .\scripts\test-codexteamup.ps1 -UseTestWorkspace -Live -LiveScenario replacement
@@ -76,6 +78,10 @@ The live smoke runner checks:
 
 - CTU service health,
 - wrapper reachability through `codex_thread_list`,
+- live status checks for the app-server adapter, controller runtime, and controller policy,
+- direct AgentBus create/claim/write/wait flow,
+- result notification to the manually provided `ctu-test/architect`,
+- dashboard export against the live `codexteamup.test` AgentBus,
 - optional controller orchestration through a manually provided `ctu-test/architect`,
 - controller-driven agent creation with display names and roles that are intentionally not tied to the agent id,
 - creation and priming of `agent-a`,

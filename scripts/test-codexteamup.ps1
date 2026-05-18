@@ -1,7 +1,7 @@
 param(
     [switch]$Live,
     [switch]$LiveAll,
-    [ValidateSet("basic", "peer", "replacement", "controller", "controller-suite", "all")]
+    [ValidateSet("surface", "basic", "peer", "replacement", "controller", "controller-suite", "all")]
     [string]$LiveScenario = "basic",
     [string]$ServiceUrl = "http://127.0.0.1:47319/",
     [string]$Workspace = "",
@@ -402,9 +402,9 @@ if (-not $Live -and -not $LiveAll) {
 }
 
 $scenarios = if ($LiveAll) {
-    @("controller-suite", "basic", "peer", "replacement")
+    @("controller-suite", "basic", "peer", "replacement", "surface")
 } elseif ($LiveScenario -eq "all") {
-    @("controller-suite", "basic", "peer", "replacement")
+    @("controller-suite", "basic", "peer", "replacement", "surface")
 } else {
     @($LiveScenario)
 }
