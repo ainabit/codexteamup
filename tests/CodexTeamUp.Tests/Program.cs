@@ -125,8 +125,12 @@ var tests = new (string Name, Func<Task> Body)[]
 };
 
 var failed = 0;
+var testIndex = 0;
+var testTotal = tests.Length;
 foreach (var test in tests)
 {
+    testIndex++;
+    Console.WriteLine($"RUN {testIndex}/{testTotal} {test.Name}");
     try
     {
         await test.Body().ConfigureAwait(false);

@@ -412,7 +412,9 @@ if ([string]::IsNullOrWhiteSpace($baseRunId)) {
     $baseRunId = Get-Date -Format "yyyyMMdd-HHmmss"
 }
 
-foreach ($scenario in $scenarios) {
+for ($scenarioIndex = 0; $scenarioIndex -lt $scenarios.Count; $scenarioIndex++) {
+    $scenario = $scenarios[$scenarioIndex]
+    $scenarioNumber = $scenarioIndex + 1
     $scenarioRunId = if ($scenarios.Count -eq 1) {
         $baseRunId
     } else {
@@ -420,7 +422,7 @@ foreach ($scenario in $scenarios) {
     }
 
     Write-Host ""
-    Write-Host "Running live smoke: $scenario"
+    Write-Host "Running live smoke ${scenarioNumber}/$($scenarios.Count): $scenario"
     $liveArgs = @(
         "-ExecutionPolicy", "Bypass",
         "-File", (Join-Path $repoRoot "scripts/test-live-multi-agent-orchestration.ps1"),
