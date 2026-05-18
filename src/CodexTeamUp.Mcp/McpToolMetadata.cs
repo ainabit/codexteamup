@@ -14,6 +14,7 @@ public static class McpToolMetadata
             "agentbus_register_agent" => "Register or update an agent-to-thread binding.",
             "agentbus_create_task" => "Create an AgentBus task.",
             "agentbus_list_tasks" => "List AgentBus tasks.",
+            "agentbus_clear_tasks" => "Delete AgentBus task queue files for disposable test resets.",
             "agentbus_list_events" => "List AgentBus events.",
             "agentbus_claim_task" => "Claim an open AgentBus task.",
             "agentbus_write_result" => "Write an AgentBus result.",
@@ -67,6 +68,13 @@ public static class McpToolMetadata
                 readOnlyHint = false,
                 destructiveHint = false,
                 idempotentHint = true,
+                openWorldHint = false
+            },
+            "agentbus_clear_tasks" => new
+            {
+                readOnlyHint = false,
+                destructiveHint = true,
+                idempotentHint = false,
                 openWorldHint = false
             },
             "agentbus_create_task" or
@@ -138,6 +146,11 @@ public static class McpToolMetadata
             {
                 ["to"] = StringSchema(),
                 ["status"] = StringSchema()
+            }),
+            "agentbus_clear_tasks" => WithBusContext(new Dictionary<string, object>
+            {
+                ["confirm"] = StringSchema(),
+                ["includeResults"] = new { type = "boolean" }
             }),
             "agentbus_list_events" => WithBusContext(new Dictionary<string, object>
             {

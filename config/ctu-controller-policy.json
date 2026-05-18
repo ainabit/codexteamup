@@ -3,5 +3,12 @@
   "wakeupTimeoutSeconds": 8,
   "waitResultTimeoutCapSeconds": 10,
   "ensureThreadNameBeforePrime": true,
-  "primePromptStartsWithAgentId": true
+  "primePromptStartsWithAgentId": true,
+  "staleClaimedTaskRecoverySeconds": 300,
+  "guardianHeartbeatEnabled": true,
+  "guardianHeartbeatAgentId": "ctu/projectlead",
+  "guardianHeartbeatDisplayName": "ctu/projectlead",
+  "guardianHeartbeatPlanFile": "guardian/plan.md",
+  "guardianHeartbeatStatusDirectory": "guardian/status",
+  "guardianHeartbeatIntervalSeconds": 60
 }

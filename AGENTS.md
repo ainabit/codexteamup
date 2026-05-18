@@ -163,6 +163,17 @@ Use a short ACK/NACK pattern:
 
 Live tests and adapters should prefer short per-call timeouts and explicit polling. A Desktop app-server timeout is not by itself proof that an agent did not receive work; AgentBus events/results are the durable truth.
 
+## Carry-Through Guardian
+
+CTU must be able to keep an agreed plan moving without relying on the user to type "weiter". The controller may run a hot-reloadable guardian heartbeat that reads:
+
+```text
+.codexteamup/guardian/plan.md
+.codexteamup/guardian/status/<state>
+```
+
+`pending`, `open`, and `running` mean work is still active. `closed`, `done`, `failed`, and `human` are terminal and stop automatic wakeups. When the plan is active and the configured driver agent, normally `ctu/projectlead`, has no open or claimed AgentBus tasks, the controller should enqueue and dispatch a short wakeup task through normal CTU coordination. The heartbeat must not bypass AgentBus or the controller delivery policy.
+
 ## Operating Model
 
 The normal way to start Codex Desktop with CodexTeamUp enabled is:

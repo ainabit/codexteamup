@@ -59,9 +59,25 @@ Examples:
 - external inbox import into AgentBus or system operations;
 - outbox export completion and correlation reconciliation;
 - stuck operation requeue, retry, or dead-letter policy;
-- controller heartbeat checks that watch for pending durable work.
+- controller heartbeat checks that watch for pending durable work;
+- guardian heartbeats that wake a configured driver agent when an active plan is not terminal.
 
 The fixed service/API layer may host the process and start/stop the loop, but it must not own the workflow policy. The policy, timings, retry caps, sweep interval, and routing rules belong to the hot-reloadable controller runtime or controller policy.
+
+### Guardian plan heartbeat
+
+CTU may keep a project-local active plan and a simple status marker so progress can continue without a human saying "weiter" after every partial result.
+
+Default files:
+
+```text
+<repo>/.codexteamup/guardian/plan.md
+<repo>/.codexteamup/guardian/status/<state>
+```
+
+The controller treats `pending`, `open`, and `running` as non-terminal states. It treats `closed`, `done`, `failed`, and `human` as terminal states. When the plan is non-terminal and the configured guardian agent has no open or claimed AgentBus tasks, the controller may enqueue and dispatch a short wakeup task to that guardian. The default guardian target is `ctu/projectlead`.
+
+The heartbeat must use normal CTU coordination paths: create a durable AgentBus task first, then perform best-effort dispatch. It must not call Desktop directly outside the controller delivery policy.
 
 ### 3. Durable Coordination Layer
 

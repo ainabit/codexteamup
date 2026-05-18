@@ -85,9 +85,12 @@ public sealed class ExchangeStore
     {
         Initialize();
         return EnumerateEnvelopeFiles(kind, limit)
-            .Select(path => (Path: path, Envelope: JsonFile.Read<ExchangeEnvelope>(path)))
+            .Select(path => new
+            {
+                Path = path,
+                Envelope = JsonFile.Read<ExchangeEnvelope>(path)
+            })
             .Where(row => row.Envelope is not null)
-            .Select(row => (row.Path, row.Envelope!))
             .Where(row => string.Equals(row.Envelope.Status, ExchangeEnvelopeStatus.Pending, StringComparison.OrdinalIgnoreCase)
                 || (string.Equals(row.Envelope.Status, ExchangeEnvelopeStatus.Leased, StringComparison.OrdinalIgnoreCase)
                     && row.Envelope.LeaseExpiresAt is { } leaseExpiry
@@ -95,6 +98,7 @@ public sealed class ExchangeStore
             .Where(row => row.Envelope.NotBefore is null || row.Envelope.NotBefore <= DateTimeOffset.Now)
             .OrderBy(row => row.Envelope.CreatedAt)
             .Take(Math.Max(1, limit))
+            .Select(row => (Path: row.Path, Envelope: row.Envelope!))
             .ToList();
     }
 
@@ -141,7 +145,7 @@ public sealed class ExchangeStore
         JsonFile.WriteAtomic(leasePath, leased);
         JsonFile.WriteAtomic(envelopePath, leased);
         UpdateCorrelation(leased);
-        return new LeaseHandle(this, envelopePath, leasePath, leased);
+        return new LeaseHandle(envelopePath, leasePath, leased);
     }
 
     public void Complete(string envelopePath, ExchangeEnvelope envelope)

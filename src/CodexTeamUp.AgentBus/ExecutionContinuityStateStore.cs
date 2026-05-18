@@ -1,3 +1,5 @@
+using CodexTeamUp.Core;
+
 namespace CodexTeamUp.AgentBus;
 
 /// <summary>
@@ -80,7 +82,7 @@ public sealed class ExecutionContinuityStateStore
             UpdatedAt = DateTimeOffset.UtcNow,
             CorrelationId = state.CorrelationId.Trim()
         };
-        JsonFile.WriteAtomic(StatePath(normalized.StateId), normalized);
+        JsonFile.WriteAtomic(SnapshotPath(normalized), normalized);
         return normalized;
     }
 
@@ -91,11 +93,21 @@ public sealed class ExecutionContinuityStateStore
 
     public string StatePath(string stateId)
     {
-        return Path.Combine(StatesDirectory, $"{stateId}.json");
+        return Directory.EnumerateFiles(StatesDirectory, $"{stateId}-*.json", SearchOption.TopDirectoryOnly)
+            .OrderByDescending(path => path, StringComparer.OrdinalIgnoreCase)
+            .FirstOrDefault()
+            ?? Path.Combine(StatesDirectory, $"{stateId}.json");
     }
 
     private static string? BlankToNull(string? value)
     {
         return string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+    }
+
+    private string SnapshotPath(ExecutionContinuityState state)
+    {
+        return Path.Combine(
+            StatesDirectory,
+            $"{state.StateId}-{state.UpdatedAt.UtcTicks:D19}-{Guid.NewGuid():N}.json");
     }
 }

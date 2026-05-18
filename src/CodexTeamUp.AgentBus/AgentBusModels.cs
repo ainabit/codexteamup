@@ -96,3 +96,12 @@ public sealed record AgentBusEvent
     public string? Message { get; init; }
     public object? Payload { get; init; }
 }
+
+/// <summary>
+/// Summary returned after deleting AgentBus task state for test resets.
+/// </summary>
+public sealed record AgentBusClearResult(
+    int DeletedTasks,
+    int DeletedResults,
+    bool IncludedResults,
+    DateTimeOffset ClearedAt);

@@ -269,6 +269,11 @@ public sealed class ReloadableCtuController : IReloadableCtuController, IDisposa
         throw new InvalidOperationException($"Unsupported controller plugin type {type.FullName}.");
     }
 
+    public Task RunStartupSweepAsync(CancellationToken cancellationToken = default)
+    {
+        return _current.Controller.RunStartupSweepAsync(cancellationToken);
+    }
+
     private static string ShadowCopyPlugin(string pluginPath)
     {
         var sourceDirectory = Path.GetDirectoryName(pluginPath) ?? Environment.CurrentDirectory;

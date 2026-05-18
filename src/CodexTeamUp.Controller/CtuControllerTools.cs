@@ -9,6 +9,7 @@ public static class CtuControllerTools
         "agentbus_register_agent",
         "agentbus_create_task",
         "agentbus_list_tasks",
+        "agentbus_clear_tasks",
         "agentbus_list_events",
         "agentbus_claim_task",
         "agentbus_write_result",

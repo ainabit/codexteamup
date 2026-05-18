@@ -222,6 +222,40 @@ public sealed class AgentBusStore
             .ToList();
     }
 
+    /// <summary>
+    /// Deletes task queue files for disposable test resets while preserving agents and events.
+    /// </summary>
+    public AgentBusClearResult ClearTasks(bool includeResults = false)
+    {
+        InitializeIfMissing();
+        var deletedTasks = 0;
+        foreach (var path in EnumerateTaskFiles(status: null).ToList())
+        {
+            File.Delete(path);
+            deletedTasks++;
+        }
+
+        var deletedResults = 0;
+        if (includeResults && Directory.Exists(ResultsDirectory))
+        {
+            foreach (var path in Directory.EnumerateFiles(ResultsDirectory, "*.json", SearchOption.TopDirectoryOnly).ToList())
+            {
+                File.Delete(path);
+                deletedResults++;
+            }
+        }
+
+        var clearedAt = DateTimeOffset.Now;
+        AppendEvent(new AgentBusEvent
+        {
+            Timestamp = clearedAt,
+            Type = "agentbus.tasks_cleared",
+            Message = $"Deleted {deletedTasks} task files and {deletedResults} result files.",
+            Payload = new { includeResults, deletedTasks, deletedResults }
+        });
+        return new AgentBusClearResult(deletedTasks, deletedResults, includeResults, clearedAt);
+    }
+
     public AgentBusTask ClaimTask(string taskId, string? owner)
     {
         InitializeIfMissing();
@@ -263,6 +297,44 @@ public sealed class AgentBusStore
             To = claimed.Owner
         });
         return claimed;
+    }
+
+    /// <summary>
+    /// Requeues a claimed task back into the open queue so the controller can retry delivery.
+    /// </summary>
+    public AgentBusTask? RequeueClaimedTask(string taskId)
+    {
+        InitializeIfMissing();
+        var claimedPath = TaskPath(TasksClaimedDirectory, taskId);
+        if (!File.Exists(claimedPath))
+        {
+            return null;
+        }
+
+        Directory.CreateDirectory(TasksOpenDirectory);
+        using var requeueLock = TryCreateLock($"task-{taskId}.requeue.lock");
+        if (requeueLock is null)
+        {
+            throw new InvalidOperationException($"Task requeue is locked: {taskId}");
+        }
+
+        var task = JsonFile.Read<AgentBusTask>(claimedPath)
+            ?? throw new InvalidOperationException($"Could not read claimed task for requeue: {taskId}");
+        var requeued = task with
+        {
+            Status = "open",
+            ClaimedAt = null,
+            Owner = null
+        };
+        var openPath = TaskPath(TasksOpenDirectory, taskId);
+        JsonFile.WriteAtomic(claimedPath, requeued);
+        if (File.Exists(openPath))
+        {
+            File.Delete(openPath);
+        }
+
+        File.Move(claimedPath, openPath);
+        return requeued;
     }
 
     public AgentBusResult WriteResult(

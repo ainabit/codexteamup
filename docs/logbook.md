@@ -4,6 +4,15 @@ Reverse chronological notes about the build journey, notable failures, redesigns
 
 ## 2026-05-18
 
+- CTU gained a controller-side guardian heartbeat concept for the "do not silently stall" problem:
+  - an active plan lives under `.codexteamup/guardian/plan.md`;
+  - a tiny status marker under `.codexteamup/guardian/status/` says whether the plan is still open or terminal;
+  - when the plan is not terminal and the configured driver agent is idle, the controller wakes that agent through AgentBus and normal dispatch.
+- A destructive `agentbus_clear_tasks` reset tool was added for disposable test phases, guarded by `confirm=DELETE`.
+- Backlog and dailylog ideas can exchange directly without automatically routing every reply through `ctu/architect` when no architecture decision is needed.
+- Local agent-path decisions should handle operational tips such as `.git/index.lock` cleanup or `git.exe` cleanup instead of escalating them upward by default.
+- Interim ideas, ad-hoc notes, and quick context traps should be captured in `ctu/backlog` so the `ctu/architect` context stays cleaner.
+- The backlog role can also hold operational hints such as Git lock behavior when they do not belong in the main planning thread.
 - Execution continuity is now the top branch architecture initiative.
 - The intended shape is a durable continuity state model plus a controller-owned guardian loop.
 - The guardian target must stay configurable by display name or agent id.

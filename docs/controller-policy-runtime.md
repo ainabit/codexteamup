@@ -104,3 +104,30 @@ config/ctu-controller-policy.json
 ```
 
 It keeps `team_send_message` queue-first, serializes Desktop wakeups, caps Desktop wakeup at 8 seconds, caps inline waits at 10 seconds, names threads before prime, and starts prime prompts with the exact agent id. Agent prime turns use the same short wakeup/defer policy as task dispatch so a stalled Desktop app-server call records `agent.prime_deferred` instead of blocking the controller for the wrapper response timeout. Short live-smoke or recovery flows may explicitly pass `prime=false setName=false` so AgentBus registration and dispatch can be tested without first depending on volatile Desktop rename or prime calls.
+
+## Guardian Heartbeat
+
+The controller can run a lightweight guardian heartbeat from the startup/sweep loop. This is not an API-layer feature; it is controller workflow policy and must remain reloadable.
+
+Relevant policy fields:
+
+- `guardianHeartbeatEnabled`
+- `guardianHeartbeatAgentId`
+- `guardianHeartbeatDisplayName`
+- `guardianHeartbeatPlanFile`
+- `guardianHeartbeatStatusDirectory`
+- `guardianHeartbeatIntervalSeconds`
+
+If `guardianHeartbeatPlanFile` is unset, the default is:
+
+```text
+.codexteamup/guardian/plan.md
+```
+
+If `guardianHeartbeatStatusDirectory` is unset, the default is:
+
+```text
+.codexteamup/guardian/status
+```
+
+The status directory contains one marker file named after the current state. `pending`, `open`, and `running` mean the plan still needs movement. `closed`, `done`, `failed`, and `human` stop automatic wakeups. When the plan is active and the configured guardian has no open or claimed AgentBus work, CTU enqueues a short task for the guardian and dispatches it through the normal delivery path.

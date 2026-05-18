@@ -12,7 +12,14 @@ public sealed record CtuControllerPolicy(
     bool PrimePromptStartsWithAgentId,
     string? ContinuityGuardianAgentId = null,
     string? ContinuityGuardianDisplayName = null,
-    string? ContinuityStateDirectory = null)
+    string? ContinuityStateDirectory = null,
+    int StaleClaimedTaskRecoverySeconds = 10,
+    bool GuardianHeartbeatEnabled = true,
+    string? GuardianHeartbeatAgentId = null,
+    string? GuardianHeartbeatDisplayName = null,
+    string? GuardianHeartbeatPlanFile = null,
+    string? GuardianHeartbeatStatusDirectory = null,
+    int GuardianHeartbeatIntervalSeconds = 30)
 {
     public static CtuControllerPolicy Default { get; } = new("enqueue", 8, 10, true, true);
 }
@@ -130,7 +137,15 @@ public sealed class ReloadableCtuControllerPolicy
                 ContinuityGuardianDisplayName = BlankToNull(policy.ContinuityGuardianDisplayName)
                     ?? NormalizeAgentId(policy.ContinuityGuardianAgentId)
                     ?? "ctu/reviewer",
-                ContinuityStateDirectory = NormalizeStateDirectory(policy.ContinuityStateDirectory)
+                ContinuityStateDirectory = NormalizeStateDirectory(policy.ContinuityStateDirectory),
+                StaleClaimedTaskRecoverySeconds = Math.Clamp(policy.StaleClaimedTaskRecoverySeconds, 5, 300),
+                GuardianHeartbeatAgentId = NormalizeAgentId(policy.GuardianHeartbeatAgentId) ?? "ctu/projectlead",
+                GuardianHeartbeatDisplayName = BlankToNull(policy.GuardianHeartbeatDisplayName)
+                    ?? NormalizeAgentId(policy.GuardianHeartbeatAgentId)
+                    ?? "ctu/projectlead",
+                GuardianHeartbeatPlanFile = NormalizeStateDirectory(policy.GuardianHeartbeatPlanFile),
+                GuardianHeartbeatStatusDirectory = NormalizeStateDirectory(policy.GuardianHeartbeatStatusDirectory),
+                GuardianHeartbeatIntervalSeconds = Math.Clamp(policy.GuardianHeartbeatIntervalSeconds, 5, 3600)
             };
     }
 
