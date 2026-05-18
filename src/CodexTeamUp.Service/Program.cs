@@ -261,6 +261,13 @@ async Task HandleRequestAsync(NetworkStream stream, string method, string target
         return;
     }
 
+    if (method == "GET" && path == "api/continuations")
+    {
+        var bus = new AgentBusStore(query.TryGetValue("busRoot", out var busRoot) ? busRoot : defaultBusRoot);
+        await WriteJsonAsync(stream, 200, new { continuations = bus.ListContinuations() }).ConfigureAwait(false);
+        return;
+    }
+
     if (method == "GET" && path == "api/events")
     {
         var bus = new AgentBusStore(query.TryGetValue("busRoot", out var busRoot) ? busRoot : defaultBusRoot);

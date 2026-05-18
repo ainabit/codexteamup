@@ -5,7 +5,7 @@
   "ensureThreadNameBeforePrime": true,
   "primePromptStartsWithAgentId": true,
   "staleClaimedTaskRecoverySeconds": 300,
-  "guardianHeartbeatEnabled": true,
+  "guardianHeartbeatEnabled": false,
   "guardianHeartbeatAgentId": "ctu/projectlead",
   "guardianHeartbeatDisplayName": "ctu/projectlead",
   "guardianHeartbeatPlanFile": "guardian/plan.md",

@@ -14,7 +14,7 @@ public sealed record CtuControllerPolicy(
     string? ContinuityGuardianDisplayName = null,
     string? ContinuityStateDirectory = null,
     int StaleClaimedTaskRecoverySeconds = 10,
-    bool GuardianHeartbeatEnabled = true,
+    bool GuardianHeartbeatEnabled = false,
     string? GuardianHeartbeatAgentId = null,
     string? GuardianHeartbeatDisplayName = null,
     string? GuardianHeartbeatPlanFile = null,

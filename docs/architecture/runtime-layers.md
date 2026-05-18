@@ -23,6 +23,8 @@ Owns:
 - naming and priming policy
 - queue-first dispatch strategy
 - retry/defer/wakeup timing
+- result outcome handling
+- deduplicated self-continuation scheduling
 - controller-owned background loops and channel pump policy
 - startup handoff import
 - restart policy and durable operation steering
@@ -34,6 +36,8 @@ Must be hot-reloadable or scriptable where practical.
 Owns:
 
 - AgentBus state
+- structured result outcomes
+- pending continuation registrations
 - external exchange state
 - restart records
 - checkpoints

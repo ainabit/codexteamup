@@ -16,6 +16,7 @@ public static class McpToolMetadata
             "agentbus_list_tasks" => "List AgentBus tasks.",
             "agentbus_clear_tasks" => "Delete AgentBus task queue files for disposable test resets.",
             "agentbus_list_events" => "List AgentBus events.",
+            "agentbus_list_continuations" => "List scheduled agent-owned continuation wakeups.",
             "agentbus_claim_task" => "Claim an open AgentBus task.",
             "agentbus_write_result" => "Write an AgentBus result.",
             "agentbus_wait_result" => "Wait for an AgentBus task result.",
@@ -49,6 +50,7 @@ public static class McpToolMetadata
             "agentbus_list_agents" or
             "agentbus_list_tasks" or
             "agentbus_list_events" or
+            "agentbus_list_continuations" or
             "agentbus_wait_result" or
             "codex_thread_list" or
             "codex_thread_read" or
@@ -156,6 +158,11 @@ public static class McpToolMetadata
             {
                 ["limit"] = new { type = "integer" }
             }),
+            "agentbus_list_continuations" => WithBusContext(new Dictionary<string, object>
+            {
+                ["owner"] = StringSchema(),
+                ["status"] = StringSchema()
+            }),
             "agentbus_claim_task" => WithBusContext(new Dictionary<string, object>
             {
                 ["taskId"] = StringSchema(),
@@ -174,7 +181,13 @@ public static class McpToolMetadata
                 ["tests"] = StringSchema(),
                 ["artifacts"] = StringSchema(),
                 ["openQuestions"] = StringSchema(),
-                ["nextSuggestedAction"] = StringSchema()
+                ["nextSuggestedAction"] = StringSchema(),
+                ["outcome"] = StringSchema(),
+                ["continuationOwner"] = StringSchema(),
+                ["continuationWakeAfterSeconds"] = new { type = "integer" },
+                ["continuationReason"] = StringSchema(),
+                ["continuationDedupeKey"] = StringSchema(),
+                ["continuationMaxAttempts"] = new { type = "integer" }
             }),
             "agentbus_wait_result" => WithBusContext(new Dictionary<string, object>
             {

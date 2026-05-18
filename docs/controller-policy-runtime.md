@@ -105,11 +105,27 @@ config/ctu-controller-policy.json
 
 It keeps `team_send_message` queue-first, serializes Desktop wakeups, caps Desktop wakeup at 8 seconds, caps inline waits at 10 seconds, names threads before prime, and starts prime prompts with the exact agent id. Agent prime turns use the same short wakeup/defer policy as task dispatch so a stalled Desktop app-server call records `agent.prime_deferred` instead of blocking the controller for the wrapper response timeout. Short live-smoke or recovery flows may explicitly pass `prime=false setName=false` so AgentBus registration and dispatch can be tested without first depending on volatile Desktop rename or prime calls.
 
-## Guardian Heartbeat
+## Self-Continuation Scheduler
 
-The controller can run a lightweight guardian heartbeat from the startup/sweep loop. This is not an API-layer feature; it is controller workflow policy and must remain reloadable.
+The normal carry-through path is a controller sweep over pending continuation records created from `self_continue` result outcomes. This is not an API-layer feature; it is controller workflow policy and must remain reloadable.
 
-Relevant policy fields:
+The scheduler evaluates due continuations, checks whether the same agent already has open or claimed work for that chain, creates a normal AgentBus task when work is due, and dispatches through the standard serialized wakeup path.
+
+Continuation policy should cover:
+
+- sweep interval;
+- wakeup timeout cap;
+- retry/attempt caps;
+- dedupe key handling;
+- expiration and blocked-state handling.
+
+The controller must not create continuation work from `done`, `handed_off`, `human`, or `failed` outcomes.
+
+## Guardian Heartbeat Fallback
+
+The controller may still run a lightweight guardian heartbeat from the startup/sweep loop for recovery. It is fallback policy, not the normal execution-continuity mechanism.
+
+Existing guardian policy fields are recovery controls:
 
 - `guardianHeartbeatEnabled`
 - `guardianHeartbeatAgentId`
@@ -130,4 +146,6 @@ If `guardianHeartbeatStatusDirectory` is unset, the default is:
 .codexteamup/guardian/status
 ```
 
-The status directory contains one marker file named after the current state. `pending`, `open`, and `running` mean the plan still needs movement. `closed`, `done`, `failed`, and `human` stop automatic wakeups. When the plan is active and the configured guardian has no open or claimed AgentBus work, CTU enqueues a short task for the guardian and dispatches it through the normal delivery path.
+The status directory contains one marker file named after the current state. `pending`, `open`, and `running` mean the recovery plan may still need movement. `closed`, `done`, `failed`, and `human` stop recovery wakeups.
+
+Use this heartbeat only to recover stale plans, missing outcomes, expired continuations, or stranded chains. It must enqueue durable AgentBus recovery work before dispatching, and it must not replace the owning agent's required `done`, `handed_off`, `self_continue`, `human`, or `failed` result outcome.

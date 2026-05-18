@@ -15,3 +15,4 @@ Current ADRs:
 - [ADR-0003](ADR-0003-acceptance-checkout-is-disposable-fresh-clone.md)
 - [ADR-0004](ADR-0004-external-exchange-boundary.md)
 - [ADR-0005](ADR-0005-channel-adapter-model.md)
+- [ADR-0006](ADR-0006-agent-owned-continuations.md)

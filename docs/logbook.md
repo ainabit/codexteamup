@@ -4,6 +4,11 @@ Reverse chronological notes about the build journey, notable failures, redesigns
 
 ## 2026-05-18
 
+- ADR-0006 replaced the global projectlead heartbeat as the normal carry-through mechanism with agent-owned continuations:
+  - every result declares `done`, `handed_off`, `self_continue`, `human`, or `failed`;
+  - only `self_continue` registers a deduplicated later wakeup for the same agent;
+  - `ctu/projectlead` remains a fallback/recovery monitor for stale or malformed chains;
+  - the dashboard must show continuation state centrally.
 - CTU gained a controller-side guardian heartbeat concept for the "do not silently stall" problem:
   - an active plan lives under `.codexteamup/guardian/plan.md`;
   - a tiny status marker under `.codexteamup/guardian/status/` says whether the plan is still open or terminal;

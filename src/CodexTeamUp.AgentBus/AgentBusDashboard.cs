@@ -39,6 +39,7 @@ public static class AgentBusDashboard
         var agents = bus.ListAgents();
         var tasks = bus.ListTasks();
         var results = bus.ListResults();
+        var continuations = bus.ListContinuations();
         var events = bus.ListEvents(500);
 
         return new AgentBusDashboardSnapshot
@@ -54,11 +55,14 @@ public static class AgentBusDashboard
                 DoneTasks = tasks.Count(t => t.Status == "done"),
                 FailedTasks = tasks.Count(t => t.Status == "failed"),
                 Results = results.Count,
+                Continuations = continuations.Count,
+                OpenContinuations = continuations.Count(c => c.Status == "open"),
                 Events = events.Count
             },
             Agents = agents,
             Tasks = tasks,
             Results = results,
+            Continuations = continuations,
             Events = events
         };
     }
@@ -564,7 +568,7 @@ button:disabled{opacity:.45;cursor:default}
         html.AppendLine(";");
         html.AppendLine("""
 (() => {
-  const initial = window.__CTU_INITIAL_SNAPSHOT__ || { busRoot: "", generatedAt: new Date().toISOString(), stats: {}, agents: [], tasks: [], results: [], events: [] };
+  const initial = window.__CTU_INITIAL_SNAPSHOT__ || { busRoot: "", generatedAt: new Date().toISOString(), stats: {}, agents: [], tasks: [], results: [], continuations: [], events: [] };
   const app = document.getElementById("app");
   const busRoot = app.dataset.busRoot || initial.busRoot || "";
   const clearStorageKey = `ctu-dashboard-clear-after:${busRoot}`;
@@ -794,6 +798,7 @@ button:disabled{opacity:.45;cursor:default}
       agents: Array.isArray(snapshot.agents) ? snapshot.agents : [],
       tasks: Array.isArray(snapshot.tasks) ? snapshot.tasks : [],
       results: Array.isArray(snapshot.results) ? snapshot.results : [],
+      continuations: Array.isArray(snapshot.continuations) ? snapshot.continuations : [],
       events: Array.isArray(snapshot.events) ? snapshot.events : []
     };
   }
@@ -808,6 +813,7 @@ button:disabled{opacity:.45;cursor:default}
       ["Agents", stats.agents ?? snapshot.agents.length],
       ["Open", stats.openTasks ?? countStatus(snapshot.tasks, "open")],
       ["Claimed", stats.claimedTasks ?? countStatus(snapshot.tasks, "claimed")],
+      ["Continuations", stats.openContinuations ?? countStatus(snapshot.continuations, "open")],
       ["Done", stats.doneTasks ?? countStatus(snapshot.tasks, "done")],
       ["Failed", stats.failedTasks ?? countStatus(snapshot.tasks, "failed")]
     ];
@@ -1715,6 +1721,7 @@ public sealed record AgentBusDashboardSnapshot
     public required IReadOnlyList<AgentDefinition> Agents { get; init; }
     public required IReadOnlyList<AgentBusTask> Tasks { get; init; }
     public required IReadOnlyList<AgentBusResult> Results { get; init; }
+    public required IReadOnlyList<AgentBusContinuation> Continuations { get; init; }
     public required IReadOnlyList<AgentBusEvent> Events { get; init; }
 }
 
@@ -1727,5 +1734,7 @@ public sealed record AgentBusDashboardStats
     public required int DoneTasks { get; init; }
     public required int FailedTasks { get; init; }
     public required int Results { get; init; }
+    public required int Continuations { get; init; }
+    public required int OpenContinuations { get; init; }
     public required int Events { get; init; }
 }

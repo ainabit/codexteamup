@@ -101,8 +101,8 @@ public sealed class DefaultCtuController : ICtuController
             await ProcessStartupSweepAsync(cancellationToken).ConfigureAwait(false);
             await ProcessResultNotificationRetriesAsync(cancellationToken).ConfigureAwait(false);
             await ProcessContinuityGuardianAsync(cancellationToken).ConfigureAwait(false);
+            await ProcessAgentContinuationsAsync(cancellationToken).ConfigureAwait(false);
             await ProcessTaskDeliveryAsync(cancellationToken).ConfigureAwait(false);
-            await ProcessGuardianHeartbeatAsync(cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -1292,6 +1292,143 @@ public sealed class DefaultCtuController : ICtuController
         await TryDeliverQueuedTaskAsync(bus, task, cancellationToken).ConfigureAwait(false);
     }
 
+    private async Task ProcessAgentContinuationsAsync(CancellationToken cancellationToken)
+    {
+        var bus = new AgentBusStore(_defaultBusRoot);
+        var due = bus.ListContinuations(status: "open")
+            .Where(continuation => continuation.DueAt <= DateTimeOffset.Now)
+            .OrderBy(continuation => continuation.DueAt)
+            .ToList();
+
+        foreach (var continuation in due)
+        {
+            if (cancellationToken.IsCancellationRequested)
+            {
+                return;
+            }
+
+            if (HasOpenOrClaimedTaskFor(bus, continuation.Owner))
+            {
+                continue;
+            }
+
+            if (continuation.Attempts >= continuation.MaxAttempts)
+            {
+                bus.CompleteContinuation(continuation.Id, "failed", "Continuation retry limit reached.");
+                continue;
+            }
+
+            var agent = bus.FindAgent(continuation.Owner);
+            if (agent is null || string.IsNullOrWhiteSpace(agent.ThreadId))
+            {
+                RecordContinuationWakeFailure(bus, continuation, $"Agent {continuation.Owner} is not registered with a visible thread.");
+                continue;
+            }
+
+            var thread = await FindGuardianThreadAsync(_appServer, agent, cancellationToken).ConfigureAwait(false);
+            if (thread is null)
+            {
+                RecordContinuationWakeFailure(bus, continuation, $"Agent {continuation.Owner} thread is not visible.");
+                continue;
+            }
+
+            if (IsBusyThreadStatus(thread.Status))
+            {
+                bus.RecordEvent(new AgentBusEvent
+                {
+                    Timestamp = DateTimeOffset.Now,
+                    Type = "continuation.wakeup_skipped",
+                    TaskId = continuation.TaskId,
+                    ResultId = continuation.ResultId,
+                    To = continuation.Owner,
+                    Message = $"Continuation owner is busy ({thread.Status}).",
+                    Payload = new { continuationId = continuation.Id }
+                });
+                continue;
+            }
+
+            var cwd = agent.Cwd ?? CtuProjectLayout.ProjectRootForBusRoot(_defaultBusRoot);
+            var task = bus.CreateTask(
+                "ctu/continuation",
+                continuation.Owner,
+                $"Self-continuation: {continuation.Owner}",
+                BuildAgentContinuationPrompt(continuation),
+                new DirectoryInfo(cwd).Name,
+                cwd,
+                [],
+                continuation.ReturnTo ?? agent.ReturnTo ?? DefaultArchitectFor(continuation.Owner));
+            bus.UpdateContinuation(continuation.Id, existing => existing with
+            {
+                Attempts = existing.Attempts + 1,
+                LastWakeAttemptAt = DateTimeOffset.Now,
+                LastWakeTaskId = task.Id,
+                LastWakeError = null
+            });
+            bus.RecordEvent(new AgentBusEvent
+            {
+                Timestamp = DateTimeOffset.Now,
+                Type = "continuation.wakeup_enqueued",
+                TaskId = task.Id,
+                ResultId = continuation.ResultId,
+                From = "ctu/continuation",
+                To = continuation.Owner,
+                Message = $"Self-continuation wakeup task created for {continuation.Owner}.",
+                Payload = new { continuationId = continuation.Id, continuation.DedupeKey }
+            });
+
+            await TryDeliverQueuedTaskAsync(bus, task, cancellationToken).ConfigureAwait(false);
+            bus.CompleteContinuation(continuation.Id, "done", lastWakeTaskId: task.Id);
+        }
+    }
+
+    private static void RecordContinuationWakeFailure(AgentBusStore bus, AgentBusContinuation continuation, string error)
+    {
+        var updated = bus.UpdateContinuation(continuation.Id, existing => existing with
+        {
+            Attempts = existing.Attempts + 1,
+            LastWakeAttemptAt = DateTimeOffset.Now,
+            LastWakeError = error
+        }) ?? continuation;
+        bus.RecordEvent(new AgentBusEvent
+        {
+            Timestamp = DateTimeOffset.Now,
+            Type = "continuation.wakeup_failed",
+            TaskId = continuation.TaskId,
+            ResultId = continuation.ResultId,
+            To = continuation.Owner,
+            Message = error,
+            Payload = new { continuationId = continuation.Id, attempt = updated.Attempts }
+        });
+
+        if (updated.Attempts >= updated.MaxAttempts)
+        {
+            bus.CompleteContinuation(updated.Id, "failed", error);
+        }
+    }
+
+    private static string BuildAgentContinuationPrompt(AgentBusContinuation continuation)
+    {
+        return $"""
+        Self-continuation for {continuation.Owner}.
+
+        Previous task:
+        {continuation.TaskId}
+
+        Previous result:
+        {continuation.ResultId}
+
+        Reason:
+        {continuation.Reason ?? "The previous result requested that this agent continue later."}
+
+        Claim this task and continue the same work chain. When you stop, write exactly one result with an explicit outcome:
+        - done: you are finished and no wakeup is needed.
+        - handed_off: you delegated to another agent and no self-wakeup is needed.
+        - self_continue: you still need to continue later; include continuation owner, reason, dedupe key, wake delay, and max attempts.
+        - human: you need a human decision.
+        - failed: a technical blocker prevents progress.
+        """;
+    }
+
     private string GuardianHeartbeatPlanPath(CtuControllerPolicy policy)
     {
         var configured = BlankToNull(policy.GuardianHeartbeatPlanFile);
@@ -1500,6 +1637,12 @@ public sealed class DefaultCtuController : ICtuController
             return Task.FromResult<object>(new { events = bus.ListEvents(Int(args, "limit", 500)) });
         });
 
+        registry.Register("agentbus_list_continuations", (args, _) =>
+        {
+            var bus = Bus(args, busRoot);
+            return Task.FromResult<object>(new { continuations = bus.ListContinuations(Optional(args, "owner"), Optional(args, "status")) });
+        });
+
         registry.Register("agentbus_claim_task", (args, _) =>
         {
             var bus = Bus(args, busRoot);
@@ -1520,7 +1663,9 @@ public sealed class DefaultCtuController : ICtuController
                 Csv(args, "openQuestions"),
                 Csv(args, "changedFiles"),
                 Csv(args, "artifacts"),
-                Optional(args, "nextSuggestedAction"));
+                Optional(args, "nextSuggestedAction"),
+                Optional(args, "outcome"),
+                ContinuationRequest(args));
             return Task.FromResult<object>(new { result });
         });
 
@@ -3712,6 +3857,34 @@ public sealed class DefaultCtuController : ICtuController
             && value.TryGetInt32(out var parsed)
             ? parsed
             : defaultValue;
+    }
+
+    private static AgentBusContinuationRequest? ContinuationRequest(JsonElement args)
+    {
+        var hasContinuation = !string.IsNullOrWhiteSpace(Optional(args, "continuationOwner"))
+            || !string.IsNullOrWhiteSpace(Optional(args, "continuationReason"))
+            || !string.IsNullOrWhiteSpace(Optional(args, "continuationDedupeKey"))
+            || HasProperty(args, "continuationWakeAfterSeconds")
+            || HasProperty(args, "continuationMaxAttempts")
+            || string.Equals(Optional(args, "outcome"), "self_continue", StringComparison.OrdinalIgnoreCase);
+        if (!hasContinuation)
+        {
+            return null;
+        }
+
+        return new AgentBusContinuationRequest
+        {
+            Owner = Optional(args, "continuationOwner"),
+            WakeAfterSeconds = Int(args, "continuationWakeAfterSeconds", 60),
+            DedupeKey = Optional(args, "continuationDedupeKey"),
+            Reason = Optional(args, "continuationReason"),
+            MaxAttempts = Int(args, "continuationMaxAttempts", 5)
+        };
+    }
+
+    private static bool HasProperty(JsonElement args, string name)
+    {
+        return args.ValueKind == JsonValueKind.Object && args.TryGetProperty(name, out _);
     }
 
     private static IReadOnlyList<string> Csv(JsonElement args, params string[] names)

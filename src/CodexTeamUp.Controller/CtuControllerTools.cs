@@ -11,6 +11,7 @@ public static class CtuControllerTools
         "agentbus_list_tasks",
         "agentbus_clear_tasks",
         "agentbus_list_events",
+        "agentbus_list_continuations",
         "agentbus_claim_task",
         "agentbus_write_result",
         "agentbus_wait_result",

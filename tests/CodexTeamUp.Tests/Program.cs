@@ -77,7 +77,7 @@ var tests = new (string Name, Func<Task> Body)[]
     ("Controller guardian evaluates continuity with configurable identity", () => Task.Run(ControllerGuardianRespectsConfiguredContinuityPolicy)),
     ("Controller guardian emits canonical decision events", () => Task.Run(ControllerGuardianEmitsCanonicalContinuityDecisionEvents)),
     ("Controller guardian blocks when notify retries are exhausted", () => Task.Run(ControllerGuardianBlocksOnExhaustedNotifyRetries)),
-    ("Controller guardian heartbeat wakes idle projectlead", () => Task.Run(ControllerGuardianHeartbeatWakesIdleProjectlead)),
+    ("Controller agent continuation wakes idle owner", () => Task.Run(ControllerAgentContinuationWakesIdleOwner)),
     ("MCP registry rebinds stale agent before team message", () => Task.Run(McpRegistryRebindsStaleAgentBeforeTeamMessage)),
     ("MCP registry waits for AgentBus result", () => Task.Run(McpRegistryWaitsForAgentBusResult)),
     ("MCP registry clamps invalid AgentBus wait timeout", () => Task.Run(McpRegistryClampsInvalidAgentBusWaitTimeout)),
@@ -1095,7 +1095,13 @@ static void McpRegistryWritesResultFileMetadata()
       "checks": "manual browser check",
       "artifacts": "app/index.html",
       "openQuestions": "None",
-      "nextSuggestedAction": "Review in browser"
+      "nextSuggestedAction": "Review in browser",
+      "outcome": "self_continue",
+      "continuationOwner": "ctu/developer",
+      "continuationWakeAfterSeconds": 30,
+      "continuationReason": "Continue local polish after review.",
+      "continuationDedupeKey": "sample-page-polish",
+      "continuationMaxAttempts": 3
     }
     """);
 
@@ -1106,6 +1112,13 @@ static void McpRegistryWritesResultFileMetadata()
     Equal("manual browser check", result.Tests.Single());
     Equal("app/index.html", result.Artifacts.Single());
     Equal("Review in browser", result.NextSuggestedAction);
+    Equal("self_continue", result.Outcome);
+    True(!string.IsNullOrWhiteSpace(result.ContinuationId));
+    var continuation = bus.ListContinuations().Single();
+    Equal("ctu/developer", continuation.Owner);
+    Equal("sample-page-polish", continuation.DedupeKey);
+    Equal("open", continuation.Status);
+    Equal(3, continuation.MaxAttempts);
 }
 
 static void McpRegistryEnsuresExplicitCtuAgents()
@@ -2074,6 +2087,7 @@ static void AgentBusDashboardCreatesSnapshot()
     Equal(1, snapshot.Stats.DoneTasks);
     Equal(0, snapshot.Stats.FailedTasks);
     Equal(1, snapshot.Stats.Results);
+    Equal(0, snapshot.Stats.OpenContinuations);
     True(snapshot.Tasks.Single().Title.Contains("Build editor", StringComparison.Ordinal));
     True(snapshot.Results.Single().Summary.Contains("Implemented", StringComparison.Ordinal));
     True(snapshot.Events.Count > 0);
@@ -3496,7 +3510,7 @@ static void ControllerGuardianBlocksOnExhaustedNotifyRetries()
     True(bus.ListEvents(300).Any(evt => evt.Type == "continuity.terminal_recorded" && evt.TaskId == task.Id));
 }
 
-static void ControllerGuardianHeartbeatWakesIdleProjectlead()
+static void ControllerAgentContinuationWakesIdleOwner()
 {
     var root = NewTestDirectory();
     var busRoot = Path.Combine(root, ".codexteamup", "agentbus");
@@ -3504,32 +3518,59 @@ static void ControllerGuardianHeartbeatWakesIdleProjectlead()
     bus.Initialize();
     bus.RegisterAgent(new AgentDefinition
     {
-        Id = "ctu/projectlead",
-        Role = "Project Lead",
-        DisplayName = "ctu/projectlead",
-        ThreadId = "thread-projectlead",
+        Id = "ctu/designer",
+        Role = "Designer",
+        DisplayName = "ctu/designer",
+        ThreadId = "thread-designer",
         Cwd = root,
+        ReturnTo = "ctu/architect",
         Status = "active"
     });
 
-    var guardianRoot = Path.Combine(root, ".codexteamup", "guardian");
-    Directory.CreateDirectory(guardianRoot);
-    File.WriteAllText(Path.Combine(guardianRoot, "plan.md"), "Keep the active initiative moving until done or human.");
-    Directory.CreateDirectory(Path.Combine(guardianRoot, "status"));
-    File.WriteAllText(Path.Combine(guardianRoot, "status", "open"), string.Empty);
+    var task = bus.CreateTask(
+        "ctu/architect",
+        "ctu/designer",
+        "Design slice",
+        "Continue until self-reported done.",
+        "codexteamup",
+        root,
+        [],
+        "ctu/architect");
+    bus.ClaimTask(task.Id, "ctu/designer");
+    var result = bus.WriteResult(
+        task.Id,
+        "Need one more pass after local cooldown.",
+        "completed",
+        "ctu/designer",
+        "ctu/architect",
+        null,
+        [],
+        [],
+        outcome: "self_continue",
+        continuation: new AgentBusContinuationRequest
+        {
+            Owner = "ctu/designer",
+            WakeAfterSeconds = 0,
+            DedupeKey = "design-self-pass",
+            Reason = "Continue the design review loop.",
+            MaxAttempts = 2
+        });
+    Equal("self_continue", result.Outcome);
+    Equal(1, bus.ListContinuations("ctu/designer", "open").Count);
 
     var appServer = new ScriptedSendTurnAppServerClient(
-        "thread-projectlead",
-        "ctu/projectlead",
+        "thread-designer",
+        "ctu/designer",
         root);
     var controller = new DefaultCtuController(busRoot, appServer);
     controller.RunStartupSweepAsync().GetAwaiter().GetResult();
 
     Equal(1, appServer.SentTurns.Count);
-    Equal("thread-projectlead", appServer.SentTurns.Single().ThreadId);
-    Equal(1, bus.ListTasks("ctu/projectlead", "open").Count);
-    True(File.Exists(Path.Combine(guardianRoot, "status", "running")));
-    True(bus.ListEvents(300).Any(evt => evt.Type == "guardian.heartbeat_enqueued"));
+    Equal("thread-designer", appServer.SentTurns.Single().ThreadId);
+    Equal(1, bus.ListTasks("ctu/designer", "open").Count);
+    Equal(0, bus.ListContinuations("ctu/designer", "open").Count);
+    Equal(1, bus.ListContinuations("ctu/designer", "done").Count);
+    True(bus.ListEvents(300).Any(evt => evt.Type == "continuation.wakeup_enqueued"));
 
     controller.RunStartupSweepAsync().GetAwaiter().GetResult();
 

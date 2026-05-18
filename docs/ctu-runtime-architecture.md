@@ -35,6 +35,8 @@ It includes:
 - queue-first task creation;
 - dispatch/wakeup timing;
 - retry/defer policy;
+- structured result outcome handling;
+- deduplicated self-continuation scheduling;
 - result notification policy;
 - ACK/NACK behavior;
 - polling strategy;
@@ -60,24 +62,29 @@ Examples:
 - outbox export completion and correlation reconciliation;
 - stuck operation requeue, retry, or dead-letter policy;
 - controller heartbeat checks that watch for pending durable work;
-- guardian heartbeats that wake a configured driver agent when an active plan is not terminal.
+- fallback/recovery heartbeats that detect stranded plans or stale continuation registrations.
 
 The fixed service/API layer may host the process and start/stop the loop, but it must not own the workflow policy. The policy, timings, retry caps, sweep interval, and routing rules belong to the hot-reloadable controller runtime or controller policy.
 
-### Guardian plan heartbeat
+### Agent-owned continuations
 
-CTU may keep a project-local active plan and a simple status marker so progress can continue without a human saying "weiter" after every partial result.
+CTU execution continuity is driven by each agent's own result, not by a normal global projectlead heartbeat.
 
-Default files:
+Every AgentBus result must declare one structured outcome:
 
-```text
-<repo>/.codexteamup/guardian/plan.md
-<repo>/.codexteamup/guardian/status/<state>
-```
+- `done`: this task is complete and no automatic follow-up is required;
+- `handed_off`: this agent created or identified a follow-up for another owner;
+- `self_continue`: this same agent needs a later wakeup to keep working;
+- `human`: progress requires a human decision or input;
+- `failed`: the task failed and should be visible as failed, retryable, or recoverable by policy.
 
-The controller treats `pending`, `open`, and `running` as non-terminal states. It treats `closed`, `done`, `failed`, and `human` as terminal states. When the plan is non-terminal and the configured guardian agent has no open or claimed AgentBus tasks, the controller may enqueue and dispatch a short wakeup task to that guardian. The default guardian target is `ctu/projectlead`.
+Only `self_continue` may register a scheduled continuation. That continuation targets the same `agentId` that wrote the result, carries the originating `taskId` and `resultId`, includes a `notBefore` time or retry policy, and uses a deterministic dedupe key such as `agentId + chainId + nextAction`. Rewriting the same outcome should refresh or preserve the existing pending continuation instead of creating duplicate wakeups.
 
-The heartbeat must use normal CTU coordination paths: create a durable AgentBus task first, then perform best-effort dispatch. It must not call Desktop directly outside the controller delivery policy.
+The controller runtime owns continuation scheduling policy: when a continuation becomes due and the same agent has no open or claimed work for that chain, the controller creates a durable AgentBus task and then performs best-effort dispatch through normal wakeup policy. It must not call Desktop directly outside the controller delivery policy.
+
+A central `ctu/projectlead` or guardian heartbeat is no longer the normal carry-through mechanism. It may exist only as fallback/recovery: detect stale plans, missing outcomes, expired continuations, or stranded chains; surface them in the dashboard; and, if policy allows, enqueue a recovery task through AgentBus. The fallback must not manufacture routine progress when the owning agent should have written `self_continue`, `handed_off`, `human`, `failed`, or `done`.
+
+The dashboard must show continuations centrally: pending, due, dispatched, expired, deduped, and blocked-by-human entries should be visible by agent, chain, source task/result, next action, and next wakeup time.
 
 ### 3. Durable Coordination Layer
 
@@ -88,6 +95,7 @@ It owns:
 - agents;
 - tasks;
 - results;
+- result outcomes and continuation registrations;
 - events;
 - audit history;
 - operation state when controller flows need to survive uncertain Desktop wakeups.
