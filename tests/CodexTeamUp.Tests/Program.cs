@@ -20,6 +20,7 @@ var tests = new (string Name, Func<Task> Body)[]
     ("AgentBus clear tasks deletes task queues", () => Task.Run(AgentBusClearTasksDeletesTaskQueues)),
     ("AgentBus tiny result wait does not throw", () => Task.Run(AgentBusTinyResultWaitDoesNotThrow)),
     ("AgentBus event append is safe under parallel writes", () => Task.Run(AgentBusEventAppendIsSafeUnderParallelWrites)),
+    ("AgentBus event append retries transient external file locks", () => Task.Run(AgentBusEventAppendRetriesTransientExternalFileLocks)),
     ("Codex state reader parses rollout metadata", () => Task.Run(CodexStateReaderParsesRollouts)),
     ("SafeText redacts obvious secrets", () => Task.Run(SafeTextRedactsSecrets)),
     ("CTU JSON logger writes redacted machine and human logs", () => Task.Run(CtuJsonLoggerWritesRedactedMachineAndHumanLogs)),
@@ -365,6 +366,29 @@ static void AgentBusEventAppendIsSafeUnderParallelWrites()
 
     Equal(startingCount + writes, lines.Count);
     Equal(writes, parsed.Count);
+}
+
+static void AgentBusEventAppendRetriesTransientExternalFileLocks()
+{
+    var root = NewTestDirectory();
+    var bus = new AgentBusStore(Path.Combine(root, ".codexteamup/agentbus"));
+    bus.Initialize();
+    var eventsPath = Path.Combine(root, ".codexteamup/agentbus/events.jsonl");
+
+    using var blocker = new FileStream(eventsPath, FileMode.Open, FileAccess.Read, FileShare.Read);
+    var append = Task.Run(() => bus.RecordEvent(new AgentBusEvent
+    {
+        Timestamp = DateTimeOffset.Now,
+        Type = "agentbus.test.event_append_retry",
+        Message = "external-reader-lock"
+    }));
+
+    Thread.Sleep(75);
+    True(!append.IsCompleted);
+    blocker.Dispose();
+    True(append.Wait(TimeSpan.FromSeconds(5)));
+    True(append.IsCompletedSuccessfully);
+    True(bus.ListEvents(100).Any(evt => evt.Type == "agentbus.test.event_append_retry"));
 }
 
 static void AgentBusClearTasksDeletesTaskQueues()
@@ -2547,6 +2571,8 @@ static void ServiceOnlyStartupDoesNotTargetDesktopSessionProcesses()
     True(text.Contains("Enabled = (-not $NoService -or $RestartService)", StringComparison.Ordinal));
     True(text.Contains("Enabled = (-not $NoLaunch -and -not $AllowExistingDesktop)", StringComparison.Ordinal));
     True(text.Contains("if (-not $NoLaunch -and -not $AllowExistingDesktop) {", StringComparison.Ordinal));
+    True(text.Contains("Reusing existing CTU pipe for service-only startup", StringComparison.Ordinal));
+    True(text.Contains("Get-SessionPropertyValue -Session $existingSession -Name \"pipeName\"", StringComparison.Ordinal));
 }
 
 static void RestartOperationLifecycleAndPersistence()
