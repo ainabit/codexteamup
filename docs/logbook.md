@@ -2,6 +2,16 @@
 
 Reverse chronological notes about the build journey, notable failures, redesigns, and why the current architecture looks the way it does.
 
+## 2026-05-19
+
+- A live CPU investigation found `CodexTeamUp.Service` burning close to a full core while the continuity guardian repeatedly evaluated superseded results for the same task. The guardian now evaluates the latest result per task, the service sweep interval was relaxed, and a regression test locks the behavior down.
+- The wrapper bridge boundary was hardened after pipe timeouts and multiple wrapped app-server processes made wakeups feel nondeterministic. CTU now treats the wrapper bridge as an owner lease rather than a process singleton: multiple wrappers may run, but only the bridge owner exposes the named pipe, and the service validates it with a fast `ctu/hello` handshake before forwarding Desktop control calls.
+- Wrapper RPC line logging is no longer enabled by default. Full RPC tracing can still be turned on for diagnostics with `CODEX_WRAPPER_TRACE_RPC=1`, but normal runs avoid per-token file writes.
+- Startup cleanup was tightened so fresh CTU starts repeatedly scan for old Desktop/service/wrapper candidates and record richer wrapper process information in the session manifest.
+- The safety runner became more operator-friendly. It now writes one progress row per test with `running`, `passed`, or `failed` state, start/end timestamps, duration seconds, and a slowest-tests summary in the final report.
+- Long live safety runs can now be launched in their own visible PowerShell console with `-OpenConsole`, colored RUN/PASS/FAIL output, and normal Ctrl+C cancellation. This is the preferred mode when the human wants to watch the live suite rather than tail Markdown files.
+- A full `codexteamup.test` live suite verified the broad runtime path again: deterministic tests, controller-suite, basic, peer, replacement, surface, queue-first, continuation, error-paths, stale-claimed, and cleanup all passed in the safety report. One controller-suite result also surfaced that self-continuation evidence can arrive separately from the high-level suite result, which remains useful signal for future live-test interpretation.
+
 ## 2026-05-18
 
 - New-project bootstrap was simplified into a `ctu/bootstrap` model instead of a copied starter zip. The bootstrap chat can ask CTU MCP for central startup instructions, create minimal `.codexteamup` state, and then hand the project to `ctu/architect`.

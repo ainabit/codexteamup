@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO.Pipes;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using CodexTeamUp.CodexWrapper;
@@ -98,12 +99,24 @@ static async Task RunTransparentProxyAsync(Process process, CancellationToken ca
 static async Task RunAppServerProxyAsync(Process process, string[] args, WrapperLogger logger, CancellationToken cancellationToken)
 {
     var pipeName = ResolvePipeName();
-    var exposeBridge = ShouldExposeBridgePipe(args);
+    var requestedBridge = ShouldExposeBridgePipe(args);
+    using var bridgeLease = requestedBridge
+        ? TryAcquireBridgeLease(pipeName, logger)
+        : null;
+    var exposeBridge = bridgeLease is not null;
     var pending = new ConcurrentDictionary<string, PendingBridgeRequest>();
     using var proxyCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
     using var childWriteLock = new SemaphoreSlim(1, 1);
 
-    logger.Write("appserver-proxy-start", new { pipeName, childPid = process.Id, exposeBridge, args });
+    logger.Write("appserver-proxy-start", new
+    {
+        pipeName,
+        childPid = process.Id,
+        requestedBridge,
+        exposeBridge,
+        bridgeLease = bridgeLease?.Description,
+        args
+    });
 
     var desktopToChild = RelayJsonLinesAsync(
         source: Console.OpenStandardInput(),
@@ -219,39 +232,52 @@ static async Task HandleBridgePipeClientAsync(
         AutoFlush = true
     };
 
-    var line = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false);
-    if (string.IsNullOrWhiteSpace(line))
+    while (!cancellationToken.IsCancellationRequested)
     {
-        await writer.WriteLineAsync(ErrorResponse(null, -32600, "Expected one JSON request line.")).ConfigureAwait(false);
-        return;
-    }
-
-    using var document = JsonDocument.Parse(line);
-    if (!document.RootElement.TryGetProperty("method", out var methodElement)
-        || methodElement.ValueKind != JsonValueKind.String
-        || string.IsNullOrWhiteSpace(methodElement.GetString()))
-    {
-        await writer.WriteLineAsync(ErrorResponse(null, -32600, "Expected string property 'method'.")).ConfigureAwait(false);
-        return;
-    }
-
-    var method = methodElement.GetString()!;
-    if (string.Equals(method, "ctu/status", StringComparison.Ordinal))
-    {
-        await writer.WriteLineAsync(JsonSerializer.Serialize(new
+        var line = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false);
+        if (string.IsNullOrWhiteSpace(line))
         {
-            result = new
-            {
-                status = "ok",
-                pipeName = ResolvePipeName(),
-                wrapperPid = Environment.ProcessId,
-                childPid,
-                pending = pending.Count
-            }
-        }, WrapperJson.Options)).ConfigureAwait(false);
+            await writer.WriteLineAsync(ErrorResponse(null, -32600, "Expected one JSON request line.")).ConfigureAwait(false);
+            return;
+        }
+
+        using var document = JsonDocument.Parse(line);
+        if (!document.RootElement.TryGetProperty("method", out var methodElement)
+            || methodElement.ValueKind != JsonValueKind.String
+            || string.IsNullOrWhiteSpace(methodElement.GetString()))
+        {
+            await writer.WriteLineAsync(ErrorResponse(null, -32600, "Expected string property 'method'.")).ConfigureAwait(false);
+            return;
+        }
+
+        var method = methodElement.GetString()!;
+        if (string.Equals(method, "ctu/hello", StringComparison.Ordinal))
+        {
+            await writer.WriteLineAsync(BridgeStatusResponse(childPid, pending.Count, status: "hello")).ConfigureAwait(false);
+            continue;
+        }
+
+        if (string.Equals(method, "ctu/status", StringComparison.Ordinal))
+        {
+            await writer.WriteLineAsync(BridgeStatusResponse(childPid, pending.Count, status: "ok")).ConfigureAwait(false);
+            return;
+        }
+
+        await ForwardBridgeRequestAsync(document, method, childStdin, childWriteLock, pending, logger, writer, cancellationToken).ConfigureAwait(false);
         return;
     }
+}
 
+static async Task ForwardBridgeRequestAsync(
+    JsonDocument document,
+    string method,
+    Stream childStdin,
+    SemaphoreSlim childWriteLock,
+    ConcurrentDictionary<string, PendingBridgeRequest> pending,
+    WrapperLogger logger,
+    StreamWriter writer,
+    CancellationToken cancellationToken)
+{
     var requestId = $"{WrapperProtocol.BridgeRequestIdPrefix}{Guid.NewGuid():N}";
     var appServerRequest = WrapperProtocol.BuildAppServerRequest(requestId, document.RootElement);
     var pendingRequest = new PendingBridgeRequest(requestId);
@@ -292,6 +318,22 @@ static async Task HandleBridgePipeClientAsync(
     }
 }
 
+static string BridgeStatusResponse(int childPid, int pending, string status)
+{
+    return JsonSerializer.Serialize(new
+    {
+        result = new
+        {
+            status,
+            bridgeOwner = true,
+            pipeName = ResolvePipeName(),
+            wrapperPid = Environment.ProcessId,
+            childPid,
+            pending
+        }
+    }, WrapperJson.Options);
+}
+
 static async Task RelayJsonLinesAsync(
     Stream source,
     Stream destination,
@@ -315,7 +357,10 @@ static async Task RelayJsonLinesAsync(
             }
 
             var summary = TrySummarizeJsonLine(line);
-            logger.Write("rpc-line", new { direction, summary.Method, summary.Id, summary.HasParams, line.Length });
+            if (TraceRpcLines())
+            {
+                logger.Write("rpc-line", new { direction, summary.Method, summary.Id, summary.HasParams, line.Length });
+            }
 
             if (pendingBridgeResponses is not null
                 && summary.Id is not null
@@ -407,6 +452,14 @@ static bool StampTurnStartedAt()
         || string.Equals(raw, "yes", StringComparison.OrdinalIgnoreCase);
 }
 
+static bool TraceRpcLines()
+{
+    var raw = Environment.GetEnvironmentVariable("CODEX_WRAPPER_TRACE_RPC");
+    return string.Equals(raw, "1", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(raw, "true", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(raw, "yes", StringComparison.OrdinalIgnoreCase);
+}
+
 static async Task WriteLineLockedAsync(Stream destination, string line, SemaphoreSlim writeLock, CancellationToken cancellationToken)
 {
     await writeLock.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -484,6 +537,42 @@ static bool ShouldExposeBridgePipe(string[] args)
     }
 
     return false;
+}
+
+static BridgeLease? TryAcquireBridgeLease(string pipeName, WrapperLogger logger)
+{
+    var mode = Environment.GetEnvironmentVariable("CODEX_WRAPPER_BRIDGE_MODE");
+    if (string.Equals(mode, "all", StringComparison.OrdinalIgnoreCase))
+    {
+        logger.Write("bridge-owner-diagnostic-all", new { pipeName });
+        return new BridgeLease(null, "diagnostic-all");
+    }
+
+    var mutexName = BridgeMutexName(pipeName);
+    try
+    {
+        var mutex = new Mutex(false, mutexName);
+        if (mutex.WaitOne(0))
+        {
+            logger.Write("bridge-owner-acquired", new { pipeName, mutexName });
+            return new BridgeLease(mutex, mutexName);
+        }
+
+        mutex.Dispose();
+        logger.Write("bridge-owner-denied", new { pipeName, mutexName });
+        return null;
+    }
+    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or AbandonedMutexException or InvalidOperationException)
+    {
+        logger.Write("bridge-owner-error", new { pipeName, mutexName, type = ex.GetType().FullName, ex.Message });
+        return null;
+    }
+}
+
+static string BridgeMutexName(string pipeName)
+{
+    var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(pipeName))).Substring(0, 24);
+    return $@"Local\CodexTeamUpBridge-{hash}";
 }
 
 static bool IsAppServerInvocation(string[] args)
@@ -617,6 +706,7 @@ static Dictionary<string, string?> SelectedEnvironment()
         "CODEX_WRAPPER_PIPE_NAME",
         "CODEX_WRAPPER_BRIDGE_MODE",
         "CODEX_WRAPPER_REQUEST_TIMEOUT_MS",
+        "CODEX_WRAPPER_TRACE_RPC",
         "CODEX_WRAPPER_FORCE_TURNS_ASC",
         "CODEX_WRAPPER_STAMP_TURN_STARTED_AT",
         "CODEX_HOME",
@@ -664,6 +754,47 @@ sealed class PendingBridgeRequest
     public void TrySetResult(string response)
     {
         completion.TrySetResult(response);
+    }
+}
+
+sealed class BridgeLease : IDisposable
+{
+    private readonly Mutex? mutex;
+    private bool disposed;
+
+    public BridgeLease(Mutex? mutex, string description)
+    {
+        this.mutex = mutex;
+        Description = description;
+    }
+
+    public string Description { get; }
+
+    public void Dispose()
+    {
+        if (disposed)
+        {
+            return;
+        }
+
+        disposed = true;
+        if (mutex is null)
+        {
+            return;
+        }
+
+        try
+        {
+            mutex.ReleaseMutex();
+        }
+        catch
+        {
+            // Bridge ownership is best-effort during process shutdown.
+        }
+        finally
+        {
+            mutex.Dispose();
+        }
     }
 }
 

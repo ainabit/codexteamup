@@ -182,4 +182,12 @@ If code violates this split, refactor before extending it.
 
 Codex Desktop can start more than one wrapped `app-server` process. CTU must not expose the same named pipe from every wrapper process by default, because the service could connect to a helper app-server that is not the visible Desktop context.
 
-The default wrapper bridge policy is selective: expose the CTU bridge pipe only for the Desktop app-server invocation that carries the Desktop analytics app-server argument. Other wrapped app-server invocations remain transparent proxies. For diagnostics, set `CODEX_WRAPPER_BRIDGE_MODE=all` before starting Desktop to restore the old behavior where every wrapper exposes the bridge. Set `CODEX_WRAPPER_BRIDGE_MODE=none` to disable the wrapper bridge entirely.
+The default wrapper bridge policy is selective and owner-based:
+
+1. Only app-server invocations that match the visible Desktop heuristic request bridge exposure.
+2. A requesting wrapper must acquire the per-pipe bridge-owner mutex before opening the named pipe.
+3. Wrappers that do not own the mutex remain transparent proxies.
+4. The service performs a fast `ctu/hello` handshake before every bridged app-server request and requires `bridgeOwner=true`.
+5. A missing, stale, or wrong bridge owner must fail quickly instead of waiting on the normal app-server response timeout.
+
+For diagnostics, set `CODEX_WRAPPER_BRIDGE_MODE=all` before starting Desktop to allow every wrapper to expose a bridge. This is intentionally not the normal mode because it can make wakeups nondeterministic. Set `CODEX_WRAPPER_BRIDGE_MODE=none` to disable the wrapper bridge entirely.

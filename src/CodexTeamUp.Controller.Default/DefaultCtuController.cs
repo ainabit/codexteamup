@@ -461,7 +461,7 @@ public sealed class DefaultCtuController : ICtuController
             }
         }
 
-        foreach (var result in bus.ListResults())
+        foreach (var result in LatestResultPerTask(bus.ListResults()))
         {
             if (cancellationToken.IsCancellationRequested)
             {
@@ -544,6 +544,18 @@ public sealed class DefaultCtuController : ICtuController
         return string.Equals(task.Status, "claimed", StringComparison.OrdinalIgnoreCase)
             ? ExecutionContinuityStateKind.WaitingOnWorker
             : ExecutionContinuityStateKind.QueuedForDispatch;
+    }
+
+    private static IReadOnlyList<AgentBusResult> LatestResultPerTask(IReadOnlyList<AgentBusResult> results)
+    {
+        return results
+            .GroupBy(result => result.TaskId, StringComparer.OrdinalIgnoreCase)
+            .Select(group => group
+                .OrderByDescending(result => result.CompletedAt)
+                .ThenByDescending(result => result.Id, StringComparer.OrdinalIgnoreCase)
+                .First())
+            .OrderBy(result => result.CompletedAt)
+            .ToList();
     }
 
     private static string EvaluateGuardedStateForResult(AgentBusResult result, bool notifyRetryExhausted)

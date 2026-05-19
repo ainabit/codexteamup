@@ -19,10 +19,56 @@ param(
     [switch]$Coverage,
     [int]$CoverageThreshold = 80,
     [string]$CoverageOutput = "",
-    [string]$ReportPath = ""
+    [string]$ReportPath = "",
+    [switch]$OpenConsole
 )
 
 $ErrorActionPreference = "Stop"
+$repoRoot = Split-Path -Parent $PSScriptRoot
+
+function New-TestRunnerForwardArguments {
+    param([switch]$NoExit)
+
+    $forward = @()
+    if ($NoExit) {
+        $forward += "-NoExit"
+    }
+
+    $forward += @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $PSCommandPath)
+    if ($Live) { $forward += "-Live" }
+    if ($LiveAll) { $forward += "-LiveAll" }
+    $forward += @("-LiveScenario", $LiveScenario)
+    if (-not [string]::IsNullOrWhiteSpace($ServiceUrl)) { $forward += @("-ServiceUrl", $ServiceUrl) }
+    if (-not [string]::IsNullOrWhiteSpace($Workspace)) { $forward += @("-Workspace", $Workspace) }
+    if (-not [string]::IsNullOrWhiteSpace($RunId)) { $forward += @("-RunId", $RunId) }
+    if (-not [string]::IsNullOrWhiteSpace($ArtifactsPath)) { $forward += @("-ArtifactsPath", $ArtifactsPath) }
+    if ($UseTestWorkspace) { $forward += "-UseTestWorkspace" }
+    if (-not [string]::IsNullOrWhiteSpace($TestWorkspace)) { $forward += @("-TestWorkspace", $TestWorkspace) }
+    if ($UseAcceptanceWorkspace) { $forward += "-UseAcceptanceWorkspace" }
+    if (-not [string]::IsNullOrWhiteSpace($AcceptanceWorkspace)) { $forward += @("-AcceptanceWorkspace", $AcceptanceWorkspace) }
+    $forward += @("-TimeoutSeconds", $TimeoutSeconds)
+    $forward += @("-ToolTimeoutSeconds", $ToolTimeoutSeconds)
+    if ($Restore) { $forward += "-Restore" }
+    if ($KeepLiveAgents) { $forward += "-KeepLiveAgents" }
+    if ($CleanupAllTestAgents) { $forward += "-CleanupAllTestAgents" }
+    if ($Coverage) { $forward += "-Coverage" }
+    $forward += @("-CoverageThreshold", $CoverageThreshold)
+    if (-not [string]::IsNullOrWhiteSpace($CoverageOutput)) { $forward += @("-CoverageOutput", $CoverageOutput) }
+    if (-not [string]::IsNullOrWhiteSpace($ReportPath)) { $forward += @("-ReportPath", $ReportPath) }
+    return $forward
+}
+
+if ($OpenConsole) {
+    $runner = (Get-Command pwsh -ErrorAction SilentlyContinue).Source
+    if ([string]::IsNullOrWhiteSpace($runner)) {
+        $runner = (Get-Command powershell -ErrorAction Stop).Source
+    }
+
+    $consoleArgs = New-TestRunnerForwardArguments -NoExit
+    Start-Process -FilePath $runner -ArgumentList $consoleArgs -WorkingDirectory $repoRoot
+    Write-Host "Started CodexTeamUp test console with pid-managed runner: $runner"
+    exit 0
+}
 
 if ($UseTestWorkspace -and $UseAcceptanceWorkspace) {
     throw "Use either -UseTestWorkspace or -UseAcceptanceWorkspace, not both."
@@ -31,33 +77,12 @@ if ($UseTestWorkspace -and $UseAcceptanceWorkspace) {
 if ($PSVersionTable.PSEdition -ne "Core") {
     $pwsh = (Get-Command pwsh -ErrorAction SilentlyContinue).Source
     if (-not [string]::IsNullOrWhiteSpace($pwsh)) {
-        $forward = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $PSCommandPath)
-        if ($Live) { $forward += "-Live" }
-        if ($LiveAll) { $forward += "-LiveAll" }
-        $forward += @("-LiveScenario", $LiveScenario)
-        if (-not [string]::IsNullOrWhiteSpace($ServiceUrl)) { $forward += @("-ServiceUrl", $ServiceUrl) }
-        if (-not [string]::IsNullOrWhiteSpace($Workspace)) { $forward += @("-Workspace", $Workspace) }
-        if (-not [string]::IsNullOrWhiteSpace($RunId)) { $forward += @("-RunId", $RunId) }
-        if (-not [string]::IsNullOrWhiteSpace($ArtifactsPath)) { $forward += @("-ArtifactsPath", $ArtifactsPath) }
-        if ($UseTestWorkspace) { $forward += "-UseTestWorkspace" }
-        if (-not [string]::IsNullOrWhiteSpace($TestWorkspace)) { $forward += @("-TestWorkspace", $TestWorkspace) }
-        if ($UseAcceptanceWorkspace) { $forward += "-UseAcceptanceWorkspace" }
-        if (-not [string]::IsNullOrWhiteSpace($AcceptanceWorkspace)) { $forward += @("-AcceptanceWorkspace", $AcceptanceWorkspace) }
-        $forward += @("-TimeoutSeconds", $TimeoutSeconds)
-        $forward += @("-ToolTimeoutSeconds", $ToolTimeoutSeconds)
-        if ($Restore) { $forward += "-Restore" }
-        if ($KeepLiveAgents) { $forward += "-KeepLiveAgents" }
-        if ($CleanupAllTestAgents) { $forward += "-CleanupAllTestAgents" }
-        if ($Coverage) { $forward += "-Coverage" }
-        $forward += @("-CoverageThreshold", $CoverageThreshold)
-        if (-not [string]::IsNullOrWhiteSpace($CoverageOutput)) { $forward += @("-CoverageOutput", $CoverageOutput) }
-        if (-not [string]::IsNullOrWhiteSpace($ReportPath)) { $forward += @("-ReportPath", $ReportPath) }
+        $forward = New-TestRunnerForwardArguments
         & $pwsh @forward
         exit $LASTEXITCODE
     }
 }
 
-$repoRoot = Split-Path -Parent $PSScriptRoot
 if ([string]::IsNullOrWhiteSpace($TestWorkspace)) {
     $TestWorkspace = Join-Path (Split-Path -Parent $repoRoot) ((Split-Path -Leaf $repoRoot) + ".test")
 }
@@ -97,6 +122,115 @@ $ProgressJsonPath = Join-Path (Split-Path -Parent $ReportPath) (([System.IO.Path
 $reportRows = [System.Collections.Generic.List[object]]::new()
 $liveProgressRows = [System.Collections.Generic.List[object]]::new()
 
+function Add-ProgressRow {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Category,
+
+        [Parameter(Mandatory = $true)]
+        [string]$TestCase,
+
+        [string]$Status = "pending",
+
+        [string]$Details = ""
+    )
+
+    $row = [pscustomobject]@{
+        Number = $script:liveProgressRows.Count + 1
+        Category = $Category
+        TestCase = $TestCase
+        Scenario = $TestCase
+        Status = $Status
+        StartedAt = if ($Status -eq "running") { Get-Date -Format "HH:mm:ss" } else { "" }
+        StartedAtIso = if ($Status -eq "running") { (Get-Date).ToString("O") } else { "" }
+        FinishedAt = ""
+        DurationSeconds = ""
+        Details = $Details
+    }
+    $script:liveProgressRows.Add($row)
+    return $row
+}
+
+function Set-ProgressFileContent {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $true)]
+        $Value
+    )
+
+    for ($attempt = 0; $attempt -lt 3; $attempt++) {
+        $tempPath = "$Path.tmp-$([guid]::NewGuid().ToString("N"))"
+        try {
+            Set-Content -LiteralPath $tempPath -Value $Value -Encoding UTF8
+            Move-Item -LiteralPath $tempPath -Destination $Path -Force
+            return
+        } catch {
+            Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue
+            if ($attempt -lt 2) {
+                Start-Sleep -Milliseconds (100 * ($attempt + 1))
+            }
+        }
+    }
+}
+
+function Find-RunningProgressRow {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$TestCase
+    )
+
+    @($script:liveProgressRows |
+        Where-Object { $_.TestCase -eq $TestCase -and $_.Status -eq "running" } |
+        Select-Object -Last 1)[0]
+}
+
+function Start-ProgressRow {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Category,
+
+        [Parameter(Mandatory = $true)]
+        [string]$TestCase,
+
+        [string]$Details = ""
+    )
+
+    $row = Add-ProgressRow -Category $Category -TestCase $TestCase -Status "running" -Details $Details
+    Write-TestProgress -Phase $Category -Status "running" -CurrentScenario $TestCase -LastLine "RUN $TestCase"
+    return $row
+}
+
+function Complete-ProgressRow {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Row,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("passed", "failed", "skipped")]
+        [string]$Status,
+
+        [string]$Details = ""
+    )
+
+    $Row.Status = $Status
+    $Row.FinishedAt = Get-Date -Format "HH:mm:ss"
+    if (-not [string]::IsNullOrWhiteSpace($Row.StartedAtIso)) {
+        try {
+            $started = [DateTimeOffset]::Parse($Row.StartedAtIso)
+            $duration = [DateTimeOffset]::Now - $started
+            $Row.DurationSeconds = [Math]::Round($duration.TotalSeconds, 1).ToString([Globalization.CultureInfo]::InvariantCulture)
+        } catch {
+            $Row.DurationSeconds = ""
+        }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($Details)) {
+        $Row.Details = $Details
+    }
+    Write-TestProgress -Phase $Row.Category -Status "running" -CurrentScenario $Row.TestCase -LastLine "$($Status.ToUpperInvariant()) $($Row.TestCase)"
+}
+
 function Write-TestProgress {
     param(
         [string]$Phase = "",
@@ -112,8 +246,8 @@ function Write-TestProgress {
     }
 
     $total = $script:liveProgressRows.Count
-    $done = @($script:liveProgressRows | Where-Object { $_.Status -eq "passed" -or $_.Status -eq "failed" }).Count
-    $current = @($script:liveProgressRows | Where-Object { $_.Status -eq "running" } | Select-Object -First 1)
+    $done = @($script:liveProgressRows | Where-Object { $_.Status -eq "passed" -or $_.Status -eq "failed" -or $_.Status -eq "skipped" }).Count
+    $current = $script:liveProgressRows | Where-Object { $_.Status -eq "running" } | Select-Object -First 1
     $currentNumber = if ($null -ne $current) { [int]$current.Number } else { [Math]::Min($done + 1, [Math]::Max($total, 1)) }
 
     $snapshot = [pscustomobject]@{
@@ -123,15 +257,15 @@ function Write-TestProgress {
         phase = $Phase
         currentScenario = $CurrentScenario
         status = $Status
-        liveCurrent = $currentNumber
-        liveTotal = $total
+        testCurrent = $currentNumber
+        testTotal = $total
         completed = $done
         lastLine = $LastLine
         error = $Error
-        scenarios = @($script:liveProgressRows)
+        tests = @($script:liveProgressRows)
     }
 
-    $snapshot | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $ProgressJsonPath -Encoding UTF8
+    Set-ProgressFileContent -Path $ProgressJsonPath -Value ($snapshot | ConvertTo-Json -Depth 20)
 
     $lines = [System.Collections.Generic.List[string]]::new()
     $lines.Add("# CodexTeamUp Safety Progress")
@@ -142,8 +276,8 @@ function Write-TestProgress {
     $lines.Add("- phase: $Phase")
     $lines.Add("- status: $Status")
     if ($total -gt 0) {
-        $lines.Add("- live progress: $currentNumber/$total")
-        $lines.Add("- current scenario: $CurrentScenario")
+        $lines.Add("- test progress: $currentNumber/$total")
+        $lines.Add("- current test: $CurrentScenario")
     }
     if (-not [string]::IsNullOrWhiteSpace($LastLine)) {
         $lines.Add("- last line: $LastLine")
@@ -153,14 +287,14 @@ function Write-TestProgress {
     }
     if ($total -gt 0) {
         $lines.Add("")
-        $lines.Add("| # | Scenario | Status | Started | Finished |")
-        $lines.Add("| --- | --- | --- | --- | --- |")
+        $lines.Add("| # | Category | Test | Status | Started | Finished | Duration s | Details |")
+        $lines.Add("| --- | --- | --- | --- | --- | --- | --- | --- |")
         foreach ($row in $script:liveProgressRows) {
-            $lines.Add("| $($row.Number) | $(Convert-ReportCell $row.Scenario) | $(Convert-ReportCell $row.Status) | $(Convert-ReportCell $row.StartedAt) | $(Convert-ReportCell $row.FinishedAt) |")
+            $lines.Add("| $($row.Number) | $(Convert-ReportCell $row.Category) | $(Convert-ReportCell $row.TestCase) | $(Convert-ReportCell $row.Status) | $(Convert-ReportCell $row.StartedAt) | $(Convert-ReportCell $row.FinishedAt) | $(Convert-ReportCell $row.DurationSeconds) | $(Convert-ReportCell $row.Details) |")
         }
     }
 
-    Set-Content -LiteralPath $ProgressPath -Value $lines -Encoding UTF8
+    Set-ProgressFileContent -Path $ProgressPath -Value $lines
 }
 
 function Add-ReportRow {
@@ -212,6 +346,26 @@ function Convert-ReportCell {
     ($Value -replace "\r?\n", " " -replace "\|", "\|").Trim()
 }
 
+function Write-TestConsoleLine {
+    param([string]$Line)
+
+    if ($Line -match "^(PASS|\s*PASS)\b") {
+        Write-Host $Line -ForegroundColor Green
+    } elseif ($Line -match "^(FAIL|\s*FAIL)\b" -or $Line -match "failed with exit code" -or $Line -match "Exception:") {
+        Write-Host $Line -ForegroundColor Red
+    } elseif ($Line -match "^(RUN|Running)\b") {
+        Write-Host $Line -ForegroundColor Cyan
+    } elseif ($Line -match "^\s*tool:") {
+        Write-Host $Line -ForegroundColor DarkGray
+    } elseif ($Line -match "^\s*(workspace|service|run id|scenario|agents|tool wait):") {
+        Write-Host $Line -ForegroundColor DarkCyan
+    } elseif ($Line -match "^\s*(temporarily|restoring|Cleanup:)") {
+        Write-Host $Line -ForegroundColor Yellow
+    } else {
+        Write-Host $Line
+    }
+}
+
 function Write-SafetyReport {
     $reportDirectory = Split-Path -Parent $ReportPath
     if (-not [string]::IsNullOrWhiteSpace($reportDirectory)) {
@@ -236,6 +390,36 @@ function Write-SafetyReport {
 
     foreach ($row in $reportRows) {
         $lines.Add("| $(Convert-ReportCell $row.Category) | $(Convert-ReportCell $row.TestCase) | $(Convert-ReportCell $row.Status) | $(Convert-ReportCell $row.Reason) | $(Convert-ReportCell $row.Details) |")
+    }
+
+    $timedRows = @($script:liveProgressRows |
+        Where-Object {
+            -not [string]::IsNullOrWhiteSpace($_.DurationSeconds) -and
+            ([string]$_.DurationSeconds) -match '^\d+(\.\d+)?$'
+        } |
+        ForEach-Object {
+            $durationValue = 0.0
+            [void][double]::TryParse([string]$_.DurationSeconds, [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$durationValue)
+            [pscustomobject]@{
+                Category = $_.Category
+                TestCase = $_.TestCase
+                Status = $_.Status
+                DurationSeconds = $durationValue
+                Details = $_.Details
+            }
+        } |
+        Sort-Object -Property DurationSeconds -Descending |
+        Select-Object -First 15)
+
+    if ($timedRows.Count -gt 0) {
+        $lines.Add("")
+        $lines.Add("## Slowest Tests")
+        $lines.Add("")
+        $lines.Add("| Category | Test case | Status | Duration s | Details |")
+        $lines.Add("| --- | --- | --- | --- | --- |")
+        foreach ($row in $timedRows) {
+            $lines.Add("| $(Convert-ReportCell $row.Category) | $(Convert-ReportCell $row.TestCase) | $(Convert-ReportCell $row.Status) | $($row.DurationSeconds.ToString("0.0", [Globalization.CultureInfo]::InvariantCulture)) | $(Convert-ReportCell $row.Details) |")
+        }
     }
 
     Set-Content -LiteralPath $ReportPath -Value $lines -Encoding UTF8
@@ -374,16 +558,18 @@ Write-Host "  report:    $ReportPath"
 Write-Host "  progress:  $ProgressPath"
 Write-Host ""
 
-Write-TestProgress -Phase "restore" -Status "running" -LastLine "Running dotnet restore"
+$restoreProgress = Start-ProgressRow -Category "Build" -TestCase "Restore solution packages" -Details "dotnet restore --artifacts-path"
 Write-Host "Running restore..."
 Invoke-Checked -Name "dotnet restore" -Command { dotnet restore --disable-parallel --artifacts-path $ArtifactsPath }
 Add-ReportRow -Category "Build" -TestCase "Restore solution packages" -Status "passed" -Details "dotnet restore --artifacts-path"
+Complete-ProgressRow -Row $restoreProgress -Status "passed"
 Write-Host ""
 
-Write-TestProgress -Phase "build" -Status "running" -LastLine "Running dotnet build"
+$buildProgress = Start-ProgressRow -Category "Build" -TestCase "Build solution into isolated artifacts" -Details "No src/bin or src/obj runtime dependency"
 Write-Host "Running build..."
 Invoke-CheckedWithBuildRetry -Name "dotnet build" -Command { dotnet build --no-restore --disable-build-servers --artifacts-path $ArtifactsPath /p:UseSharedCompilation=false }
 Add-ReportRow -Category "Build" -TestCase "Build solution into isolated artifacts" -Status "passed" -Details "No src/bin or src/obj runtime dependency"
+Complete-ProgressRow -Row $buildProgress -Status "passed"
 
 Write-Host ""
 Write-TestProgress -Phase "deterministic" -Status "running" -LastLine "Running deterministic test suite"
@@ -398,11 +584,37 @@ try {
     Set-Item -LiteralPath "Env:CTU_TEST_REPO_ROOT" -Value $repoRoot
     Remove-Item -LiteralPath "Env:CTU_CONTROLLER_PLUGIN_TYPE" -ErrorAction SilentlyContinue
 
-    $deterministicOutput = & dotnet $testDll 2>&1
+    $deterministicProgressRows = @{}
+    $deterministicOutputBuffer = [System.Collections.Generic.List[string]]::new()
+    & dotnet $testDll 2>&1 | ForEach-Object {
+        $line = [string]$_
+        $deterministicOutputBuffer.Add($line)
+        Write-TestConsoleLine $line
+        if ($line -match "^RUN\s+(\d+)/(\d+)\s+(.+)$") {
+            $testName = $Matches[3].Trim()
+            $row = Start-ProgressRow -Category (Get-TestCategory $testName) -TestCase $testName -Details "Deterministic $($Matches[1])/$($Matches[2])"
+            $deterministicProgressRows[$testName] = $row
+        } elseif ($line -match "^PASS\s+(.+)$") {
+            $testName = $Matches[1].Trim()
+            if ($deterministicProgressRows.ContainsKey($testName)) {
+                Complete-ProgressRow -Row $deterministicProgressRows[$testName] -Status "passed"
+            }
+        } elseif ($line -match "^FAIL\s+([^:]+):\s*(.*)$") {
+            $testName = $Matches[1].Trim()
+            $reason = $Matches[2].Trim()
+            if ($deterministicProgressRows.ContainsKey($testName)) {
+                Complete-ProgressRow -Row $deterministicProgressRows[$testName] -Status "failed" -Details $reason
+            } else {
+                $row = Start-ProgressRow -Category (Get-TestCategory $testName) -TestCase $testName
+                Complete-ProgressRow -Row $row -Status "failed" -Details $reason
+            }
+        } else {
+            Write-TestProgress -Phase "deterministic" -Status "running" -LastLine $line
+        }
+    }
     $deterministicExitCode = $LASTEXITCODE
-    foreach ($lineObject in $deterministicOutput) {
+    foreach ($lineObject in $deterministicOutputBuffer) {
         $line = [string]$lineObject
-        Write-Host $line
         if ($line -match "^PASS\s+(.+)$") {
             $testName = $Matches[1].Trim()
             Add-ReportRow -Category (Get-TestCategory $testName) -TestCase $testName -Status "passed"
@@ -426,6 +638,7 @@ try {
     if ($Coverage) {
         Write-Host ""
         Write-Host "Running coverage gate..."
+        $coverageProgress = Start-ProgressRow -Category "Coverage" -TestCase "Line coverage gate" -Details "Threshold $CoverageThreshold percent"
         if ([string]::IsNullOrWhiteSpace($CoverageOutput)) {
             $CoverageOutput = Join-Path $ArtifactsPath "coverage"
         }
@@ -447,6 +660,7 @@ try {
                 --threshold-stat total
         }
         Add-ReportRow -Category "Coverage" -TestCase "Line coverage gate" -Status "passed" -Details "Threshold $CoverageThreshold percent"
+        Complete-ProgressRow -Row $coverageProgress -Status "passed"
     }
 } finally {
     if ($null -eq $previousControllerPluginPath) {
@@ -485,13 +699,7 @@ $scenarios = if ($LiveAll) {
 }
 $scenarios = @($scenarios)
 for ($scenarioIndex = 0; $scenarioIndex -lt $scenarios.Count; $scenarioIndex++) {
-    $script:liveProgressRows.Add([pscustomobject]@{
-        Number = $scenarioIndex + 1
-        Scenario = $scenarios[$scenarioIndex]
-        Status = "pending"
-        StartedAt = ""
-        FinishedAt = ""
-    })
+    Add-ProgressRow -Category "Live smoke" -TestCase "$($scenarios[$scenarioIndex]) scenario" -Status "pending" | Out-Null
 }
 Write-TestProgress -Phase "live" -Status "running" -CurrentScenario $scenarios[0] -LastLine "Preparing live smoke scenarios"
 
@@ -503,9 +711,13 @@ if ([string]::IsNullOrWhiteSpace($baseRunId)) {
 for ($scenarioIndex = 0; $scenarioIndex -lt $scenarios.Count; $scenarioIndex++) {
     $scenario = $scenarios[$scenarioIndex]
     $scenarioNumber = $scenarioIndex + 1
-    $progressRow = $script:liveProgressRows[$scenarioIndex]
+    $progressRow = @($script:liveProgressRows | Where-Object { $_.Category -eq "Live smoke" -and $_.TestCase -eq "$scenario scenario" } | Select-Object -Last 1)[0]
     $progressRow.Status = "running"
     $progressRow.StartedAt = Get-Date -Format "HH:mm:ss"
+    $progressRow.StartedAtIso = (Get-Date).ToString("O")
+    $progressRow.FinishedAt = ""
+    $progressRow.DurationSeconds = ""
+    $progressRow.Details = "Live smoke ${scenarioNumber}/$($scenarios.Count)"
     Write-TestProgress -Phase "live" -Status "running" -CurrentScenario $scenario -LastLine "Running live smoke ${scenarioNumber}/$($scenarios.Count): $scenario"
     $scenarioRunId = if ($scenarios.Count -eq 1) {
         $baseRunId
@@ -539,7 +751,7 @@ for ($scenarioIndex = 0; $scenarioIndex -lt $scenarios.Count; $scenarioIndex++) 
     & $powerShellRunner @liveArgs 2>&1 | ForEach-Object {
         $line = [string]$_
         $liveOutputBuffer.Add($line)
-        Write-Host $line
+        Write-TestConsoleLine $line
         Write-TestProgress -Phase "live" -Status "running" -CurrentScenario $scenario -LastLine $line
     }
     $liveExitCode = $LASTEXITCODE
@@ -549,14 +761,12 @@ for ($scenarioIndex = 0; $scenarioIndex -lt $scenarios.Count; $scenarioIndex++) 
     if ($liveExitCode -eq 0) {
         $details = if ($liveText -match "PASS live CTU .+ smoke run ([^\r\n]+)") { "run $($Matches[1].Trim())" } else { "scenario completed" }
         Add-ReportRow -Category "Live smoke" -TestCase "$scenario scenario" -Status "passed" -Details $details
-        $progressRow.Status = "passed"
-        $progressRow.FinishedAt = Get-Date -Format "HH:mm:ss"
+        Complete-ProgressRow -Row $progressRow -Status "passed" -Details $details
         Write-TestProgress -Phase "live" -Status "running" -CurrentScenario $scenario -LastLine "PASS live smoke ${scenarioNumber}/$($scenarios.Count): $scenario"
     } else {
         $reasonLines = @($liveOutput | Select-Object -Last 8 | ForEach-Object { [string]$_ })
         Add-ReportRow -Category "Live smoke" -TestCase "$scenario scenario" -Status "failed" -Reason ($reasonLines -join " ")
-        $progressRow.Status = "failed"
-        $progressRow.FinishedAt = Get-Date -Format "HH:mm:ss"
+        Complete-ProgressRow -Row $progressRow -Status "failed" -Details ($reasonLines -join " ")
         Write-TestProgress -Phase "live" -Status "failed" -CurrentScenario $scenario -Error ($reasonLines -join " ")
         Write-SafetyReport
         throw "live smoke $scenario failed with exit code $liveExitCode."
@@ -566,7 +776,7 @@ for ($scenarioIndex = 0; $scenarioIndex -lt $scenarios.Count; $scenarioIndex++) 
 if (($LiveAll -or $CleanupAllTestAgents) -and -not $KeepLiveAgents) {
     Write-Host ""
     Write-Host "Running live cleanup: ctu-test/* except ctu-test/architect"
-    Write-TestProgress -Phase "cleanup" -Status "running" -LastLine "Running live cleanup"
+    $cleanupProgress = Start-ProgressRow -Category "Live cleanup" -TestCase "Archive/retire ctu-test/* except ctu-test/architect"
     $cleanupArgs = @(
         "-ExecutionPolicy", "Bypass",
         "-File", (Join-Path $repoRoot "scripts/test-live-multi-agent-orchestration.ps1"),
@@ -582,14 +792,16 @@ if (($LiveAll -or $CleanupAllTestAgents) -and -not $KeepLiveAgents) {
     $cleanupOutput = & $powerShellRunner @cleanupArgs 2>&1
     $cleanupExitCode = $LASTEXITCODE
     foreach ($lineObject in $cleanupOutput) {
-        Write-Host ([string]$lineObject)
+        Write-TestConsoleLine ([string]$lineObject)
     }
 
     if ($cleanupExitCode -eq 0) {
         Add-ReportRow -Category "Live cleanup" -TestCase "Archive/retire ctu-test/* except ctu-test/architect" -Status "passed"
+        Complete-ProgressRow -Row $cleanupProgress -Status "passed"
     } else {
         $reasonLines = @($cleanupOutput | Select-Object -Last 8 | ForEach-Object { [string]$_ })
         Add-ReportRow -Category "Live cleanup" -TestCase "Archive/retire ctu-test/* except ctu-test/architect" -Status "failed" -Reason ($reasonLines -join " ")
+        Complete-ProgressRow -Row $cleanupProgress -Status "failed" -Details ($reasonLines -join " ")
         Write-TestProgress -Phase "cleanup" -Status "failed" -Error ($reasonLines -join " ")
         Write-SafetyReport
         throw "live cleanup failed with exit code $cleanupExitCode."

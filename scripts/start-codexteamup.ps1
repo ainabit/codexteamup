@@ -345,25 +345,35 @@ function Stop-CodexTeamUpProcessesForFreshStart {
         }
     }
 
-    foreach ($candidate in $candidates) {
-        try {
-            Write-Host "Stopping $($candidate.Name) pid=$($candidate.Id)"
-            Stop-Process -Id $candidate.Id -Force -ErrorAction Stop
-        } catch {
-            Write-Warning "Could not stop pid=$($candidate.Id): $($_.Exception.Message)"
+    $seen = @{}
+    for ($attempt = 1; $attempt -le 4; $attempt++) {
+        $currentCandidates = if ($attempt -eq 1) { @($candidates) } else { @(Get-CodexTeamUpProcessCandidates) }
+        $currentCandidates = @($currentCandidates | Where-Object { -not $seen.ContainsKey([string]$_.Id) })
+        if ($currentCandidates.Count -eq 0) {
+            break
         }
+
+        if ($attempt -gt 1) {
+            Write-Host "Additional CTU/Desktop processes appeared during cleanup:"
+            $currentCandidates |
+                Select-Object Id, Name, ParentProcessId, ParentName, Reason, Path |
+                Format-Table -AutoSize
+        }
+
+        foreach ($candidate in $currentCandidates) {
+            $seen[[string]$candidate.Id] = $true
+            try {
+                Write-Host "Stopping $($candidate.Name) pid=$($candidate.Id)"
+                Stop-Process -Id $candidate.Id -Force -ErrorAction Stop
+            } catch {
+                Write-Warning "Could not stop pid=$($candidate.Id): $($_.Exception.Message)"
+            }
+        }
+
+        Start-Sleep -Seconds 1
     }
 
-    Start-Sleep -Seconds 1
-
-    $remaining = @()
-    foreach ($candidate in $candidates) {
-        $process = Get-Process -Id $candidate.Id -ErrorAction SilentlyContinue
-        if ($process) {
-            $remaining += $candidate
-        }
-    }
-
+    $remaining = @(Get-CodexTeamUpProcessCandidates)
     if ($remaining.Count -gt 0) {
         $remaining | Select-Object Id, Name, ParentProcessId, ParentName, Reason, Path | Format-Table -AutoSize
         throw "Could not stop all existing CTU/Desktop processes. Fresh start was not guaranteed."
@@ -581,6 +591,31 @@ function Get-CtuWrapperProcessIds {
     return @($ids)
 }
 
+function Get-CtuWrapperProcessInventory {
+    $items = [System.Collections.Generic.List[object]]::new()
+    $metadata = Get-ProcessMetadata
+    foreach ($process in @(Get-Process -Name "CodexTeamUp.CodexWrapper" -ErrorAction SilentlyContinue)) {
+        try {
+            $path = Get-ProcessPathSafe -Process $process
+            if (-not $path -or -not $path.StartsWith($repoRoot, [StringComparison]::OrdinalIgnoreCase)) {
+                continue
+            }
+
+            $processMetadata = $metadata[$process.Id]
+            $items.Add([pscustomobject]@{
+                pid = [int]$process.Id
+                path = $path
+                parentProcessId = if ($processMetadata) { $processMetadata.ParentProcessId } else { $null }
+                parentName = if ($processMetadata) { $processMetadata.ParentName } else { $null }
+                commandLine = if ($processMetadata) { $processMetadata.CommandLine } else { $null }
+            }) | Out-Null
+        } catch {
+        }
+    }
+
+    return @($items)
+}
+
 function Write-CtuSessionManifest {
     param(
         $DesktopProcess,
@@ -605,6 +640,7 @@ function Write-CtuSessionManifest {
             desktopPid = $desktopPid
             servicePid = $servicePid
             wrapperPids = @(Get-CtuWrapperProcessIds)
+            wrapperProcesses = @(Get-CtuWrapperProcessInventory)
             runtimeRoot = $controllerRuntimeRoot
             controllerPluginPath = (Get-ControllerPluginPath)
         }

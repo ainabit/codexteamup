@@ -25,8 +25,10 @@ Recent architecture work tightens the runtime around the parts that are most lik
 - Controller runtime files live under `.ctu/runtime`, separate from normal source build output, so local build/test runs are not coupled to the running CTU process.
 - Controller-only fixes can be published and reloaded without restarting CTU, using the controller runtime publish script and the controller reload MCP/HTTP endpoint.
 - CTU now writes both machine JSONL logs and human-readable `.log` files for controller, app-server/API adapter, and wrapper diagnostics under `.codexteamup/logs`.
+- The wrapper bridge is now owner-validated. Multiple wrapped Codex app-server processes may exist, but only the wrapper that owns the per-pipe bridge lease exposes the CTU bridge, and the service performs a fast `ctu/hello` handshake before sending Desktop control requests.
+- A continuity guardian regression was fixed where superseded results for the same task could be evaluated repeatedly and burn CPU. The guardian now evaluates the latest result per task, and the service background sweep is less aggressive.
 - Live smoke tests exercise the real Codex Desktop context: creating a visible agent, having one agent create peer agents, replacing a stale agent binding, proving queue-first delivery, delayed agent-owned continuation wakeups, live error paths, and stale claimed-task recovery.
-- Test runs now write a live progress snapshot beside the safety report so long live suites show the current phase, scenario number, last observed line, and final report target instead of looking like a black box.
+- Test runs now write a live progress snapshot beside the safety report with one row per test, `running`/`passed`/`failed` status, timing, and a slowest-tests summary. Long live suites can also be launched in their own visible PowerShell console with colored RUN/PASS/FAIL output and Ctrl+C cancellation.
 - New projects can start with a short-lived `ctu/bootstrap` chat. The bootstrap agent can fetch central CTU startup instructions through MCP and initialize only the minimal `.codexteamup` project state before handing off to `ctu/architect`.
 - Desktop wakeups are treated as best-effort delivery. AgentBus remains the durable truth, calls use short ACK/NACK behavior, and controller wakeups are serialized to avoid bursty Desktop app-server cancellations.
 
@@ -224,6 +226,21 @@ To return to normal Codex Desktop behavior, close Desktop and start it normally 
 dotnet build
 dotnet run --project tests\CodexTeamUp.Tests
 ```
+
+The repeatable CTU safety-net runner builds into isolated artifacts, runs deterministic tests, and can optionally run live Codex Desktop smoke scenarios against the sibling `codexteamup.test` workspace:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\test-codexteamup.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\test-codexteamup.ps1 -UseTestWorkspace -LiveAll
+```
+
+For long live runs, start the runner in its own visible console:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\test-codexteamup.ps1 -UseTestWorkspace -LiveAll -OpenConsole
+```
+
+That console stays open, uses colored RUN/PASS/FAIL output, and can be cancelled with `Ctrl+C`. Every run also writes a Markdown safety report plus a live progress Markdown/JSON file under `.codexteamup/reports`, including per-test durations and a slowest-tests section.
 
 For the smallest fresh-checkout proof path after startup, run:
 

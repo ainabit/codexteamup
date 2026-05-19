@@ -15,12 +15,18 @@ public sealed class WrapperPipeAppServerClient : IAppServerClient
 
     private readonly string _pipeName;
     private readonly TimeSpan _connectTimeout;
+    private readonly TimeSpan _handshakeTimeout;
     private readonly TimeSpan _responseTimeout;
 
-    public WrapperPipeAppServerClient(string? pipeName = null, TimeSpan? connectTimeout = null, TimeSpan? responseTimeout = null)
+    public WrapperPipeAppServerClient(
+        string? pipeName = null,
+        TimeSpan? connectTimeout = null,
+        TimeSpan? responseTimeout = null,
+        TimeSpan? handshakeTimeout = null)
     {
         _pipeName = string.IsNullOrWhiteSpace(pipeName) ? DefaultPipeName : pipeName.Trim();
         _connectTimeout = connectTimeout ?? TimeSpan.FromSeconds(5);
+        _handshakeTimeout = handshakeTimeout ?? ResolveHandshakeTimeout();
         _responseTimeout = responseTimeout ?? ResolveResponseTimeout();
     }
 
@@ -216,6 +222,12 @@ public sealed class WrapperPipeAppServerClient : IAppServerClient
             };
             using var reader = new StreamReader(pipe, Encoding.UTF8, detectEncodingFromByteOrderMarks: false, leaveOpen: true);
 
+            var handshake = await PerformHandshakeAsync(writer, reader, cancellationToken).ConfigureAwait(false);
+            if (!handshake.Succeeded)
+            {
+                return handshake;
+            }
+
             await writer.WriteLineAsync(line).ConfigureAwait(false);
             using var responseCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             responseCancellation.CancelAfter(_responseTimeout);
@@ -234,6 +246,63 @@ public sealed class WrapperPipeAppServerClient : IAppServerClient
         catch (Exception ex) when (ex is IOException or TimeoutException or UnauthorizedAccessException or InvalidOperationException)
         {
             return new AppServerCallResult(false, null, SafeText.Redact(ex.Message));
+        }
+    }
+
+    private async Task<AppServerCallResult> PerformHandshakeAsync(
+        StreamWriter writer,
+        StreamReader reader,
+        CancellationToken cancellationToken)
+    {
+        var hello = BuildRequest("ctu/hello", new
+        {
+            client = "CodexTeamUp.Service",
+            protocol = 1
+        });
+
+        await writer.WriteLineAsync(hello).ConfigureAwait(false);
+
+        using var handshakeCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        handshakeCancellation.CancelAfter(_handshakeTimeout);
+        string? response;
+        try
+        {
+            response = await reader.ReadLineAsync(handshakeCancellation.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            return new AppServerCallResult(false, null, $"Timed out waiting for wrapper pipe handshake '{_pipeName}' after {_handshakeTimeout.TotalSeconds:n0}s.");
+        }
+
+        if (string.IsNullOrWhiteSpace(response))
+        {
+            return new AppServerCallResult(false, null, "Wrapper pipe handshake returned an empty response.");
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(response);
+            var root = doc.RootElement;
+            if (root.TryGetProperty("error", out var error))
+            {
+                var message = error.TryGetProperty("message", out var messageElement)
+                    ? messageElement.GetString()
+                    : error.GetRawText();
+                return new AppServerCallResult(false, null, $"Wrapper pipe handshake failed: {message}");
+            }
+
+            if (!root.TryGetProperty("result", out var result)
+                || !result.TryGetProperty("bridgeOwner", out var bridgeOwner)
+                || bridgeOwner.ValueKind != JsonValueKind.True)
+            {
+                return new AppServerCallResult(false, null, $"Wrapper pipe handshake did not confirm a valid bridge owner: {SafeText.Preview(response, 300)}");
+            }
+
+            return new AppServerCallResult(true, result.GetRawText(), null);
+        }
+        catch (JsonException ex)
+        {
+            return new AppServerCallResult(false, null, $"Invalid wrapper pipe handshake JSON response: {ex.Message}");
         }
     }
 
@@ -307,6 +376,14 @@ public sealed class WrapperPipeAppServerClient : IAppServerClient
         return int.TryParse(raw, out var milliseconds) && milliseconds > 0
             ? TimeSpan.FromMilliseconds(milliseconds)
             : TimeSpan.FromSeconds(30);
+    }
+
+    private static TimeSpan ResolveHandshakeTimeout()
+    {
+        var raw = Environment.GetEnvironmentVariable("CTU_APP_SERVER_HANDSHAKE_TIMEOUT_MS");
+        return int.TryParse(raw, out var milliseconds) && milliseconds > 0
+            ? TimeSpan.FromMilliseconds(milliseconds)
+            : TimeSpan.FromSeconds(2);
     }
 
     private static bool IsThreadNotFound(string? error)
