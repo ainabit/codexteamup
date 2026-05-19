@@ -12,6 +12,7 @@ Owns:
 - thin ingress/egress channel adapters such as file exchange, public MCP, or REST/webhook adapters
 - serialization, redaction, timeout plumbing
 - defensive try/catch and project-local logging
+- wrapper bridge-owner election and fast bridge handshake validation
 
 Must stay thin.
 

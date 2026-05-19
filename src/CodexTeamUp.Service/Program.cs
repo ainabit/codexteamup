@@ -93,7 +93,7 @@ finally
 
 static async Task RunControllerStartupSweepAsync(ICtuController controller, CtuJsonLogger? logger, CancellationToken cancellationToken)
 {
-    var heartbeatDelay = TimeSpan.FromMilliseconds(500);
+    var heartbeatDelay = TimeSpan.FromSeconds(2);
     try
     {
         await controller.RunStartupSweepAsync(cancellationToken).ConfigureAwait(false);

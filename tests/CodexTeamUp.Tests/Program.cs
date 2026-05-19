@@ -32,6 +32,7 @@ var tests = new (string Name, Func<Task> Body)[]
     ("HTTP request reader preserves UTF-8 body", HttpRequestReaderPreservesUtf8Body),
     ("Wrapper protocol identifies bridge responses", () => Task.Run(WrapperProtocolIdentifiesBridgeResponses)),
     ("Wrapper pipe client parses JSON-RPC result", WrapperPipeClientParsesResult),
+    ("Wrapper pipe client rejects non-owner bridge", WrapperPipeClientRejectsNonOwnerBridge),
     ("Wrapper pipe client times out stalled responses", WrapperPipeClientTimesOutStalledResponses),
     ("Wrapper pipe send turn resumes without historical turns", WrapperPipeSendTurnResumesWithoutHistoricalTurns),
     ("Wrapper pipe send turn retries thread-not-found wakeups", WrapperPipeSendTurnRetriesThreadNotFoundWakeups),
@@ -74,6 +75,7 @@ var tests = new (string Name, Func<Task> Body)[]
     ("Controller delivery loop recovers stale claimed task", () => Task.Run(ControllerDeliveryLoopRecoversStaleClaimedTask)),
     ("Controller result notify retry persists metadata and retries from startup sweep", () => Task.Run(ControllerResultNotifyRetryPersistsMetadataAndRetries)),
     ("Controller guardian evaluates result into continuity state", () => Task.Run(ControllerGuardianEvaluatesResultIntoContinuityState)),
+    ("Controller guardian ignores superseded task results", () => Task.Run(ControllerGuardianIgnoresSupersededTaskResults)),
     ("Controller guardian treats done result status as completed", () => Task.Run(ControllerGuardianTreatsDoneResultStatusAsCompleted)),
     ("Controller guardian skips unchanged queued task observation", () => Task.Run(ControllerGuardianSkipsUnchangedQueuedTaskObservation)),
     ("Controller guardian resumes dispatch from continuity state", () => Task.Run(ControllerGuardianResumesDispatchFromContinuityState)),
@@ -570,7 +572,7 @@ static async Task WrapperPipeClientParsesResult()
             NewLine = "\n",
             AutoFlush = true
         };
-        var request = await reader.ReadLineAsync().ConfigureAwait(false);
+        var request = await ReadBridgeRequestAfterHandshakeAsync(reader, writer).ConfigureAwait(false);
         True(request?.Contains("\"method\":\"thread/list\"", StringComparison.Ordinal) == true);
         await writer.WriteLineAsync("{\"result\":{\"data\":[]}}").ConfigureAwait(false);
     });
@@ -582,6 +584,37 @@ static async Task WrapperPipeClientParsesResult()
     Equal("{\"data\":[]}", result.ResultJson);
 }
 
+static async Task WrapperPipeClientRejectsNonOwnerBridge()
+{
+    var pipeName = $"ctu-test-{Guid.NewGuid():N}";
+    var sawActualRequest = false;
+    var serverTask = Task.Run(async () =>
+    {
+        await using var server = new NamedPipeServerStream(pipeName, PipeDirection.InOut, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
+        await server.WaitForConnectionAsync().ConfigureAwait(false);
+        using var reader = new StreamReader(server, Encoding.UTF8, detectEncodingFromByteOrderMarks: false, leaveOpen: true);
+        await using var writer = new StreamWriter(server, new UTF8Encoding(false), leaveOpen: true)
+        {
+            NewLine = "\n",
+            AutoFlush = true
+        };
+        var hello = await reader.ReadLineAsync().ConfigureAwait(false);
+        True(hello?.Contains("\"method\":\"ctu/hello\"", StringComparison.Ordinal) == true);
+        await writer.WriteLineAsync(BridgeHelloResponse(bridgeOwner: false)).ConfigureAwait(false);
+        var readRequest = reader.ReadLineAsync();
+        var completed = await Task.WhenAny(readRequest, Task.Delay(TimeSpan.FromMilliseconds(150))).ConfigureAwait(false);
+        sawActualRequest = ReferenceEquals(completed, readRequest) && !string.IsNullOrWhiteSpace(await readRequest.ConfigureAwait(false));
+    });
+
+    var client = new WrapperPipeAppServerClient(pipeName, TimeSpan.FromSeconds(5));
+    var result = await client.CallAsync("thread/list", new { limit = 1 }).ConfigureAwait(false);
+    await serverTask.ConfigureAwait(false);
+
+    True(!result.Succeeded);
+    True(result.Error?.Contains("valid bridge owner", StringComparison.OrdinalIgnoreCase) == true);
+    True(!sawActualRequest);
+}
+
 static async Task WrapperPipeClientTimesOutStalledResponses()
 {
     var pipeName = $"ctu-test-{Guid.NewGuid():N}";
@@ -590,7 +623,12 @@ static async Task WrapperPipeClientTimesOutStalledResponses()
         await using var server = new NamedPipeServerStream(pipeName, PipeDirection.InOut, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
         await server.WaitForConnectionAsync().ConfigureAwait(false);
         using var reader = new StreamReader(server, Encoding.UTF8, detectEncodingFromByteOrderMarks: false, leaveOpen: true);
-        var request = await reader.ReadLineAsync().ConfigureAwait(false);
+        await using var writer = new StreamWriter(server, new UTF8Encoding(false), leaveOpen: true)
+        {
+            NewLine = "\n",
+            AutoFlush = true
+        };
+        var request = await ReadBridgeRequestAfterHandshakeAsync(reader, writer).ConfigureAwait(false);
         True(request?.Contains("\"method\":\"thread/list\"", StringComparison.Ordinal) == true);
         await Task.Delay(TimeSpan.FromSeconds(1)).ConfigureAwait(false);
     });
@@ -601,6 +639,21 @@ static async Task WrapperPipeClientTimesOutStalledResponses()
 
     True(!result.Succeeded);
     True(result.Error?.Contains("Timed out waiting for wrapper pipe", StringComparison.Ordinal) == true);
+}
+
+static async Task<string?> ReadBridgeRequestAfterHandshakeAsync(StreamReader reader, StreamWriter writer)
+{
+    var hello = await reader.ReadLineAsync().ConfigureAwait(false);
+    True(hello?.Contains("\"method\":\"ctu/hello\"", StringComparison.Ordinal) == true);
+    await writer.WriteLineAsync(BridgeHelloResponse(bridgeOwner: true)).ConfigureAwait(false);
+    return await reader.ReadLineAsync().ConfigureAwait(false);
+}
+
+static string BridgeHelloResponse(bool bridgeOwner)
+{
+    return bridgeOwner
+        ? "{\"result\":{\"status\":\"hello\",\"bridgeOwner\":true,\"wrapperPid\":1,\"childPid\":2}}"
+        : "{\"result\":{\"status\":\"hello\",\"bridgeOwner\":false,\"wrapperPid\":1,\"childPid\":2}}";
 }
 
 static async Task WrapperPipeSendTurnResumesWithoutHistoricalTurns()
@@ -620,7 +673,7 @@ static async Task WrapperPipeSendTurnResumesWithoutHistoricalTurns()
                 AutoFlush = true
             };
 
-            var request = await reader.ReadLineAsync().ConfigureAwait(false);
+            var request = await ReadBridgeRequestAfterHandshakeAsync(reader, writer).ConfigureAwait(false);
             True(!string.IsNullOrWhiteSpace(request));
             requests.Add(request!);
             await writer.WriteLineAsync(i == 0
@@ -656,7 +709,7 @@ static async Task WrapperPipeSendTurnRetriesThreadNotFoundWakeups()
                 AutoFlush = true
             };
 
-            var request = await reader.ReadLineAsync().ConfigureAwait(false);
+            var request = await ReadBridgeRequestAfterHandshakeAsync(reader, writer).ConfigureAwait(false);
             True(!string.IsNullOrWhiteSpace(request));
             requests.Add(request!);
             await writer.WriteLineAsync(i switch
@@ -702,7 +755,7 @@ static async Task WrapperPipeSendTurnRetriesMissingRolloutWakeups()
                 AutoFlush = true
             };
 
-            var request = await reader.ReadLineAsync().ConfigureAwait(false);
+            var request = await ReadBridgeRequestAfterHandshakeAsync(reader, writer).ConfigureAwait(false);
             True(!string.IsNullOrWhiteSpace(request));
             requests.Add(request!);
             await writer.WriteLineAsync(i switch
@@ -744,7 +797,7 @@ static async Task WrapperPipeSendsRuntimeSettings()
                 AutoFlush = true
             };
 
-            var request = await reader.ReadLineAsync().ConfigureAwait(false);
+            var request = await ReadBridgeRequestAfterHandshakeAsync(reader, writer).ConfigureAwait(false);
             True(!string.IsNullOrWhiteSpace(request));
             requests.Add(request!);
             await writer.WriteLineAsync(i == 0
@@ -3480,6 +3533,66 @@ static void ControllerGuardianEvaluatesResultIntoContinuityState()
     Equal(task.Id, state?.CorrelationId);
     True(bus.ListEvents(300).Any(evt => evt.Type == "continuity.state_created"));
     True(bus.ListEvents(300).Any(evt => evt.TaskId == task.Id && evt.Type.StartsWith("continuity.state")));
+}
+
+static void ControllerGuardianIgnoresSupersededTaskResults()
+{
+    var root = NewTestDirectory();
+    var busRoot = Path.Combine(root, ".codexteamup", "agentbus");
+    var bus = new AgentBusStore(busRoot);
+    bus.Initialize();
+    bus.RegisterAgent(new AgentDefinition
+    {
+        Id = "ctu/architect",
+        Role = "Architect",
+        ThreadId = "thread-architect",
+        Cwd = root,
+        Status = "active"
+    });
+    bus.RegisterAgent(new AgentDefinition
+    {
+        Id = "ctu/worker",
+        Role = "Worker",
+        DisplayName = "ctu/worker",
+        ThreadId = "thread-worker",
+        Cwd = root,
+        ReturnTo = "ctu/architect",
+        Status = "active"
+    });
+
+    var task = bus.CreateTask(
+        "ctu/architect",
+        "ctu/worker",
+        "Superseded result",
+        "Produce multiple outcomes.",
+        "codexteamup",
+        root,
+        [],
+        "ctu/architect");
+    bus.ClaimTask(task.Id, "ctu/worker");
+    bus.WriteResult(task.Id, "Needs review first.", "review", "ctu/worker", "ctu/architect", null, [], []);
+    Thread.Sleep(20);
+    var latestResult = bus.WriteResult(task.Id, "Final blocker.", "failed", "ctu/worker", "ctu/architect", null, [], []);
+
+    var appServer = new FakeAppServerClient("""{"data":[]}""");
+    var controller = new DefaultCtuController(busRoot, appServer);
+    controller.RunStartupSweepAsync().GetAwaiter().GetResult();
+    var firstState = new ExecutionContinuityStateStore(busRoot).ReadLatest(task.Id);
+    controller.RunStartupSweepAsync().GetAwaiter().GetResult();
+
+    var continuity = new ExecutionContinuityStateStore(busRoot);
+    continuity.Initialize();
+    var state = continuity.ReadLatest(task.Id);
+    Equal(ExecutionContinuityStateKind.BlockedNeedsHuman, state?.State);
+    Equal(false, state?.ShouldContinue);
+    Equal(latestResult.Id, state?.LastOutcomeRef);
+    Equal(firstState?.AttemptCount, state?.AttemptCount);
+    Equal(firstState?.StateId, state?.StateId);
+
+    var events = bus.ListEvents(300).Where(evt => evt.TaskId == task.Id).ToList();
+    True(events.Any(evt => evt.Type == "continuity.terminal_recorded"));
+    True(events.Any(evt => evt.Type == "continuity.guardian_evaluated"
+        && evt.Message?.Contains(latestResult.Id, StringComparison.OrdinalIgnoreCase) == true));
 }
 
 static void ControllerGuardianTreatsDoneResultStatusAsCompleted()
