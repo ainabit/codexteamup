@@ -78,6 +78,16 @@ function Resolve-CodexDesktopExe {
     Add-CandidatePath -Candidates $candidates -Path ([Environment]::GetEnvironmentVariable("CODEX_DESKTOP_EXE", "Process"))
     Add-CandidatePath -Candidates $candidates -Path ([Environment]::GetEnvironmentVariable("CTU_CODEX_DESKTOP_EXE", "Process"))
 
+    $command = Get-Command codex -ErrorAction SilentlyContinue
+    if ($command -and $command.Source) {
+        $source = [Environment]::ExpandEnvironmentVariables($command.Source)
+        $resourcesDir = Split-Path -Parent $source
+        $appDir = Split-Path -Parent $resourcesDir
+        if ((Split-Path -Leaf $resourcesDir) -ieq "resources") {
+            Add-CandidatePath -Candidates $candidates -Path (Join-Path $appDir "Codex.exe")
+        }
+    }
+
     if (Get-Command Get-AppxPackage -ErrorAction SilentlyContinue) {
         $packages = @(Get-AppxPackage -Name "OpenAI.Codex" -ErrorAction SilentlyContinue |
             Sort-Object -Property @{ Expression = { [version]$_.Version }; Descending = $true })
