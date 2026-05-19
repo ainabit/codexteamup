@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 using CodexTeamUp.Core;
 
@@ -689,14 +690,15 @@ public sealed class AgentBusStore
         }
     }
 
-    /// <summary>Serializes event appends to avoid concurrent writers corrupting JSONL event rows.</summary>
+    /// <summary>Serializes event appends and tolerates short external file locks from live CTU readers.</summary>
     private void AppendEvent(AgentBusEvent evt)
     {
         Directory.CreateDirectory(RootDirectory);
         var lineOptions = new JsonSerializerOptions(JsonFile.Options) { WriteIndented = false };
         var line = JsonSerializer.Serialize(evt, lineOptions) + Environment.NewLine;
-        const int lockWaitAttempts = 100;
-        const int lockWaitMilliseconds = 5;
+        var bytes = Encoding.UTF8.GetBytes(line);
+        const int lockWaitAttempts = 400;
+        const int lockWaitMilliseconds = 10;
 
         for (var attempt = 0; attempt < lockWaitAttempts; attempt++)
         {
@@ -707,8 +709,25 @@ public sealed class AgentBusStore
                 continue;
             }
 
-            File.AppendAllText(EventsPath, line);
-            return;
+            try
+            {
+                using var stream = new FileStream(
+                    EventsPath,
+                    FileMode.Append,
+                    FileAccess.Write,
+                    FileShare.ReadWrite | FileShare.Delete);
+                stream.Write(bytes);
+                stream.Flush();
+                return;
+            }
+            catch (IOException) when (attempt + 1 < lockWaitAttempts)
+            {
+                Thread.Sleep(lockWaitMilliseconds);
+            }
+            catch (UnauthorizedAccessException) when (attempt + 1 < lockWaitAttempts)
+            {
+                Thread.Sleep(lockWaitMilliseconds);
+            }
         }
 
         throw new IOException("Timed out acquiring event append lock.");

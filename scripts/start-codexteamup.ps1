@@ -385,7 +385,14 @@ if ($RestartSupervisorMode -and -not $ForceStopExisting) {
 }
 
 if ([string]::IsNullOrWhiteSpace($PipeName)) {
-    $PipeName = "codexteamup-appserver-$([Guid]::NewGuid().ToString("N").Substring(0, 12))"
+    $existingSession = Read-CtuSessionManifest
+    $existingPipeName = if ($NoLaunch -and $null -ne $existingSession) { Get-SessionPropertyValue -Session $existingSession -Name "pipeName" } else { $null }
+    if ($NoLaunch -and -not [string]::IsNullOrWhiteSpace($existingPipeName)) {
+        $PipeName = [string]$existingPipeName
+        Write-Host "Reusing existing CTU pipe for service-only startup: $PipeName"
+    } else {
+        $PipeName = "codexteamup-appserver-$([Guid]::NewGuid().ToString("N").Substring(0, 12))"
+    }
 } else {
     $PipeName = $PipeName.Trim()
 }
